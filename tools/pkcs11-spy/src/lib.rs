@@ -726,6 +726,22 @@ mod tests {
     }
 
     #[test]
+    fn panics_are_converted_to_ckr_general_error() {
+        assert_eq!(guarded(|| panic!("boom")), CKR_GENERAL_ERROR);
+        assert_eq!(guarded(|| CKR_OK), CKR_OK);
+    }
+
+    #[test]
+    fn recursion_depth_is_bounded() {
+        let guards: Vec<_> = (0..MAX_DEPTH)
+            .map(|_| DepthGuard::enter().unwrap())
+            .collect();
+        assert!(DepthGuard::enter().is_none(), "depth limit not enforced");
+        drop(guards);
+        assert!(DepthGuard::enter().is_some(), "depth not released");
+    }
+
+    #[test]
     fn null_output_pointers_are_rejected_without_loading() {
         // SAFETY: NULL is exactly the case under test; nothing is dereferenced.
         unsafe {
