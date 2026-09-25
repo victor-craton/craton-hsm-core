@@ -65,6 +65,40 @@ e5f6a7b8...  craton_hsm-0.9.0-x86_64-pc-windows-msvc.dll
 c9d0e1f2...  libcraton_hsm-0.9.0-aarch64-apple-darwin.dylib
 ```
 
+### 4. Module Self-Integrity Signature (`.sig` sidecar)
+
+Independently of the distribution signatures above, the module verifies its
+own binary at `C_Initialize` (FIPS 140-3 software integrity test) against an
+Ed25519 signature in a `.sig` sidecar file next to the library
+(`libcraton_hsm.so` → `libcraton_hsm.sig`, `craton_hsm.dll` → `craton_hsm.sig`).
+The public key is embedded at build time.
+
+```bash
+# One-time: generate the signing key (encrypted PEM by default; the output
+# directory must be private and outside any git work tree)
+./tools/generate-integrity-keypair.sh            # Linux/macOS
+.\tools\generate-integrity-keypair.ps1           # Windows
+
+# Build with the printed public key embedded
+CRATON_HSM_INTEGRITY_PUBLIC_KEY=<64 hex chars> cargo build --release --locked --lib
+
+# Sign the built library (writes the .sig sidecar; self-verifies first)
+./tools/sign-integrity.sh target/release/libcraton_hsm.so
+.\tools\sign-integrity.ps1 -LibPath target\release\craton_hsm.dll
+```
+
+- For unattended signing, set `CRATON_HSM_SIGNING_KEY` (key path) and
+  `CRATON_HSM_SIGNING_KEY_PASS_FILE` (a file readable only by the build user
+  holding the key passphrase). Never pass the key or passphrase as a
+  command-line argument.
+- Key custody: prefer keeping the signing key in an HSM/KMS. If it is a file,
+  keep it encrypted, owner-only (the scripts create it with `umask 077` /
+  an owner-only ACL), off shared build hosts and never in version control.
+- The former HMAC tooling (`tools/compute-integrity-hmac.sh` / `.ps1`) has
+  been removed: the module no longer verifies `.hmac` sidecars, and the old
+  script exposed the HMAC key in the process argument list. Rotate any key
+  that was used with it and delete stale `.hmac` files.
+
 ## CI/CD Integration
 
 ### GitHub Actions Release Workflow

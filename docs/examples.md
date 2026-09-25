@@ -95,29 +95,61 @@ ks.load(null, "87654321".toCharArray());
 cd craton-hsm-daemon
 cargo run --release -- --config craton_hsm.toml
 
-# Use craton-hsm-admin CLI
-cd tools/craton-hsm-admin
-cargo run --release -- init-token --label "RemoteToken" --so-pin 12345678
-cargo run --release -- generate-key --type rsa --bits 2048 --label "daemon-key" --pin 87654321
+# Key generation and other token operations go through PKCS#11
+# (C_GenerateKey / C_GenerateKeyPair) or the daemon's gRPC API.
+# The admin CLI (below) never takes PINs on the command line.
 ```
 
 ## Using the Admin CLI
 
+`craton-hsm-admin` never accepts PINs or passphrases as arguments or
+environment variables: it prompts for them on the terminal without echo, so
+they do not end up in shell history or the process list. Run
+`craton-hsm-admin --help` (and `<command> --help`) for the authoritative
+syntax; exit codes are listed at the end of `--help`.
+
 ```bash
 cd tools/craton-hsm-admin
+ADMIN="cargo run --release --"
+CFG=/etc/craton_hsm/craton_hsm.toml   # default; must exist, owned by you or root, not group/world-writable
 
-# Token management
-cargo run --release -- init-token --label "MyToken" --so-pin 12345678
-cargo run --release -- init-pin --pin 87654321 --so-pin 12345678
+# Read-only status (shows whether token state was loaded from persistent storage)
+$ADMIN --config "$CFG" status
+$ADMIN --config "$CFG" token info --json
 
-# Key management
-cargo run --release -- generate-key --type aes --bits 256 --label "my-aes" --pin 87654321
-cargo run --release -- list-objects --pin 87654321
+# Verify the tamper-evident audit log on disk (exit code 6 if the chain is broken)
+$ADMIN --config "$CFG" audit verify-chain
 
-# Backup and restore
-cargo run --release -- backup --pin 12345678 --output backup.enc
-cargo run --release -- restore --pin 12345678 --input backup.enc
+# Token initialisation: prompts for the SO PIN (current SO PIN if already
+# initialised) and requires typing "initialize" (or --yes for automation)
+$ADMIN --config "$CFG" token init --label "MyToken"
+
+# PIN management (prompts for PINs)
+$ADMIN --config "$CFG" pin change --user-type user
+$ADMIN --config "$CFG" pin reset          # SO resets the User PIN
+
+# Keys: list as User; import a raw 16/24/32-byte AES key; delete with typed confirmation
+$ADMIN --config "$CFG" key list --role user
+$ADMIN --config "$CFG" key import --file aes256.key --label "my-aes" --type aes
+$ADMIN --config "$CFG" key delete --handle 42 --role user
+
+# Backup / restore (SO login + typed confirmation; passphrase is prompted)
+$ADMIN --config "$CFG" backup --output token.rhbk
+$ADMIN --config "$CFG" restore --input token.rhbk --verify-only   # decrypt/validate only
+$ADMIN --config "$CFG" restore --input token.rhbk
+
+# Audit export for SIEM (SO login + typed confirmation)
+$ADMIN --config "$CFG" audit export-ndjson > audit.ndjson
 ```
+
+PINs must be at least 8 characters, contain at least 4 distinct characters
+and must not be a sequence, a repeated pattern or a common value.
+
+> **Standalone mode.** Until the CLI can open the persisted token state,
+> commands that would otherwise have no lasting effect or need the SO PIN
+> (`token init`, `pin *`, `key *`, `backup`, `restore`, `audit dump/export-*`)
+> refuse with exit code 5 and make no changes. `status`, `token info`,
+> `audit verify-chain` and `restore --verify-only` work in every mode.
 
 ## Configuration Examples
 
