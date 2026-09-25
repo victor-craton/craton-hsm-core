@@ -98,11 +98,12 @@ fn setup_session() -> CK_SESSION_HANDLE {
 }
 
 // =============================================================================
-// Test: Ed25519 keygen is blocked in FIPS mode
+// Test: Ed25519 keygen is allowed in FIPS mode (EdDSA is approved by
+// FIPS 186-5; H2-21 corrected the policy table)
 // =============================================================================
 
 #[test]
-fn fips_mode_blocks_ed25519_keygen() {
+fn fips_mode_allows_ed25519_keygen() {
     let session = setup_session();
 
     let mut mechanism = CK_MECHANISM {
@@ -150,8 +151,8 @@ fn fips_mode_blocks_ed25519_keygen() {
         &mut priv_key,
     );
     assert_eq!(
-        rv, CKR_MECHANISM_INVALID,
-        "Ed25519 keygen should be blocked in FIPS mode, got 0x{:08X}",
+        rv, CKR_OK,
+        "Ed25519 keygen should be allowed in FIPS mode (FIPS 186-5), got 0x{:08X}",
         rv
     );
 }
@@ -274,7 +275,6 @@ fn fips_mode_allows_aes_keygen() {
 // =============================================================================
 
 #[test]
-#[ignore = "RSA keygen returns CKR_MECHANISM_PARAM_INVALID — needs investigation"]
 fn fips_mode_allows_rsa_sign_verify() {
     let session = setup_session();
 
@@ -536,11 +536,10 @@ fn fips_mode_mechanism_list_excludes_non_approved() {
     let rv = C_GetMechanismList(0, ptr::null_mut(), &mut count);
     assert_eq!(rv, CKR_OK);
 
-    // Should have fewer mechanisms than the full list (41 total - EdDSA, SHA-1, all PQC)
-    // Expected excluded: CKM_EDDSA, CKM_SHA_1, and 9 PQC mechanisms = 11 excluded
-    // So approximately 30 mechanisms
+    // Should have fewer mechanisms than the full list (SHA-1 and all PQC
+    // mechanisms are excluded; EdDSA is approved per FIPS 186-5).
     assert!(
-        count < 41,
+        count < craton_hsm::crypto::mechanisms::supported_mechanisms().len() as CK_ULONG,
         "FIPS mode should report fewer mechanisms than full list, got {}",
         count
     );
@@ -550,10 +549,10 @@ fn fips_mode_mechanism_list_excludes_non_approved() {
     let rv = C_GetMechanismList(0, mechs.as_mut_ptr(), &mut count);
     assert_eq!(rv, CKR_OK);
 
-    // Verify EdDSA is NOT in the list
+    // EdDSA (Ed25519) is approved by FIPS 186-5
     assert!(
-        !mechs.contains(&CKM_EDDSA),
-        "CKM_EDDSA should not be in FIPS mechanism list"
+        mechs.contains(&CKM_EDDSA),
+        "CKM_EDDSA should be in the FIPS mechanism list"
     );
 
     // Verify SHA-1 is NOT in the list
@@ -772,8 +771,10 @@ fn fips_approved_classification() {
     assert!(is_fips_approved(CKM_ECDH1_DERIVE));
     assert!(is_fips_approved(CKM_ECDH1_COFACTOR_DERIVE));
 
+    // EdDSA is approved (FIPS 186-5)
+    assert!(is_fips_approved(CKM_EDDSA));
+
     // NOT approved
-    assert!(!is_fips_approved(CKM_EDDSA));
     assert!(!is_fips_approved(CKM_SHA_1));
     assert!(!is_fips_approved(CKM_ML_KEM_512));
     assert!(!is_fips_approved(CKM_ML_KEM_768));
@@ -800,13 +801,13 @@ fn validate_mechanism_policy_unit() {
     assert!(validate_mechanism_for_policy(CKM_EDDSA, &default_config, false).is_ok());
     assert!(validate_mechanism_for_policy(CKM_ML_KEM_768, &default_config, false).is_ok());
 
-    // FIPS mode: EdDSA blocked
+    // FIPS mode: SHA-1 and PQC blocked, EdDSA allowed (FIPS 186-5)
     let fips_config = AlgorithmConfig {
         fips_approved_only: true,
         enable_pqc: false,
         ..AlgorithmConfig::default()
     };
-    assert!(validate_mechanism_for_policy(CKM_EDDSA, &fips_config, false).is_err());
+    assert!(validate_mechanism_for_policy(CKM_EDDSA, &fips_config, false).is_ok());
     assert!(validate_mechanism_for_policy(CKM_SHA_1, &fips_config, false).is_err());
     assert!(validate_mechanism_for_policy(CKM_ML_KEM_768, &fips_config, false).is_err());
     assert!(validate_mechanism_for_policy(CKM_SHA256, &fips_config, false).is_ok());

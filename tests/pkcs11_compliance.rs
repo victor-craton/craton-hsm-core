@@ -362,9 +362,11 @@ fn test_full_pkcs11_lifecycle() {
     assert_eq!(rv, CKR_OK);
     assert_ne!(random_data, [0u8; 32]); // Statistically impossible to be all zeros
 
-    // 29. SeedRandom should return RANDOM_SEED_NOT_SUPPORTED (we use OsRng)
+    // 29. SeedRandom mixes the seed into the SP 800-90A DRBG as additional
+    // input (RustCrypto backend); backends without a seeding API report
+    // RANDOM_SEED_NOT_SUPPORTED.
     let rv = C_SeedRandom(session, random_data.as_mut_ptr(), 32);
-    assert_eq!(rv, CKR_RANDOM_SEED_NOT_SUPPORTED);
+    assert!(rv == CKR_OK || rv == CKR_RANDOM_SEED_NOT_SUPPORTED, "0x{:08X}", rv);
 
     // 30. C_GetMechanismList
     let mut mech_count: CK_ULONG = 0;
