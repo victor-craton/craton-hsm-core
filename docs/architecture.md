@@ -2,7 +2,11 @@
 
 ## Overview
 
-Craton HSM is a software HSM (Hardware Security Module emulator) that exposes a PKCS#11 v3.0-compliant C ABI. It is written entirely in Rust to leverage the language's memory safety and concurrency guarantees. The module can be consumed three ways: as a dynamically loaded library, over gRPC, or via the admin CLI.
+Craton HSM is a software HSM that exposes a PKCS#11 C ABI (the v2.40 function set plus the v3.0 interface-discovery functions `C_GetInterfaceList` / `C_GetInterface`). It is written in Rust. It can be consumed three ways: as a dynamically loaded library, over gRPC via the daemon, or via the admin CLI.
+
+Only the first is the cryptographic module in the FIPS 140-3 sense: the
+daemon and the admin CLI link the Rust library directly and are outside the
+module boundary (see [fips-140-3-certification.md §1.5](fips-140-3-certification.md#15-module-boundary-canonical-definition)).
 
 ## High-Level Module Diagram
 
@@ -18,7 +22,7 @@ Craton HSM is a software HSM (Hardware Security Module emulator) that exposes a 
                 ┌───────────────┐ ┌─────────┐ ┌──────────────┐
                 │  pkcs11_abi/  │ │craton_hsm- │ │craton-hsm-admin │
                 │  functions.rs │ │ daemon  │ │              │
-                │  70+ exports  │ │  tonic  │ │  clap CLI    │
+                │  v2.40 + v3.0 │ │  tonic  │ │  clap CLI    │
                 └──────┬────────┘ └────┬────┘ └──────┬───────┘
                        │               │             │
                        └───────────────┼─────────────┘
@@ -54,7 +58,7 @@ Craton HSM is a software HSM (Hardware Security Module emulator) that exposes a 
 ## Source Layout
 
 ```
-craton_hsm/
+craton-hsm/
 ├── Cargo.toml                 Workspace root + core library package
 ├── src/
 │   ├── lib.rs                 Crate root (module declarations)
@@ -63,7 +67,7 @@ craton_hsm/
 │   ├── pkcs11_abi/
 │   │   ├── types.rs           CK_* type aliases and C struct definitions
 │   │   ├── constants.rs       CKR_*, CKM_*, CKO_*, CKA_* constants
-│   │   └── functions.rs       70+ #[no_mangle] extern "C" exports
+│   │   └── functions.rs       #[no_mangle] extern "C" exports (v2.40 set + v3.0 interface discovery)
 │   ├── session/
 │   │   ├── session.rs         Session state machine (5 states)
 │   │   ├── manager.rs         SessionManager (DashMap-backed)
@@ -79,19 +83,20 @@ craton_hsm/
 │   │   └── key_material.rs    RawKeyMaterial (ZeroizeOnDrop wrapper)
 │   ├── crypto/
 │   │   ├── keygen.rs          RSA, EC, Ed25519, AES key generation
-│   │   ├── sign.rs            RSA PKCS#1/PSS, ECDSA, Ed25519, HMAC
-│   │   ├── encrypt.rs         AES-GCM, AES-CBC, AES-CTR, RSA-OAEP
+│   │   ├── sign.rs            RSA PKCS#1/PSS, ECDSA, Ed25519
+│   │   ├── encrypt.rs         AES-GCM, AES-CBC/CBC-PAD, AES-CTR, RSA-OAEP
 │   │   ├── digest.rs          SHA-1, SHA-2, SHA-3 family
 │   │   ├── derive.rs          ECDH key derivation (P-256, P-384)
-│   │   ├── wrap.rs            AES Key Wrap (RFC 3394)
-│   │   ├── pqc.rs             ML-DSA, ML-KEM, SLH-DSA, hybrid
+│   │   ├── wrap.rs            AES Key Wrap (RFC 3394) and KWP (RFC 5649)
+│   │   ├── pqc.rs             ML-DSA, ML-KEM, SLH-DSA
 │   │   ├── mechanisms.rs      Mechanism dispatch tables
 │   │   ├── drbg.rs            SP 800-90A HMAC_DRBG (prediction resistance)
-│   │   ├── self_test.rs       FIPS 140-3 POST (17 tests: integrity + 16 KATs)
+│   │   ├── self_test.rs       Pre-operational self-tests, CASTs, error state
+│   │   ├── integrity.rs       Ed25519 software-integrity test (.sig sidecar)
 │   │   ├── mlock.rs           Memory locking (Unix mlock / Windows VirtualLock)
-│   │   ├── backend.rs         CryptoBackend trait (26 methods)
+│   │   ├── backend.rs         CryptoBackend trait
 │   │   ├── rustcrypto_backend.rs  Default RustCrypto implementation
-│   │   └── awslc_backend.rs   Optional aws-lc-rs FIPS backend
+│   │   └── awslc_backend.rs   Optional AWS-LC backend (`awslc-backend` feature)
 │   ├── config/
 │   │   └── config.rs          TOML configuration with defaults
 │   └── audit/
@@ -102,10 +107,11 @@ craton_hsm/
 │   └── pkcs11-spy/            PKCS#11 interceptor (cdylib)
 ├── deploy/
 │   ├── Dockerfile             Multi-stage distroless build
-│   └── helm/craton_hsm/          Kubernetes Helm chart
+│   └── helm/craton-hsm/       Kubernetes Helm chart
 ├── benches/
 │   └── crypto_bench.rs        Criterion benchmarks
-├── tests/                     617+ integration tests
+├── fuzz/                      cargo-fuzz targets (12)
+├── tests/                     Integration tests (35 files, all run in CI)
 └── docs/                      Documentation
 ```
 
@@ -113,7 +119,7 @@ craton_hsm/
 
 ### HsmCore (`src/core.rs`)
 
-The central struct holding all managers. All three consumer interfaces (C ABI, gRPC daemon, admin CLI) operate against the same `HsmCore` instance.
+The central struct holding all managers. Each consumer (C ABI, gRPC daemon, admin CLI) creates its own `HsmCore` in its own process; only the C ABI path runs behind the PKCS#11 layer's self-test gate and error state.
 
 ```rust
 pub struct HsmCore {
@@ -131,9 +137,9 @@ For the C ABI path, `HsmCore` lives inside a `Mutex<Option<Arc<HsmCore>>>` that 
 
 ### PKCS#11 C ABI (`src/pkcs11_abi/`)
 
-Exports 70+ `#[no_mangle] pub extern "C"` functions matching the PKCS#11 v3.0 specification. Every function is wrapped in `catch_unwind` to prevent Rust panics from crossing the FFI boundary (which would be undefined behavior).
+Exports the 68 PKCS#11 v2.40 functions (via `C_GetFunctionList`) plus `C_GetInterfaceList` / `C_GetInterface` (v3.0 interface discovery). Other v3.0 functions are not implemented. Every function that touches module state is wrapped in `catch_unwind` to prevent Rust panics from crossing the FFI boundary (which would be undefined behavior).
 
-All `unsafe` code is confined to this module and follows four documented patterns:
+Almost all `unsafe` code is in this module (the rest: `crypto/mlock.rs`, module-path discovery in `crypto/integrity.rs`, digest zeroization in `crypto/digest.rs`, Windows ACL calls). The FFI code follows four patterns:
 1. Dereferencing caller-provided output pointers
 2. Constructing slices from (pointer, length) pairs
 3. Reading `CK_MECHANISM` through a raw pointer
@@ -170,13 +176,14 @@ Sessions are stored in a `DashMap<CK_SESSION_HANDLE, Session>` for lock-free con
 - PINs hashed with PBKDF2-HMAC-SHA256 (600,000 iterations, random salt)
 - Comparison uses `subtle::ConstantTimeEq` (timing-attack resistant)
 - Brute-force protection: configurable lockout after N failed attempts
-- SO can unlock a locked user PIN
+- SO can set a new User PIN after a lockout (`C_InitPIN`)
+- Key usage requires the User role; SO sessions administer the token and PINs
 
 ### Object Store (`src/store/`)
 
 Two storage backends:
 1. **In-memory** (`ObjectStore`): fast, volatile, used by default
-2. **Encrypted persistent** (`EncryptedStore`): redb database with per-object AES-256-GCM encryption and file-level locking
+2. **Encrypted persistent** (`EncryptedStore`, `persist_objects = true`): redb database; each record AES-256-GCM-encrypted under a random per-slot key that is stored only wrapped under PIN-derived keys; authenticated per-slot manifest; file-level locking
 
 Objects follow the PKCS#11 attribute model with enforcement of:
 - `CKA_SENSITIVE` / `CKA_EXTRACTABLE` for key export control
@@ -201,62 +208,55 @@ Lifecycle checks are enforced in `C_SignInit`, `C_VerifyInit`, `C_EncryptInit`, 
 ### DRBG (`src/crypto/drbg.rs`)
 
 SP 800-90A HMAC_DRBG using HMAC-SHA256:
-- Seeded from OS CSPRNG (`OsRng`)
+- One process-wide, fork-aware instance used for key generation and `C_GenerateRandom`
+- Entropy input from the OS, passed through repetition-count and adaptive-proportion health tests
 - Prediction resistance: fresh entropy on every generate call
-- Continuous health test: compares consecutive outputs (SP 800-90B)
-- Reseed interval: 2^48 requests
-- All key generation (RSA, EC, Ed25519, AES) routed through DRBG via `DrbgRng` adapter
-- Per-key AES-GCM encryption counters (2^31 limit per key, tracked via SHA-256 key hash)
+- Continuous test on output blocks; SP 800-90A §11.3 KAT at start-up
+- Reseed interval: 2^16 requests; at most 2^19 bits per request
+- Failures latch the module error state
 
 ### Crypto Engine (`src/crypto/`)
 
-41 mechanisms across 7 categories:
+Mechanism categories (authoritative list: `supported_mechanisms()` in `src/crypto/mechanisms.rs`):
 
 | Category | Algorithms |
 |----------|-----------|
 | Asymmetric keygen | RSA-2048/3072/4096, ECDSA P-256/P-384, Ed25519 |
-| Signing | RSA PKCS#1 v1.5, RSA-PSS, ECDSA, Ed25519, HMAC |
-| Encryption | AES-GCM, AES-CBC, AES-CTR, RSA-OAEP |
+| Signing | RSA PKCS#1 v1.5, RSA-PSS (hash-specific mechanisms), ECDSA (raw `r ‖ s`), Ed25519 |
+| Encryption | AES-GCM, AES-CBC, AES-CBC-PAD, AES-CTR, RSA-OAEP |
 | Digest | SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256/384/512 |
 | Key derivation | ECDH (P-256, P-384) |
-| Key wrapping | AES Key Wrap (RFC 3394) |
-| Post-quantum | ML-DSA-44/65/87, ML-KEM-512/768/1024, SLH-DSA, hybrid |
+| Key wrapping | AES Key Wrap (RFC 3394), AES Key Wrap with Padding (RFC 5649), RSA-OAEP |
+| Post-quantum | ML-DSA-44/65/87, ML-KEM-512/768/1024, SLH-DSA-SHA2-128s/256s (pre-release crates) |
 
 ### Audit Log (`src/audit/`)
 
-Append-only log with tamper-evident chained SHA-256 hashes:
+Append-only log with chained SHA-256 hashes (unkeyed — detects accidental or partial modification, not a full rewrite by an attacker with write access):
 
 ```
 Entry[n].previous_hash = SHA-256(Entry[n-1])
 ```
 
-Any modification, deletion, or reordering breaks the chain. Events are recorded synchronously before the PKCS#11 function returns (not fire-and-forget).
+Modifying, deleting, or reordering an entry breaks the chain unless the rest of the file is rewritten too. Events are recorded synchronously before the PKCS#11 function returns (not fire-and-forget).
 
-### FIPS 140-3 POST (`src/crypto/self_test.rs`)
+### Self-tests (`src/crypto/self_test.rs`, `src/crypto/integrity.rs`)
 
-17 self-tests (software integrity check + 16 KATs) plus continuous RNG health checks run during `C_Initialize`:
+Run during `C_Initialize`, before any other service is available:
 
-| # | Test | Type | Vector Source |
-|---|------|------|---------------|
-| 0 | Software integrity | HMAC-SHA256 of module binary | §9.4 sidecar `.hmac` file |
-| 1 | SHA-256 | Known Answer Test | NIST "abc" |
-| 2 | SHA-384 | Known Answer Test | NIST "abc" |
-| 3 | SHA-512 | Known Answer Test | NIST "abc" |
-| 4 | SHA3-256 | Known Answer Test | NIST "abc" |
-| 5 | HMAC-SHA256 | Known Answer Test | RFC 4231 TC2 |
-| 6 | HMAC-SHA384 | Known Answer Test | RFC 4231 TC2 |
-| 7 | HMAC-SHA512 | Known Answer Test | RFC 4231 TC2 |
-| 8 | AES-256-GCM | Encrypt/Decrypt roundtrip + known-answer decrypt | Fixed key |
-| 9 | AES-256-CBC | Known Answer Test (hardcoded expected ciphertext) | Fixed key/IV |
-| 10 | AES-256-CTR | Known Answer Test (hardcoded expected ciphertext) | Fixed key/IV |
-| 11 | RSA 2048 PKCS#1 v1.5 | Sign/Verify roundtrip | Generated key |
-| 12 | ECDSA P-256 | Sign/Verify roundtrip | Generated key |
-| 13 | ML-DSA-44 | Sign/Verify roundtrip | Generated key |
-| 14 | ML-KEM-768 | Encapsulate/Decapsulate roundtrip | Generated key |
-| 15 | RNG health | Entropy + continuous test | OsRng (SP 800-90B §4.3) |
-| 16 | HMAC_DRBG | Known Answer Test | NIST CAVP vector |
+1. SHA-256, SHA-512 and Ed25519 known-answer tests (the algorithms the
+   integrity test uses).
+2. Software-integrity test: Ed25519 signature over the SHA-256 digest of the
+   library file, read from the `.sig` sidecar; the public key is embedded at
+   build time. Mandatory in `fips` builds, skipped (logged) in default builds
+   without `.sig` or embedded key. There is no HMAC/`.hmac` integrity check.
+3. Fixed-vector known-answer tests for SHA-3, HMAC, HMAC_DRBG, HKDF,
+   one-step KDF, PBKDF2, ML-KEM, ML-DSA, SLH-DSA, and — through the selected
+   backend — AES-GCM/CBC/CTR/KW/KWP, RSA, ECDSA, ECDH and Ed25519.
 
-If any test fails, `POST_FAILED` is set and all subsequent operations return `CKR_GENERAL_ERROR`. On re-initialization (after `C_Finalize`), `POST_FAILED` is reset and POST re-runs.
+Pair-wise consistency tests run after every key-pair generation. Any
+failure latches the module error state: every call that reaches module state
+returns `CKR_GENERAL_ERROR` until `C_Finalize` and a successful
+`C_Initialize`. Details: [fips-140-3-certification.md §9](fips-140-3-certification.md#9-self-tests).
 
 ## Data Flow: Sign Operation
 
