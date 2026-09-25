@@ -1,139 +1,122 @@
 # Tested Platforms
 
-## Build and Test Environments
+"Tested" on this page means: the complete test suite runs and passes in CI on
+that environment. Everything else is marked as *built only* or *not tested*.
+For FIPS 140-3 purposes these are the candidate operational environments;
+no ACVP testing has been performed on them (see
+[fips-140-3-certification.md §5](fips-140-3-certification.md#5-operational-environment)).
 
-### Primary Development Platform
+## Toolchain
 
 | Property | Value |
 |----------|-------|
-| OS | Windows 11 Pro |
-| Architecture | x86_64 |
-| Rust Version | 1.75+ MSRV (tested with 1.83, Edition 2021) |
-| Compiler Target | `x86_64-pc-windows-msvc` |
-| Build Mode | Debug and Release |
-| Test Results | All 617+ tests pass |
+| Rust toolchain | pinned in `rust-toolchain.toml`: **1.94.1** (used by CI and release builds) |
+| MSRV | **1.89** (`rust-version` in `Cargo.toml`; `cargo check` with 1.89.0 in the `msrv` CI job) |
+| Edition | 2021 |
+| protoc | 36.2 in CI (daemon only) |
 
-### Cross-Platform Support
+## Operational environments
 
-| Platform | Target Triple | Build Status | Test Status | Notes |
-|----------|--------------|--------------|-------------|-------|
-| Windows 11 x64 | `x86_64-pc-windows-msvc` | ✅ | ✅ All pass | Primary platform |
-| Linux x64 (glibc) | `x86_64-unknown-linux-gnu` | ✅ | ✅ Expected | Standard deployment target |
-| Linux x64 (musl) | `x86_64-unknown-linux-musl` | ✅ | ✅ Expected | Static linking for containers |
-| macOS x64 | `x86_64-apple-darwin` | ✅ | ✅ Expected | Intel Macs |
-| macOS ARM64 | `aarch64-apple-darwin` | ✅ | ✅ Expected | Apple Silicon |
+| # | OS (CI runner image) | Architecture | Target triple | Status |
+|---|---|---|---|---|
+| 1 | Ubuntu 24.04 LTS (`ubuntu-24.04`) | x86_64 | `x86_64-unknown-linux-gnu` | **Tested** on every PR and push (full suite, Miri, fuzz smoke, `fips`/`awslc-backend` builds) |
+| 2 | Windows Server 2025 (`windows-2025`) | x86_64 | `x86_64-pc-windows-msvc` | **Tested** on pushes to `main` and for every release |
+| 3 | macOS 15 (`macos-15`) | arm64 (Apple Silicon) | `aarch64-apple-darwin` | **Tested** on pushes to `main` and for every release |
+| — | macOS (Intel) | x86_64 | `x86_64-apple-darwin` | Built for releases (cross-compiled on arm64); **not tested** |
+| — | Linux musl | x86_64 | `x86_64-unknown-linux-musl` | **Not built or tested** in CI |
+| — | Windows 11 developer workstations | x86_64 | `x86_64-pc-windows-msvc` | Developer testing only (not recorded) |
 
-## Feature Matrix by Platform
+The runner images are pinned in `.github/workflows/ci.yml`. Changing them
+changes the tested environments and must be reflected here and in the FIPS
+documents.
+
+## Feature matrix by platform
 
 | Feature | Linux | Windows | macOS |
 |---------|-------|---------|-------|
-| Core PKCS#11 | ✅ | ✅ | ✅ |
-| Memory locking | `mlock()` / `munlock()` | `VirtualLock()` / `VirtualUnlock()` | `mlock()` / `munlock()` |
-| Fork detection | ✅ (`getpid()` comparison) | N/A (no `fork()`) | ✅ (`getpid()` comparison) |
+| Core PKCS#11 | ✅ tested | ✅ tested | ✅ tested (arm64) |
+| Memory locking (best effort) | `mlock()` / `munlock()` | `VirtualLock()` / `VirtualUnlock()` | `mlock()` / `munlock()` |
+| Fork detection | `getpid()` comparison | N/A (no `fork()`) | `getpid()` comparison |
 | File locking | `flock()` via fs2 | `LockFileEx()` via fs2 | `flock()` via fs2 |
-| Persistent storage (redb) | ✅ | ✅ | ✅ |
-| RustCrypto backend | ✅ | ✅ | ✅ |
-| aws-lc-rs backend | ✅ | ✅ (requires LLVM) | ✅ |
-| gRPC daemon | ✅ | ✅ (requires protoc) | ✅ |
+| Persistent storage (redb, `persist_objects = true`) | ✅ | ✅ | ✅ |
+| RustCrypto backend | ✅ tested | ✅ tested | ✅ tested |
+| AWS-LC backend (`awslc-backend`) | built in CI (not tested) | not built in CI | not built in CI |
+| gRPC daemon | ✅ tested | ✅ tested | ✅ tested |
 
-## Crypto Backend Requirements
+## Crypto backend requirements
 
-### RustCrypto Backend (default)
+### RustCrypto backend (default)
 
-No additional system dependencies. Pure Rust implementation.
-
-```bash
-cargo build --release
-```
-
-### aws-lc-rs Backend (FIPS)
-
-Requires:
-- CMake
-- C compiler (GCC, Clang, or MSVC)
-- On Windows: LLVM/Clang (`LIBCLANG_PATH` must be set)
+No additional system dependencies.
 
 ```bash
-# Linux
-cargo build --release --features awslc-backend
-
-# Windows (with LLVM installed via Scoop)
-set LIBCLANG_PATH=C:\Users\<user>\scoop\apps\llvm\current\bin
-set AWS_LC_SYS_NO_ASM=1
-cargo build --release --features awslc-backend
+cargo build --release --locked
 ```
 
-## Test Execution
+### AWS-LC backend
 
-### Standard Test Run
+Requires CMake, a C compiler, Clang/libclang and Go (for `aws-lc-fips-sys`).
 
 ```bash
-# IMPORTANT: PKCS#11 tests require single-threaded execution
-# due to shared global OnceLock<Arc<HsmCore>> state
-cargo test -- --test-threads=1
+cargo build --release --locked --features awslc-backend
 ```
 
-### Full Test Matrix
+On Windows development machines without an assembler toolchain,
+`AWS_LC_SYS_NO_ASM=1` makes the build work, but it produces a different
+AWS-LC implementation from the validated one; never use it for a build that
+is meant to be FIPS-aligned.
+
+## Test execution
 
 ```bash
-# RustCrypto backend (default)
-cargo test -- --test-threads=1
+# PKCS#11 ABI tests share a process-wide singleton: run single-threaded
+cargo test --locked -- --test-threads=1
 
-# aws-lc-rs backend
-cargo test --features awslc-backend -- --test-threads=1
-
-# Zeroization tests (requires debug build, intentional UB)
-cargo test --test zeroization -- --ignored --test-threads=1
-
-# Persistence tests
-cargo test --test persistence -- --test-threads=1
-
-# Benchmarks
-cargo bench
-cargo bench --features awslc-backend  # comparative
+# Feature builds checked in CI
+cargo build --locked -p craton-hsm --features fips --all-targets
+cargo build --locked -p craton-hsm --features awslc-backend --all-targets
+cargo build --locked -p craton-hsm --features fips,awslc-backend --all-targets
 ```
 
-### Known Slow Tests
+`tests/zeroization.rs` runs as part of the normal suite (serially in CI).
+Its checks read memory after `drop`, so they are best-effort evidence.
 
-| Test | Approximate Duration | Reason |
+### Known slow tests
+
+| Test | Approximate duration | Reason |
 |------|---------------------|--------|
-| RSA 3072 keygen | ~10s (debug) | Large prime generation |
-| SLH-DSA operations | ~60s (debug) | Hash-based signature scheme |
-| RSA 2048 POST KAT | ~2s (debug) | Key generation during POST |
+| RSA 3072 keygen | ~10 s (debug) | Large prime generation |
+| SLH-DSA operations | ~60 s (debug) | Hash-based signature scheme |
 
-Use `--release` for faster execution of these tests.
+Use `--release` for faster execution.
 
-## Container Support
+## Container
 
-A multi-stage Dockerfile is provided at `deploy/Dockerfile`:
+`deploy/Dockerfile` is a multi-stage build with a distroless runtime image
+(`gcr.io/distroless/cc-debian12`, digest-pinned). The builder image must
+provide a Rust toolchain ≥ the MSRV (1.89) for the locked dependencies to
+build; check the `FROM` line in the Dockerfile. The container build is not
+exercised by CI yet.
 
-```dockerfile
-# Build stage uses rust:1.83-slim
-# Runtime stage uses gcr.io/distroless/cc-debian12
-```
+## CI summary
 
-The container image includes only the compiled binary and required shared libraries (no shell, no package manager).
+See `.github/workflows/ci.yml`: format check, clippy (correctness and
+suspicious lints are errors), test matrix above, doc-tests, feature builds,
+MSRV check, Miri, fuzz smoke (60 s per target), Helm lint/template, rustdoc
+and coverage. Supply-chain checks are in `.github/workflows/security-audit.yml`.
 
-### GitHub Actions CI
+## Dependency versions
 
-Automated CI pipeline runs on every push and pull request:
-- **Ubuntu-latest + Windows-latest**: Build and test (default + awslc-backend)
-- **Linting**: `cargo fmt --check` + `cargo clippy -- -D warnings`
-- **Documentation**: `cargo doc --no-deps`
-
-See `.github/workflows/ci.yml` for full configuration.
-
-## Dependency Versions
-
-Key dependency versions as of v0.9.1:
+`Cargo.lock` and the CycloneDX SBOM shipped with each release are
+authoritative. Notable versions at the time of writing:
 
 | Dependency | Version | Purpose |
 |-----------|---------|---------|
-| redb | 2.x | Persistent key/object storage |
+| redb | 3.1 | Persistent object storage |
 | fs2 | 0.4 | Cross-platform file locking |
-| zeroize | 1.x | Cryptographic memory zeroization |
-| parking_lot | 0.12 | Efficient mutex/rwlock |
-| dashmap | 6.x | Concurrent hash map (sessions) |
-| windows-sys | 0.59 | Windows API bindings (VirtualLock) |
-| aws-lc-rs | 1.x | FIPS crypto backend (optional) |
-| tonic | 0.12 | gRPC framework (daemon only) |
+| zeroize | 1.8 | Memory zeroization |
+| parking_lot | 0.12 | Mutex/RwLock |
+| dashmap | 6.1 | Concurrent hash map (sessions) |
+| windows-sys | 0.61 | Windows API bindings |
+| aws-lc-rs | 1.16 (optional) | AWS-LC backend |
+| tonic | 0.14 | gRPC framework (daemon only) |
