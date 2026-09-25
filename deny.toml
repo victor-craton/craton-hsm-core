@@ -17,7 +17,7 @@
 #     and the entry must be re-reviewed (removed, or renewed with a new
 #     justification) — at most one quarter at a time;
 #   * record every review in CHANGELOG.md.
-# Last full review: 2026-09-25.
+# Last full review: 2026-09-25 (wave-2 audit remediation).
 
 [graph]
 all-features = true
@@ -31,15 +31,21 @@ unsound = "all"
 yanked = "deny"
 ignore = [
     # Marvin timing side channel in the `rsa` crate. No fixed `rsa` release
-    # exists. THIS IS NOT MITIGATED: RSA private-key operations of the default
-    # RustCrypto backend (C_Decrypt with CKM_RSA_PKCS_OAEP, and all RSA
-    # signing) use the affected code, so an attacker able to time many
-    # decryptions/signatures may be able to recover the private key. Residual
-    # risk is documented in docs/security-model.md and
-    # docs/fips-140-3-certification.md §11. Exit plan: route RSA private-key
-    # operations to aws-lc-rs (awslc-backend) or upgrade to a fixed `rsa`.
-    # Owner: crypto maintainers.
-    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side channel: no fixed release; RSA OAEP decrypt and RSA signing on the RustCrypto backend ARE exposed (not mitigated); residual risk documented in docs/security-model.md; exit = aws-lc RSA or fixed rsa; owner crypto maintainers; expires 2026-12-31" },
+    # exists (the fix is expected with `rsa` 0.10). PARTIALLY MITIGATED ONLY:
+    #   * every RSA private-key operation on the RustCrypto backend is
+    #     base-blinded (PKCS#1 v1.5 signing via `sign_with_rng`, PSS via
+    #     `Pss::new_blinded`, OAEP via `decrypt_blinded`; src/crypto/sign.rs);
+    #   * there is no RSA PKCS#1 v1.5 *decryption* service (the classic Marvin
+    #     oracle); CKM_RSA_PKCS is sign/verify only;
+    #   * `fips` builds imply `awslc-backend` and refuse the RustCrypto backend
+    #     for approved services (constant-time AWS-LC RSA).
+    # Residual risk: `num-bigint-dig` arithmetic is not constant time, so
+    # non-fips builds using the RustCrypto backend for CKM_RSA_PKCS_OAEP
+    # decryption and RSA signing remain exposed to a local/remote timing
+    # attacker (docs/security-model.md, docs/fips-140-3-certification.md §11).
+    # Exit plan: `rsa` 0.10 or AWS-LC for all RSA private-key operations.
+    # Owner: crypto maintainers. Time-boxed; re-review at expiry.
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side channel: no fixed release (expected in rsa 0.10); partially mitigated (blinding on every private op, no PKCS#1 v1.5 decryption service, AWS-LC mandatory in fips builds) but bignum code is not constant time, so non-fips RustCrypto OAEP decrypt/RSA signing stay exposed; exit = rsa 0.10 or AWS-LC RSA; owner crypto maintainers; expires 2026-12-31" },
     # rustls-pemfile is unmaintained (informational, no known vulnerability).
     # It is used only by craton-hsm-daemon to parse the operator-supplied TLS
     # certificate/key/CA PEM files at start-up. Exit plan: switch to
