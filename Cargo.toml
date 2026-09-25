@@ -18,8 +18,10 @@ rust-version = "1.89"
 # Only ship what is needed to build the library. Everything else (docs/*.pdf,
 # deploy/, kreya/, fuzz/, tests/ fixtures, CI config, local agent settings) is
 # kept out of the crates.io package (A3-01, A3-23).
+# `/src/**` (not only `*.rs`): the POST known-answer vectors under
+# src/crypto/kat/ are compiled in with `include_bytes!`.
 include = [
-    "/src/**/*.rs",
+    "/src/**",
     "/build.rs",
     "/Cargo.toml",
     "/Cargo.lock",
