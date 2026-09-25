@@ -233,19 +233,16 @@ fn fuzz_keygen_random_mechanism(data: &[u8]) {
     };
 
     let mech_type = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]) as CK_MECHANISM_TYPE;
 
     let true_val: CK_BBOOL = CK_TRUE;
 
-    let mut template = [
-        CK_ATTRIBUTE {
-            attr_type: CKA_TOKEN,
-            p_value: &true_val as *const _ as *mut _,
-            value_len: 1,
-        },
-    ];
+    let mut template = [CK_ATTRIBUTE {
+        attr_type: CKA_TOKEN,
+        p_value: &true_val as *const _ as *mut _,
+        value_len: 1,
+    }];
 
     let mut mechanism = CK_MECHANISM {
         mechanism: mech_type,
@@ -317,13 +314,23 @@ fn fuzz_keygen_conflicting_attrs(data: &[u8]) {
 
     // Fuzz-controlled boolean attributes
     let bool_attrs = [
-        CKA_ENCRYPT, CKA_DECRYPT, CKA_SIGN, CKA_VERIFY,
-        CKA_WRAP, CKA_UNWRAP, CKA_DERIVE, CKA_TOKEN,
+        CKA_ENCRYPT,
+        CKA_DECRYPT,
+        CKA_SIGN,
+        CKA_VERIFY,
+        CKA_WRAP,
+        CKA_UNWRAP,
+        CKA_DERIVE,
+        CKA_TOKEN,
     ];
 
     for (i, &attr_type) in bool_attrs.iter().enumerate() {
         if i < data.len() {
-            let val = if data[i] % 2 == 0 { &true_val } else { &false_val };
+            let val = if data[i] % 2 == 0 {
+                &true_val
+            } else {
+                &false_val
+            };
             attrs.push(CK_ATTRIBUTE {
                 attr_type,
                 p_value: val as *const _ as *mut _,
@@ -383,7 +390,10 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
                 5,
                 &mut key,
             );
-            assert!(rv != CKR_OK, "C_GenerateKey succeeded with null template + non-zero count");
+            assert!(
+                rv != CKR_OK,
+                "C_GenerateKey succeeded with null template + non-zero count"
+            );
         }
         1 => {
             // Null output handle
@@ -400,7 +410,10 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
                 1,
                 std::ptr::null_mut(),
             );
-            assert!(rv != CKR_OK, "C_GenerateKey succeeded with null output handle");
+            assert!(
+                rv != CKR_OK,
+                "C_GenerateKey succeeded with null output handle"
+            );
         }
         2 => {
             // Null mechanism pointer
@@ -427,7 +440,10 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
-            assert!(rv != CKR_OK, "C_GenerateKeyPair succeeded with null output handles");
+            assert!(
+                rv != CKR_OK,
+                "C_GenerateKeyPair succeeded with null output handles"
+            );
         }
         _ => {}
     }

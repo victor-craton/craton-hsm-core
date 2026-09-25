@@ -77,7 +77,11 @@ fn provision_token() {
     assert_eq!(rv, CKR_OK, "C_Login(SO) failed: {rv:#x}");
 
     let rv = unsafe {
-        functions::C_InitPIN(session, USER_PIN.as_ptr() as *mut _, USER_PIN.len() as CK_ULONG)
+        functions::C_InitPIN(
+            session,
+            USER_PIN.as_ptr() as *mut _,
+            USER_PIN.len() as CK_ULONG,
+        )
     };
     assert_eq!(rv, CKR_OK, "C_InitPIN failed: {rv:#x}");
 

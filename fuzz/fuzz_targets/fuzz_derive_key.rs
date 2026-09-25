@@ -209,8 +209,7 @@ fn fuzz_derive_random_mechanism(data: &[u8]) {
     };
 
     let mech_type = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]) as CK_MECHANISM_TYPE;
 
     let param_data = &data[8..];
@@ -267,8 +266,7 @@ fn fuzz_derive_invalid_base_key(data: &[u8]) {
     };
 
     let fake_key = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]) as CK_OBJECT_HANDLE;
 
     let mut mechanism = CK_MECHANISM {
@@ -348,7 +346,10 @@ fn fuzz_derive_null_pointers(data: &[u8]) {
                 0,
                 std::ptr::null_mut(),
             );
-            assert!(rv != CKR_OK, "C_DeriveKey succeeded with null output handle");
+            assert!(
+                rv != CKR_OK,
+                "C_DeriveKey succeeded with null output handle"
+            );
         }
         2 => {
             // Null template with non-zero count
@@ -361,7 +362,10 @@ fn fuzz_derive_null_pointers(data: &[u8]) {
                 5,
                 &mut derived,
             );
-            assert!(rv != CKR_OK, "C_DeriveKey succeeded with null template + non-zero count");
+            assert!(
+                rv != CKR_OK,
+                "C_DeriveKey succeeded with null template + non-zero count"
+            );
         }
         _ => {}
     }

@@ -68,89 +68,91 @@ struct PregenRsaKeys {
 static RSA_KEYS: OnceLock<Option<PregenRsaKeys>> = OnceLock::new();
 
 fn get_rsa_keys() -> Option<&'static PregenRsaKeys> {
-    RSA_KEYS.get_or_init(|| {
-        ensure_init();
+    RSA_KEYS
+        .get_or_init(|| {
+            ensure_init();
 
-        let session = open_rw_session()?;
+            let session = open_rw_session()?;
 
-        let modulus_bits: CK_ULONG = 2048;
-        let true_val: CK_BBOOL = CK_TRUE;
-        let pub_exp = [0x01u8, 0x00, 0x01]; // 65537
+            let modulus_bits: CK_ULONG = 2048;
+            let true_val: CK_BBOOL = CK_TRUE;
+            let pub_exp = [0x01u8, 0x00, 0x01]; // 65537
 
-        let mut pub_template = [
-            CK_ATTRIBUTE {
-                attr_type: CKA_MODULUS_BITS,
-                p_value: &modulus_bits as *const _ as *mut _,
-                value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
-            },
-            CK_ATTRIBUTE {
-                attr_type: CKA_PUBLIC_EXPONENT,
-                p_value: pub_exp.as_ptr() as *mut _,
-                value_len: 3,
-            },
-            CK_ATTRIBUTE {
-                attr_type: CKA_VERIFY,
-                p_value: &true_val as *const _ as *mut _,
-                value_len: 1,
-            },
-            CK_ATTRIBUTE {
-                attr_type: CKA_ENCRYPT,
-                p_value: &true_val as *const _ as *mut _,
-                value_len: 1,
-            },
-            CK_ATTRIBUTE {
-                attr_type: CKA_TOKEN,
-                p_value: &true_val as *const _ as *mut _,
-                value_len: 1,
-            },
-        ];
+            let mut pub_template = [
+                CK_ATTRIBUTE {
+                    attr_type: CKA_MODULUS_BITS,
+                    p_value: &modulus_bits as *const _ as *mut _,
+                    value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+                },
+                CK_ATTRIBUTE {
+                    attr_type: CKA_PUBLIC_EXPONENT,
+                    p_value: pub_exp.as_ptr() as *mut _,
+                    value_len: 3,
+                },
+                CK_ATTRIBUTE {
+                    attr_type: CKA_VERIFY,
+                    p_value: &true_val as *const _ as *mut _,
+                    value_len: 1,
+                },
+                CK_ATTRIBUTE {
+                    attr_type: CKA_ENCRYPT,
+                    p_value: &true_val as *const _ as *mut _,
+                    value_len: 1,
+                },
+                CK_ATTRIBUTE {
+                    attr_type: CKA_TOKEN,
+                    p_value: &true_val as *const _ as *mut _,
+                    value_len: 1,
+                },
+            ];
 
-        let mut priv_template = [
-            CK_ATTRIBUTE {
-                attr_type: CKA_SIGN,
-                p_value: &true_val as *const _ as *mut _,
-                value_len: 1,
-            },
-            CK_ATTRIBUTE {
-                attr_type: CKA_DECRYPT,
-                p_value: &true_val as *const _ as *mut _,
-                value_len: 1,
-            },
-            CK_ATTRIBUTE {
-                attr_type: CKA_TOKEN,
-                p_value: &true_val as *const _ as *mut _,
-                value_len: 1,
-            },
-        ];
+            let mut priv_template = [
+                CK_ATTRIBUTE {
+                    attr_type: CKA_SIGN,
+                    p_value: &true_val as *const _ as *mut _,
+                    value_len: 1,
+                },
+                CK_ATTRIBUTE {
+                    attr_type: CKA_DECRYPT,
+                    p_value: &true_val as *const _ as *mut _,
+                    value_len: 1,
+                },
+                CK_ATTRIBUTE {
+                    attr_type: CKA_TOKEN,
+                    p_value: &true_val as *const _ as *mut _,
+                    value_len: 1,
+                },
+            ];
 
-        let mut mechanism = CK_MECHANISM {
-            mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN,
-            p_parameter: std::ptr::null_mut(),
-            parameter_len: 0,
-        };
+            let mut mechanism = CK_MECHANISM {
+                mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN,
+                p_parameter: std::ptr::null_mut(),
+                parameter_len: 0,
+            };
 
-        let mut pub_key: CK_OBJECT_HANDLE = 0;
-        let mut priv_key: CK_OBJECT_HANDLE = 0;
+            let mut pub_key: CK_OBJECT_HANDLE = 0;
+            let mut priv_key: CK_OBJECT_HANDLE = 0;
 
-        let rv = functions::C_GenerateKeyPair(
-            session,
-            &mut mechanism,
-            pub_template.as_mut_ptr(),
-            pub_template.len() as CK_ULONG,
-            priv_template.as_mut_ptr(),
-            priv_template.len() as CK_ULONG,
-            &mut pub_key,
-            &mut priv_key,
-        );
+            let rv = functions::C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                pub_template.as_mut_ptr(),
+                pub_template.len() as CK_ULONG,
+                priv_template.as_mut_ptr(),
+                priv_template.len() as CK_ULONG,
+                &mut pub_key,
+                &mut priv_key,
+            );
 
-        close_session(session);
+            close_session(session);
 
-        if rv == CKR_OK {
-            Some(PregenRsaKeys { pub_key, priv_key })
-        } else {
-            None
-        }
-    }).as_ref()
+            if rv == CKR_OK {
+                Some(PregenRsaKeys { pub_key, priv_key })
+            } else {
+                None
+            }
+        })
+        .as_ref()
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -323,7 +325,11 @@ fn fuzz_rsa_sign_verify_pkcs1(data: &[u8]) {
                     sig_len,
                 );
                 // FIX #11: Valid signature must verify successfully
-                assert!(rv == CKR_OK, "C_Verify failed on valid signature (rv=0x{:08X})", rv);
+                assert!(
+                    rv == CKR_OK,
+                    "C_Verify failed on valid signature (rv=0x{:08X})",
+                    rv
+                );
             }
 
             // Also verify with corrupted signature (must fail)
@@ -469,8 +475,7 @@ fn fuzz_rsa_sign_random_key(data: &[u8]) {
     };
 
     let fake_key = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]) as CK_OBJECT_HANDLE;
 
     let mut mechanism = CK_MECHANISM {

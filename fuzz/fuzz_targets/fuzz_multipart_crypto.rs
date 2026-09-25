@@ -93,7 +93,11 @@ fn generate_aes_key(session: CK_SESSION_HANDLE) -> Option<CK_OBJECT_HANDLE> {
         &mut key,
     );
 
-    if rv == CKR_OK { Some(key) } else { None }
+    if rv == CKR_OK {
+        Some(key)
+    } else {
+        None
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -131,7 +135,10 @@ fn fuzz_multipart_cbc_encrypt(data: &[u8]) {
 
     let key = match generate_aes_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     // Use first 16 bytes as IV
@@ -198,7 +205,10 @@ fn fuzz_multipart_cbc_decrypt_random(data: &[u8]) {
 
     let key = match generate_aes_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     let iv = &data[..16];
@@ -259,7 +269,10 @@ fn fuzz_multipart_encrypt_chunk_abuse(data: &[u8]) {
 
     let key = match generate_aes_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     let iv = &data[..16];
@@ -321,11 +334,8 @@ fn fuzz_multipart_encrypt_chunk_abuse(data: &[u8]) {
                 // EncryptFinal in the middle — should finalize or error
                 let mut final_buf = [0u8; 64];
                 let mut final_len: CK_ULONG = 64;
-                let _rv = functions::C_EncryptFinal(
-                    session,
-                    final_buf.as_mut_ptr(),
-                    &mut final_len,
-                );
+                let _rv =
+                    functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len);
                 // After Final, further updates should fail
             }
             4 => {
@@ -367,7 +377,10 @@ fn fuzz_encrypt_after_final(data: &[u8]) {
 
     let key = match generate_aes_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     let iv = &data[..16];
@@ -444,7 +457,10 @@ fn fuzz_multipart_encrypt_null_buffers(data: &[u8]) {
 
     let key = match generate_aes_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     let iv = &data[..16];
@@ -477,7 +493,10 @@ fn fuzz_multipart_encrypt_null_buffers(data: &[u8]) {
                 out.as_mut_ptr(),
                 &mut out_len,
             );
-            assert!(rv != CKR_OK, "C_EncryptUpdate succeeded with null input + non-zero length");
+            assert!(
+                rv != CKR_OK,
+                "C_EncryptUpdate succeeded with null input + non-zero length"
+            );
         }
         1 => {
             // Null output with non-zero length (size query — may legitimately succeed)
@@ -502,16 +521,18 @@ fn fuzz_multipart_encrypt_null_buffers(data: &[u8]) {
                 out.as_mut_ptr(),
                 std::ptr::null_mut(),
             );
-            assert!(rv != CKR_OK, "C_EncryptUpdate succeeded with null output length pointer");
+            assert!(
+                rv != CKR_OK,
+                "C_EncryptUpdate succeeded with null output length pointer"
+            );
         }
         3 => {
             // EncryptFinal with null length pointer — must fail
-            let rv = functions::C_EncryptFinal(
-                session,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+            let rv = functions::C_EncryptFinal(session, std::ptr::null_mut(), std::ptr::null_mut());
+            assert!(
+                rv != CKR_OK,
+                "C_EncryptFinal succeeded with null length pointer"
             );
-            assert!(rv != CKR_OK, "C_EncryptFinal succeeded with null length pointer");
         }
         _ => {}
     }

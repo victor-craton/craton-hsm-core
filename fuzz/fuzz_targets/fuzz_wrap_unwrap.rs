@@ -102,7 +102,11 @@ fn generate_wrapping_key(session: CK_SESSION_HANDLE) -> Option<CK_OBJECT_HANDLE>
         &mut key,
     );
 
-    if rv == CKR_OK { Some(key) } else { None }
+    if rv == CKR_OK {
+        Some(key)
+    } else {
+        None
+    }
 }
 
 /// Generate a target key to be wrapped.
@@ -149,7 +153,11 @@ fn generate_target_key(session: CK_SESSION_HANDLE, extractable: bool) -> Option<
         &mut key,
     );
 
-    if rv == CKR_OK { Some(key) } else { None }
+    if rv == CKR_OK {
+        Some(key)
+    } else {
+        None
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -187,7 +195,10 @@ fn fuzz_wrap_valid_key(data: &[u8]) {
 
     let wrapping_key = match generate_wrapping_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     let target_key = match generate_target_key(session, true) {
@@ -292,7 +303,10 @@ fn fuzz_wrap_non_extractable(data: &[u8]) {
 
     let wrapping_key = match generate_wrapping_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     let target_key = match generate_target_key(session, false) {
@@ -305,8 +319,16 @@ fn fuzz_wrap_non_extractable(data: &[u8]) {
     };
 
     // FIX #13: Use fuzz data for mechanism parameters instead of ignoring it
-    let param_len = if data.is_empty() { 0 } else { (data[0] as usize % 32).min(data.len().saturating_sub(1)) };
-    let params = if param_len > 0 { &data[1..1 + param_len] } else { &[] as &[u8] };
+    let param_len = if data.is_empty() {
+        0
+    } else {
+        (data[0] as usize % 32).min(data.len().saturating_sub(1))
+    };
+    let params = if param_len > 0 {
+        &data[1..1 + param_len]
+    } else {
+        &[] as &[u8]
+    };
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_AES_GCM,
@@ -332,7 +354,10 @@ fn fuzz_wrap_non_extractable(data: &[u8]) {
     );
 
     // FIX #11: Assert that wrapping non-extractable key does NOT succeed
-    assert!(rv != CKR_OK, "C_WrapKey succeeded on non-extractable key — CKA_EXTRACTABLE bypass!");
+    assert!(
+        rv != CKR_OK,
+        "C_WrapKey succeeded on non-extractable key — CKA_EXTRACTABLE bypass!"
+    );
 
     let _ = functions::C_DestroyObject(session, target_key);
     let _ = functions::C_DestroyObject(session, wrapping_key);
@@ -351,13 +376,11 @@ fn fuzz_wrap_invalid_handles(data: &[u8]) {
     };
 
     let fake_wrapping = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]) as CK_OBJECT_HANDLE;
 
     let fake_target = u64::from_le_bytes([
-        data[8], data[9], data[10], data[11],
-        data[12], data[13], data[14], data[15],
+        data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
     ]) as CK_OBJECT_HANDLE;
 
     let mut mechanism = CK_MECHANISM {
@@ -409,7 +432,10 @@ fn fuzz_unwrap_random_data(data: &[u8]) {
 
     let wrapping_key = match generate_wrapping_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     let mut mechanism = CK_MECHANISM {
@@ -464,7 +490,10 @@ fn fuzz_wrap_random_mechanism(data: &[u8]) {
 
     let wrapping_key = match generate_wrapping_key(session) {
         Some(k) => k,
-        None => { close_session(session); return; }
+        None => {
+            close_session(session);
+            return;
+        }
     };
 
     let target_key = match generate_target_key(session, true) {
@@ -477,8 +506,7 @@ fn fuzz_wrap_random_mechanism(data: &[u8]) {
     };
 
     let mech_type = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]) as CK_MECHANISM_TYPE;
 
     let mut mechanism = CK_MECHANISM {
