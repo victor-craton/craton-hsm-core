@@ -129,10 +129,12 @@ jobs:
         # drop and is sensitive to allocator reuse by concurrent tests (A3-21).
         run: >-
           cargo test --locked
+          --test abi_security_regressions
           --test attribute_management
           --test attribute_validation
           --test backup_restore
           --test concurrent_session_stress
+          --test crypto_abi_params
           --test crypto_vectors_phase2
           --test digest_abi
           --test fips_approved_mode
@@ -156,6 +158,7 @@ jobs:
           --test rsa_abi_comprehensive
           --test security_properties
           --test session_state_machine
+          --test state_regressions
           --test supplementary_functions
           --test zeroization
           --
