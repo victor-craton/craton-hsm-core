@@ -1,249 +1,395 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
-use craton_hsm::config::config::HsmConfig;
-use craton_hsm::core::HsmCore;
+use super::Ctx;
+use crate::admin_core::{open_core, Role};
+use crate::error::{CliError, CliResult};
+use crate::replay_guard::ReplayGuard;
+use craton_hsm::audit::log::AuditOperation;
+use craton_hsm::error::HsmError;
 use craton_hsm::store::backup;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-const MIN_PASSPHRASE_LENGTH: usize = 12;
+/// Matches the library's `MIN_PASSPHRASE_LEN` (characters, not bytes) so the
+/// operator is not asked to confirm a passphrase that is then rejected.
+const MIN_PASSPHRASE_CHARS: usize = 16;
+/// Upper bound on a backup file read by `restore` (H5-16).
+const MAX_BACKUP_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Prompt for a passphrase with confirmation, returning a zeroizing wrapper.
-fn prompt_passphrase(confirm: bool) -> Result<Zeroizing<String>, Box<dyn std::error::Error>> {
-    let passphrase = Zeroizing::new(rpassword::prompt_password("Enter backup passphrase: ")?);
+fn prompt_passphrase(confirm: bool) -> CliResult<Zeroizing<String>> {
+    let passphrase = crate::prompt::read_secret("Enter backup passphrase: ")?;
     if passphrase.is_empty() {
-        return Err("Passphrase must not be empty.".into());
-    }
-    if confirm && passphrase.len() < MIN_PASSPHRASE_LENGTH {
-        return Err(format!(
-            "Passphrase too short. Minimum {} characters required to protect key material.",
-            MIN_PASSPHRASE_LENGTH
-        )
-        .into());
+        return Err(CliError::Usage("Passphrase must not be empty.".into()));
     }
     if confirm {
-        let confirm = Zeroizing::new(rpassword::prompt_password("Confirm backup passphrase: ")?);
-        if *passphrase != *confirm {
-            return Err("Passphrases do not match.".into());
+        if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
+            return Err(CliError::Usage(format!(
+                "Passphrase too short: at least {MIN_PASSPHRASE_CHARS} characters with at \
+                 least 3 of: lowercase, uppercase, digits, symbols."
+            )));
+        }
+        let again = crate::prompt::read_secret("Confirm backup passphrase: ")?;
+        if *passphrase != *again {
+            return Err(CliError::Usage("Passphrases do not match.".into()));
         }
     }
     Ok(passphrase)
 }
 
-/// Set restrictive file permissions (owner-only read/write).
+/// Random hidden temp name in `dir` (never predictable, H5-10).
+fn random_temp_path(dir: &Path) -> PathBuf {
+    use rand::RngCore;
+    let mut b = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    dir.join(format!(".craton_hsm-backup-{hex}.tmp"))
+}
+
+/// Create a new file that only the current user can access. Never follows
+/// or reuses an existing path.
 #[cfg(unix)]
-fn set_restrictive_permissions(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(path, perms)
-        .map_err(|e| format!("Failed to set file permissions: {}", e))?;
-    Ok(())
+fn create_private_new(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
 }
 
 #[cfg(not(unix))]
-fn set_restrictive_permissions(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // On Windows, use icacls to strip inherited ACEs and grant access only to
-    // the current user.  This ensures backup files containing key material
-    // are not readable by other users on the same machine.
-    //
-    // SECURITY: Use `whoami` to get the actual current username instead of the
-    // %USERNAME% environment variable, which is user-controllable and could be
-    // set to "Everyone" to grant world-readable permissions.
-    let whoami_output = std::process::Command::new("whoami")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+fn create_private_new(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// Absolute path of a Windows system tool (never resolved through PATH).
+#[cfg(windows)]
+fn system32_tool(name: &str) -> PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.is_dir())
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    root.join("System32").join(name)
+}
+
+/// Restrict `path` to the current user only; fails closed (H5-10).
+#[cfg(windows)]
+fn restrict_to_current_user(path: &Path) -> CliResult {
+    use std::process::{Command, Stdio};
+    let out = Command::new(system32_tool("whoami.exe"))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
         .output()
-        .map_err(|e| format!("Cannot determine current Windows user via whoami: {}", e))?;
-    if !whoami_output.status.success() {
-        return Err(
-            "whoami command failed — cannot determine current user for ACL restriction".into(),
-        );
+        .map_err(|e| CliError::Io(format!("Cannot run whoami: {e}")))?;
+    if !out.status.success() {
+        return Err(CliError::Io(
+            "whoami failed; cannot restrict backup ACL".into(),
+        ));
     }
-    let username = String::from_utf8_lossy(&whoami_output.stdout)
-        .trim()
-        .to_string();
-    if username.is_empty() {
-        return Err("whoami returned empty username — cannot set restrictive ACLs".into());
+    let user = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if user.is_empty() {
+        return Err(CliError::Io("whoami returned an empty user name".into()));
     }
-
-    let status = std::process::Command::new("icacls")
-        .args([
-            path,
-            "/inheritance:r",
-            "/grant:r",
-            &format!("{}:(R,W)", username),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => {
-            eprintln!(
-                "Warning: icacls exited with code {} — backup file may have default ACLs",
-                s.code().unwrap_or(-1)
-            );
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!(
-                "Warning: could not run icacls to restrict backup permissions: {}",
-                e
-            );
-            Ok(())
-        }
+    let status = Command::new(system32_tool("icacls.exe"))
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(format!("{user}:(R,W)"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .map_err(|e| CliError::Io(format!("Cannot run icacls: {e}")))?;
+    if !status.success() {
+        return Err(CliError::Io(format!(
+            "icacls failed (exit {:?}); refusing to leave a backup with inherited ACLs",
+            status.code()
+        )));
     }
+    Ok(())
 }
 
-fn load_config(path: &str) -> Result<HsmConfig, Box<dyn std::error::Error>> {
-    let config = HsmConfig::load_from_path(path)?;
-    config
-        .validate()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-    Ok(config)
+#[cfg(not(windows))]
+fn restrict_to_current_user(_path: &Path) -> CliResult {
+    // Unix files are created with mode 0600 by `create_private_new`.
+    Ok(())
 }
 
-pub fn create_backup(config_path: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config(config_path)?;
-    let hsm = HsmCore::new(&config);
+/// Write the backup: random temp file created with `create_new` and owner-only
+/// permissions, fsynced, then moved into place. Without `force` an existing
+/// output is never replaced (hard_link fails if the target exists).
+fn write_backup_file(output: &Path, data: &[u8], force: bool) -> CliResult {
+    if !force && std::fs::symlink_metadata(output).is_ok() {
+        return Err(CliError::Refused(format!(
+            "Output '{}' already exists; pass --force to replace it.",
+            output.display()
+        )));
+    }
+    let dir = match output.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let tmp = random_temp_path(&dir);
+    let result = (|| -> CliResult {
+        let mut f = create_private_new(&tmp)
+            .map_err(|e| CliError::Io(format!("Cannot create temporary backup file: {e}")))?;
+        restrict_to_current_user(&tmp)?;
+        f.write_all(data)
+            .and_then(|_| f.sync_all())
+            .map_err(|e| CliError::Io(format!("Cannot write backup file: {e}")))?;
+        drop(f);
+        if force {
+            std::fs::rename(&tmp, output)
+                .map_err(|e| CliError::Io(format!("Cannot move backup into place: {e}")))?;
+        } else {
+            std::fs::hard_link(&tmp, output).map_err(|e| {
+                CliError::Io(format!(
+                    "Cannot create '{}' (it may already exist): {e}",
+                    output.display()
+                ))
+            })?;
+            std::fs::remove_file(&tmp).ok();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
 
-    // Prompt for passphrase interactively (never via CLI arg)
+/// Create an encrypted backup of all token objects. Requires SO login and a
+/// typed confirmation; refuses to write an empty backup unless asked to.
+pub fn create_backup(ctx: &Ctx, output: &Path, allow_empty: bool, force: bool) -> CliResult {
+    let cfg = ctx.load_config()?;
+    let core = open_core(&cfg)?;
+    core.require_persistent("backup")?;
+    core.require_audit_intact()?;
+    let session = core.login(Role::So)?;
+
+    let objects = core.hsm().object_store().export_all_objects();
+    if objects.is_empty() && !allow_empty {
+        return Err(CliError::Refused(
+            "The token holds no objects; refusing to write an empty backup \
+             (use --allow-empty to override)."
+                .into(),
+        ));
+    }
+    crate::prompt::confirm_typed(
+        &format!(
+            "This exports ALL {} token object(s), including key material, encrypted under a \
+             passphrase.",
+            objects.len()
+        ),
+        "backup",
+        ctx.yes,
+    )?;
     let passphrase = prompt_passphrase(true)?;
 
-    // Export all objects from the object store
-    let objects = hsm.object_store().export_all_objects();
-    let token_serial = config.token.serial_number.clone();
-    let backup_data = backup::create_backup(&objects, &passphrase, &token_serial, None)
-        .map_err(|e| format!("Backup creation failed: {:?}", e))?;
-
-    // Write backup file with restrictive permissions from the start (no race window).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(output)
-            .map_err(|e| format!("Failed to create backup file: {}", e))?;
-        std::io::Write::write_all(&mut file, &backup_data)
-            .map_err(|e| format!("Failed to write backup file: {}", e))?;
-    }
-    #[cfg(not(unix))]
-    {
-        // SECURITY: Write to a temporary file in the same directory first, set
-        // restrictive ACLs on it, then rename to the final path. This avoids
-        // the race window where the backup is world-readable between creation
-        // and ACL restriction.
-        let output_path = std::path::Path::new(output);
-        let parent = output_path.parent().unwrap_or(std::path::Path::new("."));
-        let tmp_name = format!(".craton_hsm-backup-{}.tmp", std::process::id());
-        let tmp_path = parent.join(&tmp_name);
-        let tmp_str = tmp_path.to_string_lossy().to_string();
-
-        // Write to temp file
-        std::fs::write(&tmp_path, &backup_data)
-            .map_err(|e| format!("Failed to write temporary backup file: {}", e))?;
-
-        // Restrict permissions on temp file before it becomes visible at final path
-        if let Err(e) = set_restrictive_permissions(&tmp_str) {
-            // Clean up temp file on ACL failure
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(format!("Failed to set backup file permissions: {}", e).into());
+    let res = backup::create_backup(
+        &objects,
+        &passphrase,
+        &cfg.config.token.serial_number,
+        Some(cfg.config.security.pbkdf2_iterations),
+    );
+    let data = match res {
+        Ok(d) => d,
+        Err(HsmError::PinLenRange) | Err(HsmError::PinInvalid) => {
+            return Err(CliError::Usage(
+                "Passphrase rejected: at least 16 characters with 3 of 4 character classes.".into(),
+            ))
         }
-
-        // Atomic rename to final destination
-        if let Err(e) = std::fs::rename(&tmp_path, output) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(format!("Failed to move backup file to final location: {}", e).into());
-        }
-    }
+        Err(e) => return Err(CliError::General(format!("Backup creation failed: {e}"))),
+    };
+    let write = write_backup_file(output, &data, force);
+    core.record(
+        AuditOperation::GetAttributeValue,
+        write
+            .as_ref()
+            .map(|_| ())
+            .map_err(|_| &HsmError::GeneralError),
+        &format!("backup:objects={}", objects.len()),
+    )?;
+    write?;
+    drop(session);
 
     println!(
         "Backup created: {} ({} objects, {} bytes)",
-        output,
+        output.display(),
         objects.len(),
-        backup_data.len()
+        data.len()
     );
     Ok(())
 }
 
-pub fn restore_backup(config_path: &str, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if !Path::new(input).exists() {
-        return Err("Backup file not found at specified path.".into());
+fn map_restore_error(e: HsmError) -> CliError {
+    match e {
+        HsmError::PinIncorrect => {
+            CliError::BackupRejected("Wrong passphrase or corrupted backup file.".into())
+        }
+        HsmError::DataInvalid => CliError::BackupRejected(
+            "Backup rejected: malformed, bound to a different token serial, older than 30 \
+             days, from the future, or already restored (replay). See the warning above."
+                .into(),
+        ),
+        other => CliError::General(format!("Backup restore failed: {other}")),
+    }
+}
+
+/// Restore token objects from an encrypted backup.
+///
+/// The replay guard is locked for the whole operation and the backup ID is
+/// recorded only after every object has been inserted; on any failure the
+/// inserted objects are rolled back and the backup remains restorable (H5-04).
+/// `--verify-only` decrypts and validates without restoring or consuming.
+pub fn restore_backup(ctx: &Ctx, input: &Path, verify_only: bool) -> CliResult {
+    let cfg = ctx.load_config()?;
+    let data = crate::fsutil::read_bounded(input, MAX_BACKUP_BYTES, "backup file")?;
+
+    if verify_only {
+        let mut ids = ReplayGuard::read_only_ids(cfg.storage_dir())?;
+        let passphrase = prompt_passphrase(false)?;
+        let objects = backup::restore_backup(
+            &data,
+            &passphrase,
+            &cfg.config.token.serial_number,
+            None,
+            Some(cfg.config.security.pbkdf2_iterations),
+            Some(&mut ids),
+        )
+        .map_err(map_restore_error)?;
+        println!(
+            "Backup verified: {} object(s). Nothing was restored and the backup was not consumed.",
+            objects.len()
+        );
+        return Ok(());
     }
 
-    let backup_data = std::fs::read(input).map_err(|_| "Failed to read backup file.")?;
-
-    // Prompt for passphrase interactively
+    let core = open_core(&cfg)?;
+    core.require_persistent("restore")?;
+    core.require_audit_intact()?;
+    let session = core.login(Role::So)?;
+    crate::prompt::confirm_typed(
+        "This imports all objects from the backup into the token.",
+        "restore",
+        ctx.yes,
+    )?;
     let passphrase = prompt_passphrase(false)?;
 
-    let config = load_config(config_path)?;
-    let token_serial = config.token.serial_number.clone();
-
-    // Use persistent replay protection to prevent re-importing the same backup
-    // across daemon restarts. The replay guard file is stored alongside the
-    // config file directory.
-    let replay_guard_path = std::path::Path::new(config_path)
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join(".craton_hsm_replay_guard");
-    let mut replay_guard = backup::PersistentReplayGuard::new(replay_guard_path);
-
-    // Extract the guard's consumed IDs into a mutable HashSet for restore_backup.
-    // After restore, any newly inserted ID is persisted back to the guard file.
-    let mut consumed_ids = replay_guard.consumed_ids_clone();
-
+    // Held until the end of the function: load → check → restore → record.
+    let mut guard = ReplayGuard::open_locked(cfg.storage_dir())?;
+    let mut ids = guard.consumed_ids().clone();
     let objects = backup::restore_backup(
-        &backup_data,
+        &data,
         &passphrase,
-        &token_serial,
-        None, // use default 30-day max age
-        None, // default PBKDF2 iterations
-        Some(&mut consumed_ids),
+        &cfg.config.token.serial_number,
+        None,
+        Some(cfg.config.security.pbkdf2_iterations),
+        Some(&mut ids),
     )
-    .map_err(|e| {
-        format!(
-            "Backup restore failed (wrong passphrase or corrupt file): {:?}",
-            e
-        )
-    })?;
+    .map_err(map_restore_error)?;
+    let new_id = ids
+        .difference(guard.consumed_ids())
+        .next()
+        .cloned()
+        .ok_or_else(|| CliError::General("Backup ID was not reported by the library.".into()))?;
 
-    // Persist any newly consumed backup IDs to the guard file
-    for id in &consumed_ids {
-        if !replay_guard.is_consumed(id) {
-            replay_guard
-                .record(id.clone())
-                .map_err(|e| format!("Failed to persist replay guard: {:?}", e))?;
-        }
-    }
-    let hsm = HsmCore::new(&config);
-
-    // Check for handle conflicts before inserting
-    let mut skipped = 0usize;
-    let mut restored = 0usize;
-    for obj in objects {
-        let handle = obj.handle;
-        if hsm.object_store().get_object(handle).is_ok() {
-            eprintln!(
-                "Warning: object handle {} already exists, skipping to avoid overwrite.",
-                handle
-            );
-            skipped += 1;
-            continue;
-        }
-        match hsm.object_store().insert_object(obj) {
-            Ok(_) => restored += 1,
-            Err(e) => {
-                eprintln!("Warning: failed to insert object {}: {:?}", handle, e);
-                skipped += 1;
+    let store = core.hsm().object_store();
+    let mut inserted = Vec::with_capacity(objects.len());
+    let outcome = (|| -> CliResult {
+        for mut obj in objects {
+            if obj.key_material.is_some() && !obj.sensitive && !obj.extractable {
+                return Err(CliError::BackupRejected(
+                    "Backup contains an inconsistent key object; nothing restored.".into(),
+                ));
             }
+            // Never trust handles/slots from the payload.
+            obj.handle = store
+                .next_handle()
+                .map_err(|e| CliError::General(format!("Handle allocation failed: {e}")))?;
+            obj.slot_id = 0;
+            let h = store
+                .insert_object(obj)
+                .map_err(|e| CliError::General(format!("Failed to insert object: {e}")))?;
+            inserted.push(h);
+        }
+        // HANDOFF: insert_object must report persistence failures so that
+        // "committed" below really means durable.
+        guard.record(&new_id)
+    })();
+
+    if let Err(e) = outcome {
+        for h in &inserted {
+            let _ = store.destroy_object(*h);
+        }
+        let _ = core.record(
+            AuditOperation::CreateObject,
+            Err(&HsmError::GeneralError),
+            "restore",
+        );
+        return Err(e);
+    }
+    core.record(
+        AuditOperation::CreateObject,
+        Ok(()),
+        &format!("restore:objects={}", inserted.len()),
+    )?;
+    drop(guard);
+    drop(session);
+
+    println!("Restored {} object(s) from backup.", inserted.len());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_write_never_overwrites_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("b.rhbk");
+        write_backup_file(&out, b"one", false).unwrap();
+        assert!(matches!(
+            write_backup_file(&out, b"two", false),
+            Err(CliError::Refused(_))
+        ));
+        assert_eq!(std::fs::read(&out).unwrap(), b"one");
+        write_backup_file(&out, b"two", true).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"two");
+        // No temp files left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0);
         }
     }
 
-    println!("Restored {} objects from backup.", restored);
-    if skipped > 0 {
-        eprintln!("{} objects skipped due to existing handles.", skipped);
+    #[test]
+    fn temp_names_are_random() {
+        let d = Path::new("/x");
+        assert_ne!(random_temp_path(d), random_temp_path(d));
     }
-    Ok(())
+
+    #[test]
+    fn restore_errors_are_distinct() {
+        assert!(matches!(
+            map_restore_error(HsmError::PinIncorrect),
+            CliError::BackupRejected(_)
+        ));
+        assert!(matches!(
+            map_restore_error(HsmError::DataInvalid),
+            CliError::BackupRejected(_)
+        ));
+    }
 }
