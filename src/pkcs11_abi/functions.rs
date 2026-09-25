@@ -296,7 +296,7 @@ unsafe fn copy_param_bytes(p: *const u8, len: CK_ULONG) -> Result<Vec<u8>, CK_RV
 
 /// Parse and canonicalize the mechanism parameter of an encrypt/decrypt
 /// operation at `C_EncryptInit` / `C_DecryptInit` time.
-fn canonical_cipher_param(
+unsafe fn canonical_cipher_param(
     hsm: &HsmCore,
     p_mechanism: CK_MECHANISM_PTR,
     mechanism: CK_MECHANISM_TYPE,
@@ -320,7 +320,7 @@ fn canonical_cipher_param(
                 // Compatibility form: the parameter is a bare 96-bit IV (no
                 // AAD, 128-bit tag). Honoured as a caller IV; refused for
                 // encryption in FIPS approved mode (IG C.H).
-                let iv = extract_mechanism_param(p_mechanism);
+                let iv = unsafe { extract_mechanism_param(p_mechanism) };
                 if encrypt && hsm.algorithm_config.fips_approved_only {
                     return Err(CKR_MECHANISM_PARAM_INVALID);
                 }
@@ -373,7 +373,7 @@ fn canonical_cipher_param(
         CKM_AES_CTR => {
             let params = if mech.parameter_len == 16 {
                 // Legacy encoding: raw 16-byte counter block.
-                CtrParams::from_legacy_iv(&extract_mechanism_param(p_mechanism))
+                CtrParams::from_legacy_iv(&unsafe { extract_mechanism_param(p_mechanism) })
             } else {
                 // SAFETY: size checked by read_param_struct.
                 let c = unsafe { read_param_struct::<CkAesCtrParams>(p_mechanism) }
@@ -388,7 +388,7 @@ fn canonical_cipher_param(
             Ok(params.encode())
         }
         CKM_AES_CBC | CKM_AES_CBC_PAD => {
-            let iv = extract_mechanism_param(p_mechanism);
+            let iv = unsafe { extract_mechanism_param(p_mechanism) };
             if iv.len() != 16 {
                 return Err(CKR_MECHANISM_PARAM_INVALID);
             }
@@ -398,7 +398,7 @@ fn canonical_cipher_param(
             }
             Ok(iv)
         }
-        _ => Ok(extract_mechanism_param(p_mechanism)),
+        _ => Ok(unsafe { extract_mechanism_param(p_mechanism) }),
     }
 }
 
@@ -416,7 +416,7 @@ fn stored_gcm_params(mech_param: &[u8]) -> HsmResult<crate::crypto::params::GcmP
 /// Validate `CK_RSA_PKCS_PSS_PARAMS` supplied with a hash-specific PSS
 /// mechanism at `C_SignInit` / `C_VerifyInit` (H2-21): if present they must
 /// match the mechanism's hash, MGF1 hash and salt length.
-fn validate_pss_init_params(
+unsafe fn validate_pss_init_params(
     p_mechanism: CK_MECHANISM_PTR,
     mechanism: CK_MECHANISM_TYPE,
 ) -> Result<(), CK_RV> {
@@ -450,8 +450,16 @@ fn ec_curve_of(obj: &StoredObject) -> HsmResult<sign::EcCurve> {
 // Core library functions
 // ============================================================================
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
+pub unsafe extern "C" fn C_Initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
     catch_unwind(|| {
         let mut guard = HSM.lock();
 
@@ -519,8 +527,16 @@ pub extern "C" fn C_Initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
+pub unsafe extern "C" fn C_Finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
     catch_unwind(|| {
         if !p_reserved.is_null() {
             return CKR_ARGUMENTS_BAD;
@@ -551,8 +567,16 @@ pub extern "C" fn C_Finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetInfo(p_info: CK_INFO_PTR) -> CK_RV {
+pub unsafe extern "C" fn C_GetInfo(p_info: CK_INFO_PTR) -> CK_RV {
     catch_unwind(|| {
         if get_hsm().is_err() {
             return CKR_CRYPTOKI_NOT_INITIALIZED;
@@ -580,8 +604,16 @@ pub extern "C" fn C_GetInfo(p_info: CK_INFO_PTR) -> CK_RV {
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetFunctionList(pp_function_list: *mut *mut CK_FUNCTION_LIST) -> CK_RV {
+pub unsafe extern "C" fn C_GetFunctionList(pp_function_list: *mut *mut CK_FUNCTION_LIST) -> CK_RV {
     catch_unwind(|| {
         if pp_function_list.is_null() {
             return CKR_ARGUMENTS_BAD;
@@ -598,8 +630,16 @@ pub extern "C" fn C_GetFunctionList(pp_function_list: *mut *mut CK_FUNCTION_LIST
 // Slot and Token management
 // ============================================================================
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetSlotList(
+pub unsafe extern "C" fn C_GetSlotList(
     token_present: CK_BBOOL,
     p_slot_list: CK_SLOT_ID_PTR,
     pul_count: CK_ULONG_PTR,
@@ -646,8 +686,16 @@ pub extern "C" fn C_GetSlotList(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetSlotInfo(slot_id: CK_SLOT_ID, p_info: CK_SLOT_INFO_PTR) -> CK_RV {
+pub unsafe extern "C" fn C_GetSlotInfo(slot_id: CK_SLOT_ID, p_info: CK_SLOT_INFO_PTR) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -678,8 +726,16 @@ pub extern "C" fn C_GetSlotInfo(slot_id: CK_SLOT_ID, p_info: CK_SLOT_INFO_PTR) -
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetTokenInfo(slot_id: CK_SLOT_ID, p_info: CK_TOKEN_INFO_PTR) -> CK_RV {
+pub unsafe extern "C" fn C_GetTokenInfo(slot_id: CK_SLOT_ID, p_info: CK_TOKEN_INFO_PTR) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -725,8 +781,16 @@ pub extern "C" fn C_GetTokenInfo(slot_id: CK_SLOT_ID, p_info: CK_TOKEN_INFO_PTR)
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_InitToken(
+pub unsafe extern "C" fn C_InitToken(
     slot_id: CK_SLOT_ID,
     p_pin: CK_UTF8CHAR_PTR,
     pin_len: CK_ULONG,
@@ -770,8 +834,16 @@ pub extern "C" fn C_InitToken(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_InitPIN(
+pub unsafe extern "C" fn C_InitPIN(
     session: CK_SESSION_HANDLE,
     p_pin: CK_UTF8CHAR_PTR,
     pin_len: CK_ULONG,
@@ -813,8 +885,16 @@ pub extern "C" fn C_InitPIN(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SetPIN(
+pub unsafe extern "C" fn C_SetPIN(
     session: CK_SESSION_HANDLE,
     p_old_pin: CK_UTF8CHAR_PTR,
     old_len: CK_ULONG,
@@ -855,8 +935,16 @@ pub extern "C" fn C_SetPIN(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetMechanismList(
+pub unsafe extern "C" fn C_GetMechanismList(
     slot_id: CK_SLOT_ID,
     p_mechanism_list: CK_MECHANISM_TYPE_PTR,
     pul_count: CK_ULONG_PTR,
@@ -903,8 +991,16 @@ pub extern "C" fn C_GetMechanismList(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetMechanismInfo(
+pub unsafe extern "C" fn C_GetMechanismInfo(
     slot_id: CK_SLOT_ID,
     mechanism_type: CK_MECHANISM_TYPE,
     p_info: CK_MECHANISM_INFO_PTR,
@@ -1029,8 +1125,16 @@ pub extern "C" fn C_GetMechanismInfo(
 // Session management
 // ============================================================================
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_OpenSession(
+pub unsafe extern "C" fn C_OpenSession(
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
     _p_application: CK_VOID_PTR,
@@ -1059,8 +1163,16 @@ pub extern "C" fn C_OpenSession(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_CloseSession(session: CK_SESSION_HANDLE) -> CK_RV {
+pub unsafe extern "C" fn C_CloseSession(session: CK_SESSION_HANDLE) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -1077,8 +1189,16 @@ pub extern "C" fn C_CloseSession(session: CK_SESSION_HANDLE) -> CK_RV {
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_CloseAllSessions(slot_id: CK_SLOT_ID) -> CK_RV {
+pub unsafe extern "C" fn C_CloseAllSessions(slot_id: CK_SLOT_ID) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -1092,8 +1212,16 @@ pub extern "C" fn C_CloseAllSessions(slot_id: CK_SLOT_ID) -> CK_RV {
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetSessionInfo(
+pub unsafe extern "C" fn C_GetSessionInfo(
     session: CK_SESSION_HANDLE,
     p_info: CK_SESSION_INFO_PTR,
 ) -> CK_RV {
@@ -1119,8 +1247,16 @@ pub extern "C" fn C_GetSessionInfo(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Login(
+pub unsafe extern "C" fn C_Login(
     session: CK_SESSION_HANDLE,
     user_type: CK_USER_TYPE,
     p_pin: CK_UTF8CHAR_PTR,
@@ -1167,8 +1303,16 @@ pub extern "C" fn C_Login(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Logout(session: CK_SESSION_HANDLE) -> CK_RV {
+pub unsafe extern "C" fn C_Logout(session: CK_SESSION_HANDLE) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -1188,8 +1332,16 @@ pub extern "C" fn C_Logout(session: CK_SESSION_HANDLE) -> CK_RV {
 // Object management
 // ============================================================================
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_CreateObject(
+pub unsafe extern "C" fn C_CreateObject(
     session: CK_SESSION_HANDLE,
     p_template: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
@@ -1214,7 +1366,7 @@ pub extern "C" fn C_CreateObject(
             return CKR_SESSION_READ_ONLY;
         }
 
-        let template = match parse_template(p_template, count) {
+        let template = match unsafe { parse_template(p_template, count) } {
             Ok(t) => t,
             Err(rv) => return rv,
         };
@@ -1256,8 +1408,19 @@ pub extern "C" fn C_CreateObject(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DestroyObject(session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE) -> CK_RV {
+pub unsafe extern "C" fn C_DestroyObject(
+    session: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -1292,8 +1455,16 @@ pub extern "C" fn C_DestroyObject(session: CK_SESSION_HANDLE, object: CK_OBJECT_
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetObjectSize(
+pub unsafe extern "C" fn C_GetObjectSize(
     session: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
     pul_size: CK_ULONG_PTR,
@@ -1336,8 +1507,16 @@ pub extern "C" fn C_GetObjectSize(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetAttributeValue(
+pub unsafe extern "C" fn C_GetAttributeValue(
     session: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
     p_template: CK_ATTRIBUTE_PTR,
@@ -1426,8 +1605,16 @@ pub extern "C" fn C_GetAttributeValue(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SetAttributeValue(
+pub unsafe extern "C" fn C_SetAttributeValue(
     session: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
     p_template: CK_ATTRIBUTE_PTR,
@@ -1468,7 +1655,7 @@ pub extern "C" fn C_SetAttributeValue(
             }
         }
 
-        let template = match parse_template(p_template, count) {
+        let template = match unsafe { parse_template(p_template, count) } {
             Ok(t) => t,
             Err(rv) => return rv,
         };
@@ -1494,8 +1681,16 @@ pub extern "C" fn C_SetAttributeValue(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_FindObjectsInit(
+pub unsafe extern "C" fn C_FindObjectsInit(
     session: CK_SESSION_HANDLE,
     p_template: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
@@ -1519,7 +1714,7 @@ pub extern "C" fn C_FindObjectsInit(
         let template = if p_template.is_null() || count == 0 {
             vec![]
         } else {
-            match parse_template(p_template, count) {
+            match unsafe { parse_template(p_template, count) } {
                 Ok(t) => t,
                 Err(rv) => return rv,
             }
@@ -1540,8 +1735,16 @@ pub extern "C" fn C_FindObjectsInit(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_FindObjects(
+pub unsafe extern "C" fn C_FindObjects(
     session: CK_SESSION_HANDLE,
     ph_object: CK_OBJECT_HANDLE_PTR,
     max_count: CK_ULONG,
@@ -1584,8 +1787,16 @@ pub extern "C" fn C_FindObjects(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_FindObjectsFinal(session: CK_SESSION_HANDLE) -> CK_RV {
+pub unsafe extern "C" fn C_FindObjectsFinal(session: CK_SESSION_HANDLE) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -1611,8 +1822,16 @@ pub extern "C" fn C_FindObjectsFinal(session: CK_SESSION_HANDLE) -> CK_RV {
 // Crypto operations
 // ============================================================================
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_EncryptInit(
+pub unsafe extern "C" fn C_EncryptInit(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     key: CK_OBJECT_HANDLE,
@@ -1671,7 +1890,8 @@ pub extern "C" fn C_EncryptInit(
         // Parse CK_GCM_PARAMS / CK_RSA_PKCS_OAEP_PARAMS / CK_AES_CTR_PARAMS
         // now, while their embedded pointers are valid (H1-16). Rejects
         // all-zero CBC/CTR IVs early.
-        let mech_param = match canonical_cipher_param(&hsm, p_mechanism, mechanism, true) {
+        let mech_param = match unsafe { canonical_cipher_param(&hsm, p_mechanism, mechanism, true) }
+        {
             Ok(p) => p,
             Err(rv) => return rv,
         };
@@ -1691,7 +1911,7 @@ pub extern "C" fn C_EncryptInit(
 /// Helper to extract mechanism parameter bytes.
 /// SAFETY: Caller must ensure p_mechanism is a valid, non-null pointer to CK_MECHANISM.
 /// The p_parameter field is checked for null before constructing a slice.
-fn extract_mechanism_param(p_mechanism: CK_MECHANISM_PTR) -> Vec<u8> {
+unsafe fn extract_mechanism_param(p_mechanism: CK_MECHANISM_PTR) -> Vec<u8> {
     unsafe {
         let mech = &*p_mechanism;
         if mech.p_parameter.is_null() || mech.parameter_len == 0 {
@@ -1708,8 +1928,16 @@ fn extract_mechanism_param(p_mechanism: CK_MECHANISM_PTR) -> Vec<u8> {
     }
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Encrypt(
+pub unsafe extern "C" fn C_Encrypt(
     session: CK_SESSION_HANDLE,
     p_data: CK_BYTE_PTR,
     data_len: CK_ULONG,
@@ -1894,8 +2122,16 @@ pub extern "C" fn C_Encrypt(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DecryptInit(
+pub unsafe extern "C" fn C_DecryptInit(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     key: CK_OBJECT_HANDLE,
@@ -1949,10 +2185,11 @@ pub extern "C" fn C_DecryptInit(
             }
         }
 
-        let mech_param = match canonical_cipher_param(&hsm, p_mechanism, mechanism, false) {
-            Ok(p) => p,
-            Err(rv) => return rv,
-        };
+        let mech_param =
+            match unsafe { canonical_cipher_param(&hsm, p_mechanism, mechanism, false) } {
+                Ok(p) => p,
+                Err(rv) => return rv,
+            };
         sess.active_operation = Some(ActiveOperation::Decrypt {
             mechanism,
             key_handle: key,
@@ -1965,8 +2202,16 @@ pub extern "C" fn C_DecryptInit(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Decrypt(
+pub unsafe extern "C" fn C_Decrypt(
     session: CK_SESSION_HANDLE,
     p_encrypted_data: CK_BYTE_PTR,
     encrypted_data_len: CK_ULONG,
@@ -2125,8 +2370,16 @@ pub extern "C" fn C_Decrypt(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SignInit(
+pub unsafe extern "C" fn C_SignInit(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     key: CK_OBJECT_HANDLE,
@@ -2175,7 +2428,7 @@ pub extern "C" fn C_SignInit(
             return rv;
         }
         // Explicit CK_RSA_PKCS_PSS_PARAMS must match the mechanism (H2-21).
-        if let Err(rv) = validate_pss_init_params(p_mechanism, mechanism) {
+        if let Err(rv) = unsafe { validate_pss_init_params(p_mechanism, mechanism) } {
             return rv;
         }
 
@@ -2210,8 +2463,16 @@ pub extern "C" fn C_SignInit(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Sign(
+pub unsafe extern "C" fn C_Sign(
     session: CK_SESSION_HANDLE,
     p_data: CK_BYTE_PTR,
     data_len: CK_ULONG,
@@ -2487,8 +2748,16 @@ fn verify_prehashed(
     }
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_VerifyInit(
+pub unsafe extern "C" fn C_VerifyInit(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     key: CK_OBJECT_HANDLE,
@@ -2522,7 +2791,7 @@ pub extern "C" fn C_VerifyInit(
         {
             return rv;
         }
-        if let Err(rv) = validate_pss_init_params(p_mechanism, mechanism) {
+        if let Err(rv) = unsafe { validate_pss_init_params(p_mechanism, mechanism) } {
             return rv;
         }
 
@@ -2561,8 +2830,16 @@ pub extern "C" fn C_VerifyInit(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Verify(
+pub unsafe extern "C" fn C_Verify(
     session: CK_SESSION_HANDLE,
     p_data: CK_BYTE_PTR,
     data_len: CK_ULONG,
@@ -2663,8 +2940,16 @@ pub extern "C" fn C_Verify(
 // Key generation
 // ============================================================================
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GenerateKey(
+pub unsafe extern "C" fn C_GenerateKey(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     p_template: CK_ATTRIBUTE_PTR,
@@ -2702,7 +2987,7 @@ pub extern "C" fn C_GenerateKey(
         let template = if p_template.is_null() {
             vec![]
         } else {
-            match parse_template(p_template, count) {
+            match unsafe { parse_template(p_template, count) } {
                 Ok(t) => t,
                 Err(rv) => return rv,
             }
@@ -2847,8 +3132,16 @@ pub extern "C" fn C_GenerateKey(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GenerateKeyPair(
+pub unsafe extern "C" fn C_GenerateKeyPair(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     p_public_key_template: CK_ATTRIBUTE_PTR,
@@ -2889,7 +3182,7 @@ pub extern "C" fn C_GenerateKeyPair(
         let pub_template = if p_public_key_template.is_null() {
             vec![]
         } else {
-            match parse_template(p_public_key_template, public_key_attr_count) {
+            match unsafe { parse_template(p_public_key_template, public_key_attr_count) } {
                 Ok(t) => t,
                 Err(rv) => return rv,
             }
@@ -2897,7 +3190,7 @@ pub extern "C" fn C_GenerateKeyPair(
         let priv_template = if p_private_key_template.is_null() {
             vec![]
         } else {
-            match parse_template(p_private_key_template, private_key_attr_count) {
+            match unsafe { parse_template(p_private_key_template, private_key_attr_count) } {
                 Ok(t) => t,
                 Err(rv) => return rv,
             }
@@ -3460,8 +3753,16 @@ fn apply_priv_template(obj: &mut StoredObject, template: &[(CK_ATTRIBUTE_TYPE, V
 // Random generation
 // ============================================================================
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SeedRandom(
+pub unsafe extern "C" fn C_SeedRandom(
     session: CK_SESSION_HANDLE,
     _p_seed: CK_BYTE_PTR,
     _seed_len: CK_ULONG,
@@ -3497,8 +3798,16 @@ pub extern "C" fn C_SeedRandom(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GenerateRandom(
+pub unsafe extern "C" fn C_GenerateRandom(
     session: CK_SESSION_HANDLE,
     p_random_data: CK_BYTE_PTR,
     random_len: CK_ULONG,
@@ -3551,8 +3860,17 @@ fn not_supported() -> CK_RV {
 
 /// C_GetOperationState saves the cryptographic operation state of a session.
 /// Supports the two-call idiom: if pOperationState is NULL, only the length is returned.
+///
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetOperationState(
+pub unsafe extern "C" fn C_GetOperationState(
     hSession: CK_SESSION_HANDLE,
     pOperationState: CK_BYTE_PTR,
     pulOperationStateLen: CK_ULONG_PTR,
@@ -3621,8 +3939,17 @@ pub extern "C" fn C_GetOperationState(
 /// C_SetOperationState restores the cryptographic operation state of a session.
 /// hEncryptionKey and hAuthenticationKey are used to supply key handles for
 /// encrypt/decrypt and sign/verify operations respectively.
+///
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SetOperationState(
+pub unsafe extern "C" fn C_SetOperationState(
     hSession: CK_SESSION_HANDLE,
     pOperationState: CK_BYTE_PTR,
     ulOperationStateLen: CK_ULONG,
@@ -3762,8 +4089,17 @@ pub extern "C" fn C_SetOperationState(
 /// - CKA_EXTRACTABLE can only be set to CK_FALSE (cannot increase extractability)
 /// - CKA_CLASS and CKA_KEY_TYPE cannot be changed in the copy
 /// - Session must be logged in for private objects
+///
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_CopyObject(
+pub unsafe extern "C" fn C_CopyObject(
     session: CK_SESSION_HANDLE,
     h_object: CK_OBJECT_HANDLE,
     p_template: CK_ATTRIBUTE_PTR,
@@ -4041,8 +4377,16 @@ fn encrypt_mechanism_supports_multipart(mechanism: CK_MECHANISM_TYPE) -> bool {
     matches!(mechanism, CKM_AES_CBC | CKM_AES_CBC_PAD | CKM_AES_CTR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_EncryptUpdate(
+pub unsafe extern "C" fn C_EncryptUpdate(
     session: CK_SESSION_HANDLE,
     p_part: CK_BYTE_PTR,
     part_len: CK_ULONG,
@@ -4092,8 +4436,16 @@ pub extern "C" fn C_EncryptUpdate(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_EncryptFinal(
+pub unsafe extern "C" fn C_EncryptFinal(
     session: CK_SESSION_HANDLE,
     p_last_encrypted_part: CK_BYTE_PTR,
     pul_last_encrypted_part_len: CK_ULONG_PTR,
@@ -4247,8 +4599,16 @@ pub extern "C" fn C_EncryptFinal(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DecryptUpdate(
+pub unsafe extern "C" fn C_DecryptUpdate(
     session: CK_SESSION_HANDLE,
     p_encrypted_part: CK_BYTE_PTR,
     encrypted_part_len: CK_ULONG,
@@ -4299,8 +4659,16 @@ pub extern "C" fn C_DecryptUpdate(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DecryptFinal(
+pub unsafe extern "C" fn C_DecryptFinal(
     session: CK_SESSION_HANDLE,
     p_last_part: CK_BYTE_PTR,
     pul_last_part_len: CK_ULONG_PTR,
@@ -4454,8 +4822,19 @@ pub extern "C" fn C_DecryptFinal(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DigestInit(session: CK_SESSION_HANDLE, p_mechanism: CK_MECHANISM_PTR) -> CK_RV {
+pub unsafe extern "C" fn C_DigestInit(
+    session: CK_SESSION_HANDLE,
+    p_mechanism: CK_MECHANISM_PTR,
+) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -4501,8 +4880,16 @@ pub extern "C" fn C_DigestInit(session: CK_SESSION_HANDLE, p_mechanism: CK_MECHA
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_Digest(
+pub unsafe extern "C" fn C_Digest(
     session: CK_SESSION_HANDLE,
     p_data: CK_BYTE_PTR,
     data_len: CK_ULONG,
@@ -4582,8 +4969,16 @@ pub extern "C" fn C_Digest(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DigestUpdate(
+pub unsafe extern "C" fn C_DigestUpdate(
     session: CK_SESSION_HANDLE,
     p_part: CK_BYTE_PTR,
     part_len: CK_ULONG,
@@ -4632,8 +5027,17 @@ pub extern "C" fn C_DigestUpdate(
 /// Only works for secret keys (CKO_SECRET_KEY). Asymmetric keys return
 /// CKR_KEY_INDIGESTIBLE. The key must not be sensitive and non-extractable,
 /// since we need to read the raw bytes.
+///
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DigestKey(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> CK_RV {
+pub unsafe extern "C" fn C_DigestKey(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> CK_RV {
     catch_unwind(|| {
         let hsm = match get_hsm() {
             Ok(h) => h,
@@ -4704,8 +5108,16 @@ pub extern "C" fn C_DigestKey(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE)
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DigestFinal(
+pub unsafe extern "C" fn C_DigestFinal(
     session: CK_SESSION_HANDLE,
     p_digest: CK_BYTE_PTR,
     pul_digest_len: CK_ULONG_PTR,
@@ -4787,8 +5199,16 @@ pub extern "C" fn C_DigestFinal(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SignUpdate(
+pub unsafe extern "C" fn C_SignUpdate(
     session: CK_SESSION_HANDLE,
     p_part: CK_BYTE_PTR,
     part_len: CK_ULONG,
@@ -4842,8 +5262,16 @@ pub extern "C" fn C_SignUpdate(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SignFinal(
+pub unsafe extern "C" fn C_SignFinal(
     session: CK_SESSION_HANDLE,
     p_signature: CK_BYTE_PTR,
     pul_signature_len: CK_ULONG_PTR,
@@ -4984,8 +5412,16 @@ pub extern "C" fn C_SignFinal(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SignRecoverInit(
+pub unsafe extern "C" fn C_SignRecoverInit(
     _s: CK_SESSION_HANDLE,
     _m: CK_MECHANISM_PTR,
     _k: CK_OBJECT_HANDLE,
@@ -4993,8 +5429,16 @@ pub extern "C" fn C_SignRecoverInit(
     not_supported()
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SignRecover(
+pub unsafe extern "C" fn C_SignRecover(
     _s: CK_SESSION_HANDLE,
     _d: CK_BYTE_PTR,
     _dl: CK_ULONG,
@@ -5004,8 +5448,16 @@ pub extern "C" fn C_SignRecover(
     not_supported()
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_VerifyUpdate(
+pub unsafe extern "C" fn C_VerifyUpdate(
     session: CK_SESSION_HANDLE,
     p_part: CK_BYTE_PTR,
     part_len: CK_ULONG,
@@ -5059,8 +5511,16 @@ pub extern "C" fn C_VerifyUpdate(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_VerifyFinal(
+pub unsafe extern "C" fn C_VerifyFinal(
     session: CK_SESSION_HANDLE,
     p_signature: CK_BYTE_PTR,
     signature_len: CK_ULONG,
@@ -5170,8 +5630,16 @@ pub extern "C" fn C_VerifyFinal(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_VerifyRecoverInit(
+pub unsafe extern "C" fn C_VerifyRecoverInit(
     _s: CK_SESSION_HANDLE,
     _m: CK_MECHANISM_PTR,
     _k: CK_OBJECT_HANDLE,
@@ -5179,8 +5647,16 @@ pub extern "C" fn C_VerifyRecoverInit(
     not_supported()
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_VerifyRecover(
+pub unsafe extern "C" fn C_VerifyRecover(
     _s: CK_SESSION_HANDLE,
     _sig: CK_BYTE_PTR,
     _sl: CK_ULONG,
@@ -5190,8 +5666,16 @@ pub extern "C" fn C_VerifyRecover(
     not_supported()
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DigestEncryptUpdate(
+pub unsafe extern "C" fn C_DigestEncryptUpdate(
     _s: CK_SESSION_HANDLE,
     _p: CK_BYTE_PTR,
     _pl: CK_ULONG,
@@ -5201,8 +5685,16 @@ pub extern "C" fn C_DigestEncryptUpdate(
     not_supported()
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DecryptDigestUpdate(
+pub unsafe extern "C" fn C_DecryptDigestUpdate(
     _s: CK_SESSION_HANDLE,
     _e: CK_BYTE_PTR,
     _el: CK_ULONG,
@@ -5212,8 +5704,16 @@ pub extern "C" fn C_DecryptDigestUpdate(
     not_supported()
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_SignEncryptUpdate(
+pub unsafe extern "C" fn C_SignEncryptUpdate(
     _s: CK_SESSION_HANDLE,
     _p: CK_BYTE_PTR,
     _pl: CK_ULONG,
@@ -5223,8 +5723,16 @@ pub extern "C" fn C_SignEncryptUpdate(
     not_supported()
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DecryptVerifyUpdate(
+pub unsafe extern "C" fn C_DecryptVerifyUpdate(
     _s: CK_SESSION_HANDLE,
     _e: CK_BYTE_PTR,
     _el: CK_ULONG,
@@ -5234,8 +5742,16 @@ pub extern "C" fn C_DecryptVerifyUpdate(
     not_supported()
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_WrapKey(
+pub unsafe extern "C" fn C_WrapKey(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     wrapping_key: CK_OBJECT_HANDLE,
@@ -5389,8 +5905,16 @@ pub extern "C" fn C_WrapKey(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_UnwrapKey(
+pub unsafe extern "C" fn C_UnwrapKey(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     unwrapping_key: CK_OBJECT_HANDLE,
@@ -5474,7 +5998,7 @@ pub extern "C" fn C_UnwrapKey(
         let template = if p_template.is_null() {
             vec![]
         } else {
-            match parse_template(p_template, attr_count) {
+            match unsafe { parse_template(p_template, attr_count) } {
                 Ok(t) => t,
                 Err(rv) => return rv,
             }
@@ -5570,8 +6094,16 @@ pub extern "C" fn C_UnwrapKey(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_DeriveKey(
+pub unsafe extern "C" fn C_DeriveKey(
     session: CK_SESSION_HANDLE,
     p_mechanism: CK_MECHANISM_PTR,
     base_key: CK_OBJECT_HANDLE,
@@ -5642,7 +6174,7 @@ pub extern "C" fn C_DeriveKey(
         // (kdf, pSharedData, pPublicData) — or, for backward compatibility,
         // the raw peer point (X9.63 SHA-256 KDF, no shared data). H2-06/A2-12.
         let (kem_ciphertext, ecdh_params) = if pqc::is_ml_kem_mechanism(mechanism) {
-            let ct = extract_mechanism_param(p_mechanism);
+            let ct = unsafe { extract_mechanism_param(p_mechanism) };
             if ct.is_empty() {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
@@ -5664,9 +6196,9 @@ pub extern "C" fn C_DeriveKey(
                         };
                     crate::crypto::params::EcdhParams::from_ck(p.kdf, &shared, &public)
                 } else {
-                    crate::crypto::params::EcdhParams::from_legacy_point(&extract_mechanism_param(
-                        p_mechanism,
-                    ))
+                    crate::crypto::params::EcdhParams::from_legacy_point(&unsafe {
+                        extract_mechanism_param(p_mechanism)
+                    })
                 };
             match parsed {
                 Ok(p) => (Vec::new(), Some(p)),
@@ -5677,7 +6209,7 @@ pub extern "C" fn C_DeriveKey(
         let template = if p_template.is_null() {
             vec![]
         } else {
-            match parse_template(p_template, attr_count) {
+            match unsafe { parse_template(p_template, attr_count) } {
                 Ok(t) => t,
                 Err(rv) => return rv,
             }
@@ -5800,18 +6332,42 @@ pub extern "C" fn C_DeriveKey(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_GetFunctionStatus(_s: CK_SESSION_HANDLE) -> CK_RV {
+pub unsafe extern "C" fn C_GetFunctionStatus(_s: CK_SESSION_HANDLE) -> CK_RV {
     CKR_FUNCTION_NOT_PARALLEL
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_CancelFunction(_s: CK_SESSION_HANDLE) -> CK_RV {
+pub unsafe extern "C" fn C_CancelFunction(_s: CK_SESSION_HANDLE) -> CK_RV {
     CKR_FUNCTION_NOT_PARALLEL
 }
 
+/// # Safety
+///
+/// PKCS#11 C ABI entry point. The caller must follow the PKCS#11 calling
+/// convention: every non-NULL pointer argument must be properly aligned and
+/// valid for reads (inputs) or writes (outputs) of the size implied by the
+/// PKCS#11 specification and the accompanying length argument for the whole
+/// duration of the call, and buffers must not be mutated concurrently by
+/// another thread. NULL is accepted only where the specification allows it.
 #[no_mangle]
-pub extern "C" fn C_WaitForSlotEvent(
+pub unsafe extern "C" fn C_WaitForSlotEvent(
     _flags: CK_FLAGS,
     _slot: CK_SLOT_ID_PTR,
     _reserved: CK_VOID_PTR,
@@ -5945,7 +6501,7 @@ fn parse_ck_bbool(value: &[u8]) -> Result<bool, CK_RV> {
 ///
 /// SAFETY: Caller must ensure p_template points to `count` valid CK_ATTRIBUTE structs.
 /// Each attribute's p_value must point to value_len valid bytes (or be null).
-fn parse_template(
+unsafe fn parse_template(
     p_template: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
 ) -> Result<Vec<(CK_ATTRIBUTE_TYPE, Vec<u8>)>, CK_RV> {

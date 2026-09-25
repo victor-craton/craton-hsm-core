@@ -13,7 +13,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 }
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -27,47 +27,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"LCyTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed");
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -104,13 +114,15 @@ fn generate_aes_key(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "generate_aes_key failed: 0x{:08X}", rv);
     key
 }
@@ -160,13 +172,15 @@ fn generate_aes_key_with_dates(
         });
     }
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "generate_aes_key_with_dates failed: 0x{:08X}",
@@ -228,16 +242,18 @@ fn generate_rsa_keypair(session: CK_SESSION_HANDLE) -> (CK_OBJECT_HANDLE, CK_OBJ
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "RSA keygen failed: 0x{:08X}", rv);
     (pub_key, priv_key)
 }
@@ -256,7 +272,7 @@ fn test_active_key_can_encrypt() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, key) };
     assert_eq!(rv, CKR_OK, "Active key should allow EncryptInit");
 }
 
@@ -272,33 +288,37 @@ fn test_active_key_can_decrypt() {
     };
 
     // Encrypt something first
-    let rv = C_EncryptInit(session, &mut mech, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, key) };
     assert_eq!(rv, CKR_OK);
     let plaintext = b"test data for lifecycle";
     let mut ct_len: CK_ULONG = 256;
     let mut ciphertext = vec![0u8; ct_len as usize];
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ciphertext.as_mut_ptr(),
-        &mut ct_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ct_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     ciphertext.truncate(ct_len as usize);
 
     // Decrypt
-    let rv = C_DecryptInit(session, &mut mech, key);
+    let rv = unsafe { C_DecryptInit(session, &mut mech, key) };
     assert_eq!(rv, CKR_OK, "Active key should allow DecryptInit");
     let mut pt_len: CK_ULONG = 256;
     let mut decrypted = vec![0u8; pt_len as usize];
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_mut_ptr(),
-        ct_len,
-        decrypted.as_mut_ptr(),
-        &mut pt_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            ct_len,
+            decrypted.as_mut_ptr(),
+            &mut pt_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     assert_eq!(&decrypted[..pt_len as usize], plaintext);
 }
@@ -312,7 +332,7 @@ fn test_active_rsa_key_can_sign() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mech, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mech, priv_key) };
     assert_eq!(rv, CKR_OK, "Active RSA key should allow SignInit");
 }
 
@@ -328,29 +348,33 @@ fn test_active_rsa_key_can_verify() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mech, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mech, priv_key) };
     assert_eq!(rv, CKR_OK);
     let mut sig_len: CK_ULONG = 512;
     let mut signature = vec![0u8; sig_len as usize];
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Verify
-    let rv = C_VerifyInit(session, &mut mech, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut mech, pub_key) };
     assert_eq!(rv, CKR_OK, "Active RSA key should allow VerifyInit");
-    let rv = C_Verify(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        C_Verify(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -370,7 +394,7 @@ fn test_preactivation_key_encrypt_blocked() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, key) };
     // Pre-activation key should block encrypt
     assert_ne!(
         rv, CKR_OK,
@@ -389,7 +413,7 @@ fn test_preactivation_key_decrypt_blocked() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_DecryptInit(session, &mut mech, key);
+    let rv = unsafe { C_DecryptInit(session, &mut mech, key) };
     assert_ne!(rv, CKR_OK, "Pre-activation key should block DecryptInit");
 }
 
@@ -410,7 +434,7 @@ fn test_deactivated_key_encrypt_blocked() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, key) };
     assert_ne!(rv, CKR_OK, "Deactivated key should block EncryptInit");
 }
 
@@ -425,18 +449,20 @@ fn test_deactivated_key_decrypt_allowed() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, active_key);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, active_key) };
     assert_eq!(rv, CKR_OK);
     let plaintext = b"deactivated test";
     let mut ct_len: CK_ULONG = 256;
     let mut ciphertext = vec![0u8; ct_len as usize];
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ciphertext.as_mut_ptr(),
-        &mut ct_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ct_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Now try decrypt with a deactivated key — we need to use the same key for encrypt/decrypt.
@@ -445,7 +471,7 @@ fn test_deactivated_key_decrypt_allowed() {
     let past_start: [u8; 8] = *b"20200101";
     let past_end: [u8; 8] = *b"20200601";
     let deact_key = generate_aes_key_with_dates(session, Some(&past_start), Some(&past_end));
-    let rv = C_DecryptInit(session, &mut mech, deact_key);
+    let rv = unsafe { C_DecryptInit(session, &mut mech, deact_key) };
     // Deactivated keys SHOULD allow decrypt (processing existing data)
     assert_eq!(
         rv, CKR_OK,
@@ -467,7 +493,7 @@ fn test_no_dates_key_is_active() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, key) };
     assert_eq!(
         rv, CKR_OK,
         "Key without dates should default to Active state"
@@ -487,7 +513,7 @@ fn test_key_with_past_start_current_end_is_active() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, key) };
     assert_eq!(
         rv, CKR_OK,
         "Key with past start and future end should be Active"
@@ -511,7 +537,7 @@ fn test_read_start_date_attribute() {
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: 8,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "Should read CKA_START_DATE");
     assert_eq!(&buf, b"20250101");
 }
@@ -528,7 +554,7 @@ fn test_read_end_date_attribute() {
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: 8,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "Should read CKA_END_DATE");
     assert_eq!(&buf, b"20301231");
 }
@@ -541,7 +567,7 @@ fn test_read_end_date_attribute() {
 fn test_destroy_key_invalidates_handle() {
     let session = setup_user_session();
     let key = generate_aes_key(session);
-    let rv = C_DestroyObject(session, key);
+    let rv = unsafe { C_DestroyObject(session, key) };
     assert_eq!(rv, CKR_OK, "DestroyObject should succeed");
 
     // Try to use destroyed key
@@ -551,7 +577,7 @@ fn test_destroy_key_invalidates_handle() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, key) };
     assert_ne!(rv, CKR_OK, "Destroyed key handle should be invalid");
 }
 
@@ -559,7 +585,7 @@ fn test_destroy_key_invalidates_handle() {
 fn test_destroy_key_get_attribute_fails() {
     let session = setup_user_session();
     let key = generate_aes_key(session);
-    let rv = C_DestroyObject(session, key);
+    let rv = unsafe { C_DestroyObject(session, key) };
     assert_eq!(rv, CKR_OK);
 
     // Try to read attribute from destroyed key
@@ -569,7 +595,7 @@ fn test_destroy_key_get_attribute_fails() {
         p_value: &mut val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_ne!(rv, CKR_OK, "GetAttributeValue on destroyed key should fail");
 }
 
@@ -604,17 +630,19 @@ fn test_destroy_key_find_objects_empty() {
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Destroy
-    let rv = C_DestroyObject(session, key);
+    let rv = unsafe { C_DestroyObject(session, key) };
     assert_eq!(rv, CKR_OK);
 
     // Find by label — should be empty
@@ -623,14 +651,14 @@ fn test_destroy_key_find_objects_empty() {
         p_value: label.as_ptr() as CK_VOID_PTR,
         value_len: label.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(session, find_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_FindObjectsInit(session, find_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     let mut found: [CK_OBJECT_HANDLE; 10] = [0; 10];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 10, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 10, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(count, 0, "Destroyed key should not appear in FindObjects");
-    C_FindObjectsFinal(session);
+    unsafe { C_FindObjectsFinal(session) };
 }
 
 // ============================================================================
@@ -642,7 +670,7 @@ fn test_get_object_size_aes() {
     let session = setup_user_session();
     let key = generate_aes_key(session);
     let mut size: CK_ULONG = 0;
-    let rv = C_GetObjectSize(session, key, &mut size);
+    let rv = unsafe { C_GetObjectSize(session, key, &mut size) };
     assert_eq!(rv, CKR_OK, "C_GetObjectSize should succeed");
     assert!(size > 0, "Object size should be > 0");
 }
@@ -653,9 +681,9 @@ fn test_get_object_size_rsa() {
     let (pub_key, priv_key) = generate_rsa_keypair(session);
     let mut pub_size: CK_ULONG = 0;
     let mut priv_size: CK_ULONG = 0;
-    let rv = C_GetObjectSize(session, pub_key, &mut pub_size);
+    let rv = unsafe { C_GetObjectSize(session, pub_key, &mut pub_size) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_GetObjectSize(session, priv_key, &mut priv_size);
+    let rv = unsafe { C_GetObjectSize(session, priv_key, &mut priv_size) };
     assert_eq!(rv, CKR_OK);
     assert!(priv_size > 0, "RSA private key size should be > 0");
     assert!(pub_size > 0, "RSA public key size should be > 0");
@@ -665,7 +693,7 @@ fn test_get_object_size_rsa() {
 fn test_get_object_size_invalid_handle() {
     let session = setup_user_session();
     let mut size: CK_ULONG = 0;
-    let rv = C_GetObjectSize(session, 0xFFFFFFFF, &mut size);
+    let rv = unsafe { C_GetObjectSize(session, 0xFFFFFFFF, &mut size) };
     assert_ne!(rv, CKR_OK, "GetObjectSize with invalid handle should fail");
 }
 
@@ -683,7 +711,7 @@ fn test_aes_key_value_len_attribute() {
         p_value: &mut val_len as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(val_len, 32, "AES-256 key should have VALUE_LEN=32");
 }
@@ -698,7 +726,7 @@ fn test_aes_key_class_attribute() {
         p_value: &mut class_val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         class_val, CKO_SECRET_KEY,
@@ -716,7 +744,7 @@ fn test_aes_key_type_attribute() {
         p_value: &mut kt as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(kt, CKK_AES, "AES key should have key_type CKK_AES");
 }
@@ -731,7 +759,7 @@ fn test_rsa_public_key_class() {
         p_value: &mut class_val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         class_val, CKO_PUBLIC_KEY,
@@ -749,7 +777,7 @@ fn test_rsa_private_key_class() {
         p_value: &mut class_val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, priv_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, priv_key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         class_val, CKO_PRIVATE_KEY,
@@ -776,8 +804,8 @@ fn test_multiple_keys_unique_handles() {
 fn test_destroy_double_destroy_fails() {
     let session = setup_user_session();
     let key = generate_aes_key(session);
-    let rv = C_DestroyObject(session, key);
+    let rv = unsafe { C_DestroyObject(session, key) };
     assert_eq!(rv, CKR_OK, "First destroy should succeed");
-    let rv = C_DestroyObject(session, key);
+    let rv = unsafe { C_DestroyObject(session, key) };
     assert_ne!(rv, CKR_OK, "Double destroy should fail");
 }

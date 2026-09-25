@@ -41,48 +41,58 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 }
 
 fn setup_user_session() -> CK_SESSION_HANDLE {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"CryptPar");
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed");
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    assert_eq!(C_Logout(session), CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    assert_eq!(unsafe { C_Logout(session) }, CKR_OK);
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -113,13 +123,15 @@ fn generate_aes_key(session: CK_SESSION_HANDLE, len: CK_ULONG) -> CK_OBJECT_HAND
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_GenerateKey: 0x{:08X}", rv);
     key
 }
@@ -130,19 +142,21 @@ fn encrypt(
     key: CK_OBJECT_HANDLE,
     data: &[u8],
 ) -> Result<Vec<u8>, CK_RV> {
-    let rv = C_EncryptInit(session, mech, key);
+    let rv = unsafe { C_EncryptInit(session, mech, key) };
     if rv != CKR_OK {
         return Err(rv);
     }
     let mut out = vec![0u8; data.len() + 64];
     let mut out_len = out.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        out.as_mut_ptr(),
-        &mut out_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
     if rv != CKR_OK {
         return Err(rv);
     }
@@ -156,19 +170,21 @@ fn decrypt(
     key: CK_OBJECT_HANDLE,
     data: &[u8],
 ) -> Result<Vec<u8>, CK_RV> {
-    let rv = C_DecryptInit(session, mech, key);
+    let rv = unsafe { C_DecryptInit(session, mech, key) };
     if rv != CKR_OK {
         return Err(rv);
     }
     let mut out = vec![0u8; data.len() + 64];
     let mut out_len = out.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        out.as_mut_ptr(),
-        &mut out_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
     if rv != CKR_OK {
         return Err(rv);
     }
@@ -239,7 +255,7 @@ fn gcm_params_aad_tag_and_cbc_padding() {
         ul_tag_bits: 64,
     };
     assert_eq!(
-        C_EncryptInit(session, &mut gcm_mech(&mut bad), key),
+        unsafe { C_EncryptInit(session, &mut gcm_mech(&mut bad), key) },
         CKR_MECHANISM_PARAM_INVALID
     );
 
@@ -276,10 +292,16 @@ fn gcm_params_aad_tag_and_cbc_padding() {
 
     // ---- RNG through the DRBG ----
     let mut buf = [0u8; 64];
-    assert_eq!(C_GenerateRandom(session, buf.as_mut_ptr(), 64), CKR_OK);
+    assert_eq!(
+        unsafe { C_GenerateRandom(session, buf.as_mut_ptr(), 64) },
+        CKR_OK
+    );
     assert_ne!(buf, [0u8; 64]);
     let seed = [1u8, 2, 3, 4];
-    assert_eq!(C_SeedRandom(session, seed.as_ptr() as *mut _, 4), CKR_OK);
+    assert_eq!(
+        unsafe { C_SeedRandom(session, seed.as_ptr() as *mut _, 4) },
+        CKR_OK
+    );
 }
 
 fn generate_ec_keypair(session: CK_SESSION_HANDLE) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
@@ -314,16 +336,18 @@ fn generate_ec_keypair(session: CK_SESSION_HANDLE) -> (CK_OBJECT_HANDLE, CK_OBJE
         },
     ];
     let (mut pub_key, mut priv_key) = (0, 0);
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "EC keygen: 0x{:08X}", rv);
     (pub_key, priv_key)
 }
@@ -334,10 +358,16 @@ fn read_ec_point(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> Vec<u8> {
         p_value: ptr::null_mut(),
         value_len: 0,
     }];
-    assert_eq!(C_GetAttributeValue(session, key, t.as_mut_ptr(), 1), CKR_OK);
+    assert_eq!(
+        unsafe { C_GetAttributeValue(session, key, t.as_mut_ptr(), 1) },
+        CKR_OK
+    );
     let mut buf = vec![0u8; t[0].value_len as usize];
     t[0].p_value = buf.as_mut_ptr() as CK_VOID_PTR;
-    assert_eq!(C_GetAttributeValue(session, key, t.as_mut_ptr(), 1), CKR_OK);
+    assert_eq!(
+        unsafe { C_GetAttributeValue(session, key, t.as_mut_ptr(), 1) },
+        CKR_OK
+    );
     buf.truncate(t[0].value_len as usize);
     buf
 }
@@ -353,16 +383,18 @@ fn sign(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    assert_eq!(C_SignInit(session, &mut m, key), CKR_OK);
+    assert_eq!(unsafe { C_SignInit(session, &mut m, key) }, CKR_OK);
     let mut sig = vec![0u8; 256];
     let mut len = sig.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        &mut len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            &mut len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Sign: 0x{:08X}", rv);
     sig.truncate(len as usize);
     sig
@@ -380,14 +412,16 @@ fn verify(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    assert_eq!(C_VerifyInit(session, &mut m, key), CKR_OK);
-    C_Verify(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_ptr() as *mut _,
-        sig.len() as CK_ULONG,
-    )
+    assert_eq!(unsafe { C_VerifyInit(session, &mut m, key) }, CKR_OK);
+    unsafe {
+        C_Verify(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_ptr() as *mut _,
+            sig.len() as CK_ULONG,
+        )
+    }
 }
 
 fn derive(
@@ -423,14 +457,16 @@ fn derive(
         },
     ];
     let mut key = 0;
-    let rv = C_DeriveKey(
-        session,
-        &mut mech,
-        base,
-        t.as_mut_ptr(),
-        t.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            &mut mech,
+            base,
+            t.as_mut_ptr(),
+            t.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_DeriveKey: 0x{:08X}", rv);
     key
 }

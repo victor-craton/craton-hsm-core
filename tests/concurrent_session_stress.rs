@@ -18,7 +18,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 }
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -33,47 +33,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"ConcTests");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed: 0x{:08X}", rv);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     session
@@ -82,7 +92,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
 #[test]
 fn test_concurrent_session_open_close() {
     let _ = setup_user_session();
-    C_CloseAllSessions(0);
+    unsafe { C_CloseAllSessions(0) };
 
     // Re-init token for clean state
     ensure_init();
@@ -90,13 +100,15 @@ fn test_concurrent_session_open_close() {
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"ConcOC1");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
 
     let num_threads = 10;
     let ops_per_thread = 5;
@@ -110,20 +122,22 @@ fn test_concurrent_session_open_close() {
                 let mut sessions = Vec::new();
                 for _ in 0..ops_per_thread {
                     let mut session: CK_SESSION_HANDLE = 0;
-                    let rv = C_OpenSession(
-                        0,
-                        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-                        ptr::null_mut(),
-                        None,
-                        &mut session,
-                    );
+                    let rv = unsafe {
+                        C_OpenSession(
+                            0,
+                            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+                            ptr::null_mut(),
+                            None,
+                            &mut session,
+                        )
+                    };
                     if rv == CKR_OK {
                         sessions.push(session);
                     }
                     // Don't assert — session count limit may be reached
                 }
                 for s in sessions {
-                    let _ = C_CloseSession(s);
+                    let _ = unsafe { C_CloseSession(s) };
                 }
             })
         })
@@ -134,7 +148,7 @@ fn test_concurrent_session_open_close() {
     }
 
     // Cleanup
-    C_CloseAllSessions(0);
+    unsafe { C_CloseAllSessions(0) };
 }
 
 #[test]
@@ -179,28 +193,32 @@ fn test_concurrent_object_create_find_destroy() {
                         },
                     ];
                     let mut key: CK_OBJECT_HANDLE = 0;
-                    let rv = C_GenerateKey(
-                        session,
-                        &mut mechanism,
-                        template.as_mut_ptr(),
-                        template.len() as CK_ULONG,
-                        &mut key,
-                    );
+                    let rv = unsafe {
+                        C_GenerateKey(
+                            session,
+                            &mut mechanism,
+                            template.as_mut_ptr(),
+                            template.len() as CK_ULONG,
+                            &mut key,
+                        )
+                    };
                     if rv == CKR_OK {
                         created.push(key);
                     }
                 }
                 // Find objects
-                let rv = C_FindObjectsInit(session, ptr::null_mut(), 0);
+                let rv = unsafe { C_FindObjectsInit(session, ptr::null_mut(), 0) };
                 if rv == CKR_OK {
                     let mut found: [CK_OBJECT_HANDLE; 100] = [0; 100];
                     let mut found_count: CK_ULONG = 0;
-                    let _ = C_FindObjects(session, found.as_mut_ptr(), 100, &mut found_count);
-                    C_FindObjectsFinal(session);
+                    let _ = unsafe {
+                        C_FindObjects(session, found.as_mut_ptr(), 100, &mut found_count)
+                    };
+                    unsafe { C_FindObjectsFinal(session) };
                 }
                 // Destroy our objects
                 for h in &created {
-                    let _ = C_DestroyObject(session, *h);
+                    let _ = unsafe { C_DestroyObject(session, *h) };
                 }
                 created.len()
             })
@@ -217,20 +235,22 @@ fn test_concurrent_object_create_find_destroy() {
 #[test]
 fn test_session_handle_uniqueness_under_contention() {
     let _ = setup_user_session();
-    C_CloseAllSessions(0);
+    unsafe { C_CloseAllSessions(0) };
 
     ensure_init();
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..6].copy_from_slice(b"Unique");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
 
     let num_threads = 10;
     let sessions_per_thread = 3;
@@ -244,13 +264,15 @@ fn test_session_handle_uniqueness_under_contention() {
                 let mut sessions = Vec::new();
                 for _ in 0..sessions_per_thread {
                     let mut session: CK_SESSION_HANDLE = 0;
-                    let rv = C_OpenSession(
-                        0,
-                        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-                        ptr::null_mut(),
-                        None,
-                        &mut session,
-                    );
+                    let rv = unsafe {
+                        C_OpenSession(
+                            0,
+                            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+                            ptr::null_mut(),
+                            None,
+                            &mut session,
+                        )
+                    };
                     if rv == CKR_OK {
                         sessions.push(session);
                     }
@@ -273,7 +295,7 @@ fn test_session_handle_uniqueness_under_contention() {
         "Session handles must be unique"
     );
 
-    C_CloseAllSessions(0);
+    unsafe { C_CloseAllSessions(0) };
 }
 
 #[test]
@@ -308,25 +330,29 @@ fn test_concurrent_encrypt_different_sessions() {
 
     // Use the initial session for keygen
     let mut setup_session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut setup_session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut setup_session,
+        )
+    };
     if rv != CKR_OK {
         return; // session limit — skip test
     }
 
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        setup_session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            setup_session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     // The key is a session object: it is destroyed when `setup_session`
     // closes (PKCS#11 §4.4, H3-07), so keep that session open until the
@@ -343,26 +369,30 @@ fn test_concurrent_encrypt_different_sessions() {
 
                 // Each thread opens its own session
                 let mut session: CK_SESSION_HANDLE = 0;
-                let rv = C_OpenSession(
-                    0,
-                    CKF_RW_SESSION | CKF_SERIAL_SESSION,
-                    ptr::null_mut(),
-                    None,
-                    &mut session,
-                );
+                let rv = unsafe {
+                    C_OpenSession(
+                        0,
+                        CKF_RW_SESSION | CKF_SERIAL_SESSION,
+                        ptr::null_mut(),
+                        None,
+                        &mut session,
+                    )
+                };
                 if rv != CKR_OK {
                     return false; // session limit
                 }
                 let user_pin = b"userpin1";
-                let rv = C_Login(
-                    session,
-                    CKU_USER,
-                    user_pin.as_ptr() as *mut _,
-                    user_pin.len() as CK_ULONG,
-                );
+                let rv = unsafe {
+                    C_Login(
+                        session,
+                        CKU_USER,
+                        user_pin.as_ptr() as *mut _,
+                        user_pin.len() as CK_ULONG,
+                    )
+                };
                 // May be ALREADY_LOGGED_IN from another thread
                 if rv != CKR_OK && rv != CKR_USER_ALREADY_LOGGED_IN {
-                    C_CloseSession(session);
+                    unsafe { C_CloseSession(session) };
                     return false;
                 }
 
@@ -372,24 +402,26 @@ fn test_concurrent_encrypt_different_sessions() {
                     p_parameter: ptr::null_mut(),
                     parameter_len: 0,
                 };
-                let rv = C_EncryptInit(session, &mut enc_mech, key);
+                let rv = unsafe { C_EncryptInit(session, &mut enc_mech, key) };
                 if rv != CKR_OK {
-                    C_CloseSession(session);
+                    unsafe { C_CloseSession(session) };
                     return false;
                 }
 
                 let data = b"concurrent encryption test data!!";
                 let mut out = vec![0u8; 256];
                 let mut out_len: CK_ULONG = out.len() as CK_ULONG;
-                let rv = C_Encrypt(
-                    session,
-                    data.as_ptr() as CK_BYTE_PTR,
-                    data.len() as CK_ULONG,
-                    out.as_mut_ptr(),
-                    &mut out_len,
-                );
+                let rv = unsafe {
+                    C_Encrypt(
+                        session,
+                        data.as_ptr() as CK_BYTE_PTR,
+                        data.len() as CK_ULONG,
+                        out.as_mut_ptr(),
+                        &mut out_len,
+                    )
+                };
 
-                C_CloseSession(session);
+                unsafe { C_CloseSession(session) };
                 rv == CKR_OK
             })
         })
@@ -400,7 +432,7 @@ fn test_concurrent_encrypt_different_sessions() {
         .map(|h| if h.join().unwrap() { 1 } else { 0 })
         .sum();
 
-    let _ = C_CloseSession(setup_session);
+    let _ = unsafe { C_CloseSession(setup_session) };
 
     // At least some threads should succeed
     assert!(
@@ -444,13 +476,15 @@ fn test_concurrent_find_objects_while_creating() {
                     },
                 ];
                 let mut key: CK_OBJECT_HANDLE = 0;
-                let _ = C_GenerateKey(
-                    session,
-                    &mut mechanism,
-                    template.as_mut_ptr(),
-                    template.len() as CK_ULONG,
-                    &mut key,
-                );
+                let _ = unsafe {
+                    C_GenerateKey(
+                        session,
+                        &mut mechanism,
+                        template.as_mut_ptr(),
+                        template.len() as CK_ULONG,
+                        &mut key,
+                    )
+                };
             }
         });
         writer_handles.push(h);
@@ -464,15 +498,17 @@ fn test_concurrent_find_objects_while_creating() {
             barrier.wait();
             let mut total_found: CK_ULONG = 0;
             for _ in 0..5 {
-                let rv = C_FindObjectsInit(session, ptr::null_mut(), 0);
+                let rv = unsafe { C_FindObjectsInit(session, ptr::null_mut(), 0) };
                 if rv == CKR_OK {
                     let mut found: [CK_OBJECT_HANDLE; 100] = [0; 100];
                     let mut found_count: CK_ULONG = 0;
-                    let rv = C_FindObjects(session, found.as_mut_ptr(), 100, &mut found_count);
+                    let rv = unsafe {
+                        C_FindObjects(session, found.as_mut_ptr(), 100, &mut found_count)
+                    };
                     if rv == CKR_OK {
                         total_found = total_found.wrapping_add(found_count);
                     }
-                    C_FindObjectsFinal(session);
+                    unsafe { C_FindObjectsFinal(session) };
                 }
             }
             total_found
@@ -491,44 +527,52 @@ fn test_concurrent_find_objects_while_creating() {
 #[test]
 fn test_concurrent_session_login_logout() {
     let _ = setup_user_session();
-    C_CloseAllSessions(0);
+    unsafe { C_CloseAllSessions(0) };
 
     ensure_init();
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LoginOut");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
 
     // Setup user PIN
     let mut rw_session: CK_SESSION_HANDLE = 0;
-    C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut rw_session,
-    );
-    C_Login(
-        rw_session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut rw_session,
+        )
+    };
+    unsafe {
+        C_Login(
+            rw_session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     let user_pin = b"userpin1";
-    C_InitPIN(
-        rw_session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
-    C_Logout(rw_session);
-    C_CloseSession(rw_session);
+    unsafe {
+        C_InitPIN(
+            rw_session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
+    unsafe { C_Logout(rw_session) };
+    unsafe { C_CloseSession(rw_session) };
 
     let num_threads = 5;
     let barrier = Arc::new(Barrier::new(num_threads));
@@ -539,31 +583,35 @@ fn test_concurrent_session_login_logout() {
             std::thread::spawn(move || {
                 barrier.wait();
                 let mut session: CK_SESSION_HANDLE = 0;
-                let rv = C_OpenSession(
-                    0,
-                    CKF_RW_SESSION | CKF_SERIAL_SESSION,
-                    ptr::null_mut(),
-                    None,
-                    &mut session,
-                );
+                let rv = unsafe {
+                    C_OpenSession(
+                        0,
+                        CKF_RW_SESSION | CKF_SERIAL_SESSION,
+                        ptr::null_mut(),
+                        None,
+                        &mut session,
+                    )
+                };
                 if rv != CKR_OK {
                     return;
                 }
 
                 for _ in 0..3 {
                     let user_pin = b"userpin1";
-                    let rv = C_Login(
-                        session,
-                        CKU_USER,
-                        user_pin.as_ptr() as *mut _,
-                        user_pin.len() as CK_ULONG,
-                    );
+                    let rv = unsafe {
+                        C_Login(
+                            session,
+                            CKU_USER,
+                            user_pin.as_ptr() as *mut _,
+                            user_pin.len() as CK_ULONG,
+                        )
+                    };
                     // Accept OK or ALREADY_LOGGED_IN
                     if rv == CKR_OK || rv == CKR_USER_ALREADY_LOGGED_IN {
-                        let _ = C_Logout(session);
+                        let _ = unsafe { C_Logout(session) };
                     }
                 }
-                C_CloseSession(session);
+                unsafe { C_CloseSession(session) };
             })
         })
         .collect();
@@ -571,5 +619,5 @@ fn test_concurrent_session_login_logout() {
     for h in handles {
         h.join().unwrap(); // No panics or deadlocks
     }
-    C_CloseAllSessions(0);
+    unsafe { C_CloseAllSessions(0) };
 }

@@ -21,33 +21,35 @@ mod common;
 use common::ensure_init;
 
 fn cleanup_sessions() {
-    let _ = functions::C_CloseAllSessions(0);
+    let _ = unsafe { functions::C_CloseAllSessions(0) };
 }
 
 fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = functions::C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION | CKF_RW_SESSION,
-        std::ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        functions::C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     if rv != CKR_OK {
         return None;
     }
     // Log in with the policy-compliant User PIN provisioned by
     // `common::ensure_init` (A3-13).
     if common::login_user(session) != CKR_OK {
-        let _ = functions::C_CloseSession(session);
+        let _ = unsafe { functions::C_CloseSession(session) };
         return None;
     }
     Some(session)
 }
 
 fn close_session(session: CK_SESSION_HANDLE) {
-    let _ = functions::C_Logout(session);
-    let _ = functions::C_CloseSession(session);
+    let _ = unsafe { functions::C_Logout(session) };
+    let _ = unsafe { functions::C_CloseSession(session) };
 }
 
 /// Generate an AES-256 key for encryption.
@@ -85,13 +87,15 @@ fn generate_aes_key(session: CK_SESSION_HANDLE) -> Option<CK_OBJECT_HANDLE> {
     };
 
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
 
     if rv == CKR_OK {
         Some(key)
@@ -151,9 +155,9 @@ fn fuzz_multipart_cbc_encrypt(data: &[u8]) {
         parameter_len: 16,
     };
 
-    let rv = functions::C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { functions::C_EncryptInit(session, &mut mechanism, key) };
     if rv != CKR_OK {
-        let _ = functions::C_DestroyObject(session, key);
+        let _ = unsafe { functions::C_DestroyObject(session, key) };
         close_session(session);
         return;
     }
@@ -172,13 +176,15 @@ fn fuzz_multipart_cbc_encrypt(data: &[u8]) {
         let chunk = &plaintext[offset..offset + chunk_size];
         let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
 
-        let _rv = functions::C_EncryptUpdate(
-            session,
-            chunk.as_ptr() as *mut _,
-            chunk.len() as CK_ULONG,
-            out_buf.as_mut_ptr(),
-            &mut out_len,
-        );
+        let _rv = unsafe {
+            functions::C_EncryptUpdate(
+                session,
+                chunk.as_ptr() as *mut _,
+                chunk.len() as CK_ULONG,
+                out_buf.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
 
         offset += chunk_size;
     }
@@ -186,9 +192,9 @@ fn fuzz_multipart_cbc_encrypt(data: &[u8]) {
     // EncryptFinal
     let mut final_buf = [0u8; 64];
     let mut final_len: CK_ULONG = 64;
-    let _rv = functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len);
+    let _rv = unsafe { functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len) };
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -220,9 +226,9 @@ fn fuzz_multipart_cbc_decrypt_random(data: &[u8]) {
         parameter_len: 16,
     };
 
-    let rv = functions::C_DecryptInit(session, &mut mechanism, key);
+    let rv = unsafe { functions::C_DecryptInit(session, &mut mechanism, key) };
     if rv != CKR_OK {
-        let _ = functions::C_DestroyObject(session, key);
+        let _ = unsafe { functions::C_DestroyObject(session, key) };
         close_session(session);
         return;
     }
@@ -237,22 +243,24 @@ fn fuzz_multipart_cbc_decrypt_random(data: &[u8]) {
         let chunk = &ciphertext[offset..offset + chunk_size];
         let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
 
-        let _rv = functions::C_DecryptUpdate(
-            session,
-            chunk.as_ptr() as *mut _,
-            chunk.len() as CK_ULONG,
-            out_buf.as_mut_ptr(),
-            &mut out_len,
-        );
+        let _rv = unsafe {
+            functions::C_DecryptUpdate(
+                session,
+                chunk.as_ptr() as *mut _,
+                chunk.len() as CK_ULONG,
+                out_buf.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
 
         offset += chunk_size;
     }
 
     let mut final_buf = [0u8; 64];
     let mut final_len: CK_ULONG = 64;
-    let _rv = functions::C_DecryptFinal(session, final_buf.as_mut_ptr(), &mut final_len);
+    let _rv = unsafe { functions::C_DecryptFinal(session, final_buf.as_mut_ptr(), &mut final_len) };
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -283,9 +291,9 @@ fn fuzz_multipart_encrypt_chunk_abuse(data: &[u8]) {
         parameter_len: 16,
     };
 
-    let rv = functions::C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { functions::C_EncryptInit(session, &mut mechanism, key) };
     if rv != CKR_OK {
-        let _ = functions::C_DestroyObject(session, key);
+        let _ = unsafe { functions::C_DestroyObject(session, key) };
         close_session(session);
         return;
     }
@@ -298,44 +306,51 @@ fn fuzz_multipart_encrypt_chunk_abuse(data: &[u8]) {
             0 => {
                 // Zero-length update
                 let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
-                let _rv = functions::C_EncryptUpdate(
-                    session,
-                    std::ptr::null_mut(),
-                    0,
-                    out_buf.as_mut_ptr(),
-                    &mut out_len,
-                );
+                let _rv = unsafe {
+                    functions::C_EncryptUpdate(
+                        session,
+                        std::ptr::null_mut(),
+                        0,
+                        out_buf.as_mut_ptr(),
+                        &mut out_len,
+                    )
+                };
             }
             1 => {
                 // Single-byte update
                 let one = [byte];
                 let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
-                let _rv = functions::C_EncryptUpdate(
-                    session,
-                    one.as_ptr() as *mut _,
-                    1,
-                    out_buf.as_mut_ptr(),
-                    &mut out_len,
-                );
+                let _rv = unsafe {
+                    functions::C_EncryptUpdate(
+                        session,
+                        one.as_ptr() as *mut _,
+                        1,
+                        out_buf.as_mut_ptr(),
+                        &mut out_len,
+                    )
+                };
             }
             2 => {
                 // Block-aligned update (16 bytes)
                 let block = [byte; 16];
                 let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
-                let _rv = functions::C_EncryptUpdate(
-                    session,
-                    block.as_ptr() as *mut _,
-                    16,
-                    out_buf.as_mut_ptr(),
-                    &mut out_len,
-                );
+                let _rv = unsafe {
+                    functions::C_EncryptUpdate(
+                        session,
+                        block.as_ptr() as *mut _,
+                        16,
+                        out_buf.as_mut_ptr(),
+                        &mut out_len,
+                    )
+                };
             }
             3 => {
                 // EncryptFinal in the middle — should finalize or error
                 let mut final_buf = [0u8; 64];
                 let mut final_len: CK_ULONG = 64;
-                let _rv =
-                    functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len);
+                let _rv = unsafe {
+                    functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len)
+                };
                 // After Final, further updates should fail
             }
             4 => {
@@ -343,13 +358,15 @@ fn fuzz_multipart_encrypt_chunk_abuse(data: &[u8]) {
                 let block = [byte; 32];
                 let mut out_len: CK_ULONG = 1; // Too small!
                 let mut tiny = [0u8; 1];
-                let _rv = functions::C_EncryptUpdate(
-                    session,
-                    block.as_ptr() as *mut _,
-                    32,
-                    tiny.as_mut_ptr(),
-                    &mut out_len,
-                );
+                let _rv = unsafe {
+                    functions::C_EncryptUpdate(
+                        session,
+                        block.as_ptr() as *mut _,
+                        32,
+                        tiny.as_mut_ptr(),
+                        &mut out_len,
+                    )
+                };
             }
             _ => {}
         }
@@ -358,9 +375,9 @@ fn fuzz_multipart_encrypt_chunk_abuse(data: &[u8]) {
     // Final cleanup
     let mut final_buf = [0u8; 64];
     let mut final_len: CK_ULONG = 64;
-    let _rv = functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len);
+    let _rv = unsafe { functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len) };
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -392,9 +409,9 @@ fn fuzz_encrypt_after_final(data: &[u8]) {
         parameter_len: 16,
     };
 
-    let rv = functions::C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { functions::C_EncryptInit(session, &mut mechanism, key) };
     if rv != CKR_OK {
-        let _ = functions::C_DestroyObject(session, key);
+        let _ = unsafe { functions::C_DestroyObject(session, key) };
         close_session(session);
         return;
     }
@@ -403,44 +420,50 @@ fn fuzz_encrypt_after_final(data: &[u8]) {
     let mut out_buf = [0u8; 1024];
     let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
     if !plaintext.is_empty() {
-        let _rv = functions::C_EncryptUpdate(
-            session,
-            plaintext.as_ptr() as *mut _,
-            plaintext.len() as CK_ULONG,
-            out_buf.as_mut_ptr(),
-            &mut out_len,
-        );
+        let _rv = unsafe {
+            functions::C_EncryptUpdate(
+                session,
+                plaintext.as_ptr() as *mut _,
+                plaintext.len() as CK_ULONG,
+                out_buf.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
     }
 
     // Final
     let mut final_buf = [0u8; 64];
     let mut final_len: CK_ULONG = 64;
-    let _rv = functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len);
+    let _rv = unsafe { functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len) };
 
     // Now try operations AFTER Final — all must return error
     out_len = out_buf.len() as CK_ULONG;
-    let _rv = functions::C_EncryptUpdate(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        out_buf.as_mut_ptr(),
-        &mut out_len,
-    );
+    let _rv = unsafe {
+        functions::C_EncryptUpdate(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            out_buf.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
 
     final_len = 64;
-    let _rv = functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len);
+    let _rv = unsafe { functions::C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len) };
 
     // Try single-shot Encrypt after multi-part was finalized
     out_len = out_buf.len() as CK_ULONG;
-    let _rv = functions::C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        out_buf.as_mut_ptr(),
-        &mut out_len,
-    );
+    let _rv = unsafe {
+        functions::C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            out_buf.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -471,9 +494,9 @@ fn fuzz_multipart_encrypt_null_buffers(data: &[u8]) {
         parameter_len: 16,
     };
 
-    let rv = functions::C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { functions::C_EncryptInit(session, &mut mechanism, key) };
     if rv != CKR_OK {
-        let _ = functions::C_DestroyObject(session, key);
+        let _ = unsafe { functions::C_DestroyObject(session, key) };
         close_session(session);
         return;
     }
@@ -486,13 +509,15 @@ fn fuzz_multipart_encrypt_null_buffers(data: &[u8]) {
             // Null input with non-zero length — must fail
             let mut out = [0u8; 64];
             let mut out_len: CK_ULONG = 64;
-            let rv = functions::C_EncryptUpdate(
-                session,
-                std::ptr::null_mut(),
-                32, // Non-zero!
-                out.as_mut_ptr(),
-                &mut out_len,
-            );
+            let rv = unsafe {
+                functions::C_EncryptUpdate(
+                    session,
+                    std::ptr::null_mut(),
+                    32, // Non-zero!
+                    out.as_mut_ptr(),
+                    &mut out_len,
+                )
+            };
             assert!(
                 rv != CKR_OK,
                 "C_EncryptUpdate succeeded with null input + non-zero length"
@@ -502,25 +527,29 @@ fn fuzz_multipart_encrypt_null_buffers(data: &[u8]) {
             // Null output with non-zero length (size query — may legitimately succeed)
             let input = [0u8; 16];
             let mut out_len: CK_ULONG = 0;
-            let _rv = functions::C_EncryptUpdate(
-                session,
-                input.as_ptr() as *mut _,
-                16,
-                std::ptr::null_mut(),
-                &mut out_len,
-            );
+            let _rv = unsafe {
+                functions::C_EncryptUpdate(
+                    session,
+                    input.as_ptr() as *mut _,
+                    16,
+                    std::ptr::null_mut(),
+                    &mut out_len,
+                )
+            };
         }
         2 => {
             // Null output length pointer — must fail
             let input = [0u8; 16];
             let mut out = [0u8; 64];
-            let rv = functions::C_EncryptUpdate(
-                session,
-                input.as_ptr() as *mut _,
-                16,
-                out.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
+            let rv = unsafe {
+                functions::C_EncryptUpdate(
+                    session,
+                    input.as_ptr() as *mut _,
+                    16,
+                    out.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                )
+            };
             assert!(
                 rv != CKR_OK,
                 "C_EncryptUpdate succeeded with null output length pointer"
@@ -528,7 +557,9 @@ fn fuzz_multipart_encrypt_null_buffers(data: &[u8]) {
         }
         3 => {
             // EncryptFinal with null length pointer — must fail
-            let rv = functions::C_EncryptFinal(session, std::ptr::null_mut(), std::ptr::null_mut());
+            let rv = unsafe {
+                functions::C_EncryptFinal(session, std::ptr::null_mut(), std::ptr::null_mut())
+            };
             assert!(
                 rv != CKR_OK,
                 "C_EncryptFinal succeeded with null length pointer"
@@ -537,6 +568,6 @@ fn fuzz_multipart_encrypt_null_buffers(data: &[u8]) {
         _ => {}
     }
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }

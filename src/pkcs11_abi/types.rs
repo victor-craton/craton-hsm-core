@@ -204,91 +204,152 @@ pub type CK_NOTIFY = Option<
 // This struct contains pointers to all PKCS#11 functions.
 // C_GetFunctionList returns a pointer to a static instance of this struct.
 
-pub type CK_C_Initialize = extern "C" fn(CK_VOID_PTR) -> CK_RV;
-pub type CK_C_Finalize = extern "C" fn(CK_VOID_PTR) -> CK_RV;
-pub type CK_C_GetInfo = extern "C" fn(CK_INFO_PTR) -> CK_RV;
-pub type CK_C_GetSlotList = extern "C" fn(CK_BBOOL, CK_SLOT_ID_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_GetSlotInfo = extern "C" fn(CK_SLOT_ID, CK_SLOT_INFO_PTR) -> CK_RV;
-pub type CK_C_GetTokenInfo = extern "C" fn(CK_SLOT_ID, CK_TOKEN_INFO_PTR) -> CK_RV;
+pub type CK_C_Initialize = unsafe extern "C" fn(CK_VOID_PTR) -> CK_RV;
+pub type CK_C_Finalize = unsafe extern "C" fn(CK_VOID_PTR) -> CK_RV;
+pub type CK_C_GetInfo = unsafe extern "C" fn(CK_INFO_PTR) -> CK_RV;
+pub type CK_C_GetSlotList = unsafe extern "C" fn(CK_BBOOL, CK_SLOT_ID_PTR, CK_ULONG_PTR) -> CK_RV;
+pub type CK_C_GetSlotInfo = unsafe extern "C" fn(CK_SLOT_ID, CK_SLOT_INFO_PTR) -> CK_RV;
+pub type CK_C_GetTokenInfo = unsafe extern "C" fn(CK_SLOT_ID, CK_TOKEN_INFO_PTR) -> CK_RV;
 pub type CK_C_GetMechanismList =
-    extern "C" fn(CK_SLOT_ID, CK_MECHANISM_TYPE_PTR, CK_ULONG_PTR) -> CK_RV;
+    unsafe extern "C" fn(CK_SLOT_ID, CK_MECHANISM_TYPE_PTR, CK_ULONG_PTR) -> CK_RV;
 pub type CK_C_GetMechanismInfo =
-    extern "C" fn(CK_SLOT_ID, CK_MECHANISM_TYPE, CK_MECHANISM_INFO_PTR) -> CK_RV;
+    unsafe extern "C" fn(CK_SLOT_ID, CK_MECHANISM_TYPE, CK_MECHANISM_INFO_PTR) -> CK_RV;
 pub type CK_C_InitToken =
-    extern "C" fn(CK_SLOT_ID, CK_UTF8CHAR_PTR, CK_ULONG, CK_UTF8CHAR_PTR) -> CK_RV;
-pub type CK_C_InitPIN = extern "C" fn(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ULONG) -> CK_RV;
-pub type CK_C_SetPIN =
-    extern "C" fn(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ULONG, CK_UTF8CHAR_PTR, CK_ULONG) -> CK_RV;
-pub type CK_C_OpenSession =
-    extern "C" fn(CK_SLOT_ID, CK_FLAGS, CK_VOID_PTR, CK_NOTIFY, CK_SESSION_HANDLE_PTR) -> CK_RV;
-pub type CK_C_CloseSession = extern "C" fn(CK_SESSION_HANDLE) -> CK_RV;
-pub type CK_C_CloseAllSessions = extern "C" fn(CK_SLOT_ID) -> CK_RV;
-pub type CK_C_GetSessionInfo = extern "C" fn(CK_SESSION_HANDLE, CK_SESSION_INFO_PTR) -> CK_RV;
+    unsafe extern "C" fn(CK_SLOT_ID, CK_UTF8CHAR_PTR, CK_ULONG, CK_UTF8CHAR_PTR) -> CK_RV;
+pub type CK_C_InitPIN = unsafe extern "C" fn(CK_SESSION_HANDLE, CK_UTF8CHAR_PTR, CK_ULONG) -> CK_RV;
+pub type CK_C_SetPIN = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_UTF8CHAR_PTR,
+    CK_ULONG,
+    CK_UTF8CHAR_PTR,
+    CK_ULONG,
+) -> CK_RV;
+pub type CK_C_OpenSession = unsafe extern "C" fn(
+    CK_SLOT_ID,
+    CK_FLAGS,
+    CK_VOID_PTR,
+    CK_NOTIFY,
+    CK_SESSION_HANDLE_PTR,
+) -> CK_RV;
+pub type CK_C_CloseSession = unsafe extern "C" fn(CK_SESSION_HANDLE) -> CK_RV;
+pub type CK_C_CloseAllSessions = unsafe extern "C" fn(CK_SLOT_ID) -> CK_RV;
+pub type CK_C_GetSessionInfo =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_SESSION_INFO_PTR) -> CK_RV;
 pub type CK_C_Login =
-    extern "C" fn(CK_SESSION_HANDLE, CK_USER_TYPE, CK_UTF8CHAR_PTR, CK_ULONG) -> CK_RV;
-pub type CK_C_Logout = extern "C" fn(CK_SESSION_HANDLE) -> CK_RV;
-pub type CK_C_CreateObject =
-    extern "C" fn(CK_SESSION_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR) -> CK_RV;
-pub type CK_C_DestroyObject = extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_USER_TYPE, CK_UTF8CHAR_PTR, CK_ULONG) -> CK_RV;
+pub type CK_C_Logout = unsafe extern "C" fn(CK_SESSION_HANDLE) -> CK_RV;
+pub type CK_C_CreateObject = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_ATTRIBUTE_PTR,
+    CK_ULONG,
+    CK_OBJECT_HANDLE_PTR,
+) -> CK_RV;
+pub type CK_C_DestroyObject = unsafe extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE) -> CK_RV;
 pub type CK_C_GetObjectSize =
-    extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ULONG_PTR) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ULONG_PTR) -> CK_RV;
 pub type CK_C_GetAttributeValue =
-    extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG) -> CK_RV;
 pub type CK_C_SetAttributeValue =
-    extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG) -> CK_RV;
 pub type CK_C_FindObjectsInit =
-    extern "C" fn(CK_SESSION_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG) -> CK_RV;
 pub type CK_C_FindObjects =
-    extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE_PTR, CK_ULONG, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_FindObjectsFinal = extern "C" fn(CK_SESSION_HANDLE) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE_PTR, CK_ULONG, CK_ULONG_PTR) -> CK_RV;
+pub type CK_C_FindObjectsFinal = unsafe extern "C" fn(CK_SESSION_HANDLE) -> CK_RV;
 pub type CK_C_EncryptInit =
-    extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
-pub type CK_C_Encrypt =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_EncryptUpdate =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_EncryptFinal = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
+pub type CK_C_Encrypt = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_EncryptUpdate = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_EncryptFinal =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
 pub type CK_C_DecryptInit =
-    extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
-pub type CK_C_Decrypt =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_DecryptUpdate =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_DecryptFinal = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_DigestInit = extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR) -> CK_RV;
-pub type CK_C_Digest =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_DigestUpdate = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
-pub type CK_C_DigestFinal = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_DigestKey = extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
+pub type CK_C_Decrypt = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_DecryptUpdate = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_DecryptFinal =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
+pub type CK_C_DigestInit = unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR) -> CK_RV;
+pub type CK_C_Digest = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_DigestUpdate =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
+pub type CK_C_DigestFinal =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
+pub type CK_C_DigestKey = unsafe extern "C" fn(CK_SESSION_HANDLE, CK_OBJECT_HANDLE) -> CK_RV;
 pub type CK_C_SignInit =
-    extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
-pub type CK_C_Sign =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_SignUpdate = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
-pub type CK_C_SignFinal = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
+pub type CK_C_Sign = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_SignUpdate = unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
+pub type CK_C_SignFinal =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
 pub type CK_C_SignRecoverInit =
-    extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
-pub type CK_C_SignRecover =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
+pub type CK_C_SignRecover = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
 pub type CK_C_VerifyInit =
-    extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
 pub type CK_C_Verify =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
-pub type CK_C_VerifyUpdate = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
-pub type CK_C_VerifyFinal = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
+pub type CK_C_VerifyUpdate =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
+pub type CK_C_VerifyFinal = unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
 pub type CK_C_VerifyRecoverInit =
-    extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
-pub type CK_C_VerifyRecover =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_GenerateKey = extern "C" fn(
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
+pub type CK_C_VerifyRecover = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_GenerateKey = unsafe extern "C" fn(
     CK_SESSION_HANDLE,
     CK_MECHANISM_PTR,
     CK_ATTRIBUTE_PTR,
     CK_ULONG,
     CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV;
-pub type CK_C_GenerateKeyPair = extern "C" fn(
+pub type CK_C_GenerateKeyPair = unsafe extern "C" fn(
     CK_SESSION_HANDLE,
     CK_MECHANISM_PTR,
     CK_ATTRIBUTE_PTR,
@@ -298,7 +359,7 @@ pub type CK_C_GenerateKeyPair = extern "C" fn(
     CK_OBJECT_HANDLE_PTR,
     CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV;
-pub type CK_C_WrapKey = extern "C" fn(
+pub type CK_C_WrapKey = unsafe extern "C" fn(
     CK_SESSION_HANDLE,
     CK_MECHANISM_PTR,
     CK_OBJECT_HANDLE,
@@ -306,7 +367,7 @@ pub type CK_C_WrapKey = extern "C" fn(
     CK_BYTE_PTR,
     CK_ULONG_PTR,
 ) -> CK_RV;
-pub type CK_C_UnwrapKey = extern "C" fn(
+pub type CK_C_UnwrapKey = unsafe extern "C" fn(
     CK_SESSION_HANDLE,
     CK_MECHANISM_PTR,
     CK_OBJECT_HANDLE,
@@ -316,7 +377,7 @@ pub type CK_C_UnwrapKey = extern "C" fn(
     CK_ULONG,
     CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV;
-pub type CK_C_DeriveKey = extern "C" fn(
+pub type CK_C_DeriveKey = unsafe extern "C" fn(
     CK_SESSION_HANDLE,
     CK_MECHANISM_PTR,
     CK_OBJECT_HANDLE,
@@ -324,34 +385,56 @@ pub type CK_C_DeriveKey = extern "C" fn(
     CK_ULONG,
     CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV;
-pub type CK_C_SeedRandom = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
-pub type CK_C_GenerateRandom = extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
+pub type CK_C_SeedRandom = unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
+pub type CK_C_GenerateRandom =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG) -> CK_RV;
 pub type CK_C_GetOperationState =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_SetOperationState = extern "C" fn(
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
+pub type CK_C_SetOperationState = unsafe extern "C" fn(
     CK_SESSION_HANDLE,
     CK_BYTE_PTR,
     CK_ULONG,
     CK_OBJECT_HANDLE,
     CK_OBJECT_HANDLE,
 ) -> CK_RV;
-pub type CK_C_CopyObject = extern "C" fn(
+pub type CK_C_CopyObject = unsafe extern "C" fn(
     CK_SESSION_HANDLE,
     CK_OBJECT_HANDLE,
     CK_ATTRIBUTE_PTR,
     CK_ULONG,
     CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV;
-pub type CK_C_DigestEncryptUpdate =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_DecryptDigestUpdate =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_SignEncryptUpdate =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_DecryptVerifyUpdate =
-    extern "C" fn(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR) -> CK_RV;
-pub type CK_C_WaitForSlotEvent = extern "C" fn(CK_FLAGS, CK_SLOT_ID_PTR, CK_VOID_PTR) -> CK_RV;
-pub type CK_C_GetFunctionList = extern "C" fn(*mut *mut CK_FUNCTION_LIST) -> CK_RV;
+pub type CK_C_DigestEncryptUpdate = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_DecryptDigestUpdate = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_SignEncryptUpdate = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_DecryptVerifyUpdate = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+pub type CK_C_WaitForSlotEvent =
+    unsafe extern "C" fn(CK_FLAGS, CK_SLOT_ID_PTR, CK_VOID_PTR) -> CK_RV;
+pub type CK_C_GetFunctionList = unsafe extern "C" fn(*mut *mut CK_FUNCTION_LIST) -> CK_RV;
 
 #[cfg_attr(target_os = "windows", repr(C, packed))]
 #[cfg_attr(not(target_os = "windows"), repr(C))]
@@ -422,8 +505,8 @@ pub struct CK_FUNCTION_LIST {
     pub C_DeriveKey: CK_C_DeriveKey,
     pub C_SeedRandom: CK_C_SeedRandom,
     pub C_GenerateRandom: CK_C_GenerateRandom,
-    pub C_GetFunctionStatus: extern "C" fn(CK_SESSION_HANDLE) -> CK_RV,
-    pub C_CancelFunction: extern "C" fn(CK_SESSION_HANDLE) -> CK_RV,
+    pub C_GetFunctionStatus: unsafe extern "C" fn(CK_SESSION_HANDLE) -> CK_RV,
+    pub C_CancelFunction: unsafe extern "C" fn(CK_SESSION_HANDLE) -> CK_RV,
     pub C_WaitForSlotEvent: CK_C_WaitForSlotEvent,
 }
 pub type CK_FUNCTION_LIST_PTR = *mut CK_FUNCTION_LIST;

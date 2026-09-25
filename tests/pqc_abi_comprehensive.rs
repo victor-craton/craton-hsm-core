@@ -16,7 +16,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 }
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -32,47 +32,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"PQCTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed: 0x{:08X}", rv);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_OpenSession failed: 0x{:08X}", rv);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Login SO failed: 0x{:08X}", rv);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitPIN failed: 0x{:08X}", rv);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK, "C_Logout SO failed: 0x{:08X}", rv);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Login USER failed: 0x{:08X}", rv);
     session
 }
@@ -112,16 +122,18 @@ fn generate_ml_dsa_keypair(
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "ML-DSA keygen failed: 0x{:08X}", rv);
     (pub_key, priv_key)
 }
@@ -157,16 +169,18 @@ fn generate_ml_kem_keypair(
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "ML-KEM keygen failed: 0x{:08X}", rv);
     (pub_key, priv_key)
 }
@@ -202,16 +216,18 @@ fn generate_slh_dsa_keypair(
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "SLH-DSA keygen failed: 0x{:08X}", rv);
     (pub_key, priv_key)
 }
@@ -233,19 +249,21 @@ fn sign_data(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(rv, CKR_OK, "C_SignInit failed: 0x{:08X}", rv);
 
     // Allocate a generous buffer — PQC signatures can be up to ~30KB
     let mut sig_buf = vec![0u8; 32768];
     let mut sig_len: CK_ULONG = sig_buf.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        sig_buf.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            sig_buf.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Sign failed: 0x{:08X}", rv);
     sig_buf.truncate(sig_len as usize);
     sig_buf
@@ -264,16 +282,18 @@ fn verify_data(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_VerifyInit(session, &mut mechanism, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut mechanism, pub_key) };
     assert_eq!(rv, CKR_OK, "C_VerifyInit failed: 0x{:08X}", rv);
 
-    C_Verify(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        signature.as_ptr() as CK_BYTE_PTR,
-        signature.len() as CK_ULONG,
-    )
+    unsafe {
+        C_Verify(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            signature.as_ptr() as CK_BYTE_PTR,
+            signature.len() as CK_ULONG,
+        )
+    }
 }
 
 /// Helper: read a CK_ULONG attribute from an object.
@@ -288,7 +308,7 @@ fn read_ulong_attribute(
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: buf.len() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, object, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, object, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "C_GetAttributeValue failed: 0x{:08X}", rv);
     CK_ULONG::from_ne_bytes(buf)
 }
@@ -305,7 +325,7 @@ fn read_bbool_attribute(
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: 1,
     }];
-    let rv = C_GetAttributeValue(session, object, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, object, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "C_GetAttributeValue failed: 0x{:08X}", rv);
     buf[0]
 }
@@ -323,7 +343,7 @@ fn read_variable_attribute(
         p_value: ptr::null_mut(),
         value_len: 0,
     }];
-    let rv = C_GetAttributeValue(session, object, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, object, template.as_mut_ptr(), 1) };
     assert_eq!(
         rv, CKR_OK,
         "C_GetAttributeValue size query failed: 0x{:08X}",
@@ -336,7 +356,7 @@ fn read_variable_attribute(
     let mut buf = vec![0u8; size];
     template[0].p_value = buf.as_mut_ptr() as CK_VOID_PTR;
     template[0].value_len = size as CK_ULONG;
-    let rv = C_GetAttributeValue(session, object, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, object, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "C_GetAttributeValue read failed: 0x{:08X}", rv);
     buf
 }
@@ -493,18 +513,20 @@ fn test_ml_dsa_null_output_gets_size() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let data = b"query size test";
     let mut sig_len: CK_ULONG = 0;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            ptr::null_mut(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Size query should succeed");
     assert_eq!(
         sig_len, 2420,
@@ -571,24 +593,28 @@ fn test_ml_dsa_sign_without_login() {
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"NoLoginTk");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Open session but do NOT login
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Attempt C_SignInit without logging in — should fail
@@ -598,14 +624,14 @@ fn test_ml_dsa_sign_without_login() {
         parameter_len: 0,
     };
     // We use handle 1 as a dummy; the login check should come first
-    let rv = C_SignInit(session, &mut mechanism, 1);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, 1) };
     assert_eq!(
         rv, CKR_USER_NOT_LOGGED_IN,
         "SignInit without login should return CKR_USER_NOT_LOGGED_IN, got 0x{:08X}",
         rv
     );
 
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -666,12 +692,14 @@ fn test_ml_kem_768_encap_decap() {
     ];
 
     let mut priv_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CreateObject(
-        session,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut priv_handle,
-    );
+    let rv = unsafe {
+        C_CreateObject(
+            session,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut priv_handle,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "C_CreateObject for ML-KEM private key failed: 0x{:08X}",
@@ -685,14 +713,16 @@ fn test_ml_kem_768_encap_decap() {
         parameter_len: ciphertext.len() as CK_ULONG,
     };
     let mut derived_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_DeriveKey(
-        session,
-        &mut mechanism,
-        priv_handle,
-        ptr::null_mut(),
-        0,
-        &mut derived_key,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            &mut mechanism,
+            priv_handle,
+            ptr::null_mut(),
+            0,
+            &mut derived_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "C_DeriveKey (ML-KEM decapsulation) failed: 0x{:08X}",
@@ -765,18 +795,20 @@ fn test_ml_dsa_keygen_on_ro_session() {
     let mut label = [b' '; 32];
     label[..6].copy_from_slice(b"ROTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Open a read-only session (no CKF_RW_SESSION)
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(0, CKF_SERIAL_SESSION, ptr::null_mut(), None, &mut session);
+    let rv = unsafe { C_OpenSession(0, CKF_SERIAL_SESSION, ptr::null_mut(), None, &mut session) };
     assert_eq!(rv, CKR_OK);
 
     let ck_true: CK_BBOOL = CK_TRUE;
@@ -798,23 +830,25 @@ fn test_ml_dsa_keygen_on_ro_session() {
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
 
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_SESSION_READ_ONLY,
         "Keygen on RO session should return CKR_SESSION_READ_ONLY, got 0x{:08X}",
         rv
     );
 
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -879,16 +913,18 @@ fn test_ml_dsa_44_verify_wrong_variant_key() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_VerifyInit(session, &mut mechanism, pub_65);
+    let rv = unsafe { C_VerifyInit(session, &mut mechanism, pub_65) };
     assert_eq!(rv, CKR_OK, "VerifyInit should succeed");
 
-    let rv = C_Verify(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        signature.as_ptr() as CK_BYTE_PTR,
-        signature.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Verify(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            signature.as_ptr() as CK_BYTE_PTR,
+            signature.len() as CK_ULONG,
+        )
+    };
     assert!(
         rv == CKR_SIGNATURE_INVALID || rv == CKR_SIGNATURE_LEN_RANGE || rv == CKR_GENERAL_ERROR,
         "Cross-variant verify should fail, got 0x{:08X}",
@@ -943,19 +979,21 @@ fn test_ml_dsa_44_sign_buffer_too_small() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let data = b"buffer test";
     let mut tiny_buf = [0u8; 1];
     let mut sig_len: CK_ULONG = tiny_buf.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        tiny_buf.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            tiny_buf.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(
         rv, CKR_BUFFER_TOO_SMALL,
         "Sign with 1-byte buffer should return CKR_BUFFER_TOO_SMALL, got 0x{:08X}",
@@ -985,9 +1023,9 @@ fn test_hybrid_ml_dsa_ecdsa_rejected() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, ml_priv);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, ml_priv) };
     assert_eq!(rv, CKR_MECHANISM_INVALID, "hybrid C_SignInit: 0x{:08X}", rv);
-    let rv = C_VerifyInit(session, &mut mechanism, ml_pub);
+    let rv = unsafe { C_VerifyInit(session, &mut mechanism, ml_pub) };
     assert_eq!(
         rv, CKR_MECHANISM_INVALID,
         "hybrid C_VerifyInit: 0x{:08X}",
@@ -1039,7 +1077,7 @@ fn test_ml_dsa_destroy_key_then_sign() {
     let (_pub_key, priv_key) = generate_ml_dsa_keypair(session, CKM_ML_DSA_44);
 
     // Destroy the private key
-    let rv = C_DestroyObject(session, priv_key);
+    let rv = unsafe { C_DestroyObject(session, priv_key) };
     assert_eq!(rv, CKR_OK, "C_DestroyObject failed: 0x{:08X}", rv);
 
     // Try to sign with the destroyed key
@@ -1048,7 +1086,7 @@ fn test_ml_dsa_destroy_key_then_sign() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(
         rv, CKR_KEY_HANDLE_INVALID,
         "SignInit with destroyed key should return CKR_KEY_HANDLE_INVALID, got 0x{:08X}",
@@ -1067,24 +1105,26 @@ fn test_pqc_mechanism_in_mechanism_list() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"MechList");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Get mechanism count
     let mut count: CK_ULONG = 0;
-    let rv = C_GetMechanismList(0, ptr::null_mut(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count > 0, "Mechanism count should be > 0");
 
     // Get mechanism list
     let mut mechs = vec![0 as CK_MECHANISM_TYPE; count as usize];
-    let rv = C_GetMechanismList(0, mechs.as_mut_ptr(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, mechs.as_mut_ptr(), &mut count) };
     assert_eq!(rv, CKR_OK);
 
     // Verify PQC mechanisms are present
@@ -1160,13 +1200,15 @@ fn test_ml_dsa_sign_with_aes_key_fails() {
     ];
 
     let mut aes_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut aes_mechanism,
-        aes_template.as_mut_ptr(),
-        aes_template.len() as CK_ULONG,
-        &mut aes_key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut aes_mechanism,
+            aes_template.as_mut_ptr(),
+            aes_template.len() as CK_ULONG,
+            &mut aes_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "AES keygen failed: 0x{:08X}", rv);
 
     // Try to use ML-DSA sign with the AES key
@@ -1175,7 +1217,7 @@ fn test_ml_dsa_sign_with_aes_key_fails() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut ml_mechanism, aes_key);
+    let rv = unsafe { C_SignInit(session, &mut ml_mechanism, aes_key) };
     // The AES key doesn't have CKA_SIGN=true, so it should fail with
     // CKR_KEY_FUNCTION_NOT_PERMITTED or CKR_KEY_TYPE_INCONSISTENT or CKR_KEY_HANDLE_INVALID
     assert!(

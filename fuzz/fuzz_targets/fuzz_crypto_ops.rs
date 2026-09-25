@@ -49,7 +49,7 @@ fn fuzz_aes_gcm(data: &[u8]) {
     // Encrypt then decrypt should roundtrip
     if let Ok(ciphertext) = encrypt::aes_256_gcm_encrypt(&key, plaintext) {
         if let Ok(decrypted) = encrypt::aes_256_gcm_decrypt(&key, &ciphertext) {
-            assert_eq!(decrypted, plaintext);
+            assert_eq!(decrypted.as_slice(), plaintext);
         }
     }
 }
@@ -65,7 +65,7 @@ fn fuzz_aes_cbc(data: &[u8]) {
 
     if let Ok(ciphertext) = encrypt::aes_cbc_encrypt(&key, &iv, plaintext) {
         if let Ok(decrypted) = encrypt::aes_cbc_decrypt(&key, &iv, &ciphertext) {
-            assert_eq!(decrypted, plaintext);
+            assert_eq!(decrypted.as_slice(), plaintext);
         }
     }
 }
@@ -81,7 +81,7 @@ fn fuzz_aes_ctr(data: &[u8]) {
 
     if let Ok(ciphertext) = encrypt::aes_ctr_encrypt(&key, &iv, plaintext) {
         if let Ok(decrypted) = encrypt::aes_ctr_decrypt(&key, &iv, &ciphertext) {
-            assert_eq!(decrypted, plaintext);
+            assert_eq!(decrypted.as_slice(), plaintext);
         }
     }
 }

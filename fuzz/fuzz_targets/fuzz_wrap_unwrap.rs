@@ -20,33 +20,35 @@ mod common;
 use common::ensure_init;
 
 fn cleanup_sessions() {
-    let _ = functions::C_CloseAllSessions(0);
+    let _ = unsafe { functions::C_CloseAllSessions(0) };
 }
 
 fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = functions::C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION | CKF_RW_SESSION,
-        std::ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        functions::C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     if rv != CKR_OK {
         return None;
     }
     // Log in with the policy-compliant User PIN provisioned by
     // `common::ensure_init` (A3-13).
     if common::login_user(session) != CKR_OK {
-        let _ = functions::C_CloseSession(session);
+        let _ = unsafe { functions::C_CloseSession(session) };
         return None;
     }
     Some(session)
 }
 
 fn close_session(session: CK_SESSION_HANDLE) {
-    let _ = functions::C_Logout(session);
-    let _ = functions::C_CloseSession(session);
+    let _ = unsafe { functions::C_Logout(session) };
+    let _ = unsafe { functions::C_CloseSession(session) };
 }
 
 /// Generate an AES wrapping key with wrap/unwrap permissions.
@@ -94,13 +96,15 @@ fn generate_wrapping_key(session: CK_SESSION_HANDLE) -> Option<CK_OBJECT_HANDLE>
     };
 
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
 
     if rv == CKR_OK {
         Some(key)
@@ -145,13 +149,15 @@ fn generate_target_key(session: CK_SESSION_HANDLE, extractable: bool) -> Option<
     };
 
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
 
     if rv == CKR_OK {
         Some(key)
@@ -204,7 +210,7 @@ fn fuzz_wrap_valid_key(data: &[u8]) {
     let target_key = match generate_target_key(session, true) {
         Some(k) => k,
         None => {
-            let _ = functions::C_DestroyObject(session, wrapping_key);
+            let _ = unsafe { functions::C_DestroyObject(session, wrapping_key) };
             close_session(session);
             return;
         }
@@ -226,26 +232,30 @@ fn fuzz_wrap_valid_key(data: &[u8]) {
 
     // First call: query wrapped size
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = functions::C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        target_key,
-        std::ptr::null_mut(),
-        &mut wrapped_len,
-    );
-
-    if rv == CKR_OK && wrapped_len > 0 && wrapped_len < 4096 {
-        // Second call: actually wrap
-        let mut wrapped = vec![0u8; wrapped_len as usize];
-        let rv = functions::C_WrapKey(
+    let rv = unsafe {
+        functions::C_WrapKey(
             session,
             &mut mechanism,
             wrapping_key,
             target_key,
-            wrapped.as_mut_ptr(),
+            std::ptr::null_mut(),
             &mut wrapped_len,
-        );
+        )
+    };
+
+    if rv == CKR_OK && wrapped_len > 0 && wrapped_len < 4096 {
+        // Second call: actually wrap
+        let mut wrapped = vec![0u8; wrapped_len as usize];
+        let rv = unsafe {
+            functions::C_WrapKey(
+                session,
+                &mut mechanism,
+                wrapping_key,
+                target_key,
+                wrapped.as_mut_ptr(),
+                &mut wrapped_len,
+            )
+        };
 
         if rv == CKR_OK {
             // Unwrap back
@@ -270,25 +280,27 @@ fn fuzz_wrap_valid_key(data: &[u8]) {
             ];
 
             let mut unwrapped_key: CK_OBJECT_HANDLE = 0;
-            let _rv = functions::C_UnwrapKey(
-                session,
-                &mut mechanism,
-                wrapping_key,
-                wrapped.as_mut_ptr(),
-                wrapped_len,
-                unwrap_template.as_mut_ptr(),
-                unwrap_template.len() as CK_ULONG,
-                &mut unwrapped_key,
-            );
+            let _rv = unsafe {
+                functions::C_UnwrapKey(
+                    session,
+                    &mut mechanism,
+                    wrapping_key,
+                    wrapped.as_mut_ptr(),
+                    wrapped_len,
+                    unwrap_template.as_mut_ptr(),
+                    unwrap_template.len() as CK_ULONG,
+                    &mut unwrapped_key,
+                )
+            };
 
             if _rv == CKR_OK {
-                let _ = functions::C_DestroyObject(session, unwrapped_key);
+                let _ = unsafe { functions::C_DestroyObject(session, unwrapped_key) };
             }
         }
     }
 
-    let _ = functions::C_DestroyObject(session, target_key);
-    let _ = functions::C_DestroyObject(session, wrapping_key);
+    let _ = unsafe { functions::C_DestroyObject(session, target_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, wrapping_key) };
     close_session(session);
 }
 
@@ -312,7 +324,7 @@ fn fuzz_wrap_non_extractable(data: &[u8]) {
     let target_key = match generate_target_key(session, false) {
         Some(k) => k,
         None => {
-            let _ = functions::C_DestroyObject(session, wrapping_key);
+            let _ = unsafe { functions::C_DestroyObject(session, wrapping_key) };
             close_session(session);
             return;
         }
@@ -344,14 +356,16 @@ fn fuzz_wrap_non_extractable(data: &[u8]) {
     let mut wrapped_len: CK_ULONG = 512;
 
     // This MUST fail — wrapping a non-extractable key is prohibited
-    let rv = functions::C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        target_key,
-        wrapped.as_mut_ptr(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        functions::C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            target_key,
+            wrapped.as_mut_ptr(),
+            &mut wrapped_len,
+        )
+    };
 
     // FIX #11: Assert that wrapping non-extractable key does NOT succeed
     assert!(
@@ -359,8 +373,8 @@ fn fuzz_wrap_non_extractable(data: &[u8]) {
         "C_WrapKey succeeded on non-extractable key — CKA_EXTRACTABLE bypass!"
     );
 
-    let _ = functions::C_DestroyObject(session, target_key);
-    let _ = functions::C_DestroyObject(session, wrapping_key);
+    let _ = unsafe { functions::C_DestroyObject(session, target_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, wrapping_key) };
     close_session(session);
 }
 
@@ -393,28 +407,32 @@ fn fuzz_wrap_invalid_handles(data: &[u8]) {
     let mut wrapped_len: CK_ULONG = 512;
 
     // Both handles invalid
-    let _rv = functions::C_WrapKey(
-        session,
-        &mut mechanism,
-        fake_wrapping,
-        fake_target,
-        wrapped.as_mut_ptr(),
-        &mut wrapped_len,
-    );
+    let _rv = unsafe {
+        functions::C_WrapKey(
+            session,
+            &mut mechanism,
+            fake_wrapping,
+            fake_target,
+            wrapped.as_mut_ptr(),
+            &mut wrapped_len,
+        )
+    };
 
     // Unwrap with invalid handle and random wrapped data
     let mut unwrapped_key: CK_OBJECT_HANDLE = 0;
     let wrapped_data = &data[16..];
-    let _rv = functions::C_UnwrapKey(
-        session,
-        &mut mechanism,
-        fake_wrapping,
-        wrapped_data.as_ptr() as *mut _,
-        wrapped_data.len() as CK_ULONG,
-        std::ptr::null_mut(),
-        0,
-        &mut unwrapped_key,
-    );
+    let _rv = unsafe {
+        functions::C_UnwrapKey(
+            session,
+            &mut mechanism,
+            fake_wrapping,
+            wrapped_data.as_ptr() as *mut _,
+            wrapped_data.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            &mut unwrapped_key,
+        )
+    };
 
     close_session(session);
 }
@@ -462,18 +480,20 @@ fn fuzz_unwrap_random_data(data: &[u8]) {
     let mut unwrapped_key: CK_OBJECT_HANDLE = 0;
 
     // Random bytes as wrapped key data — must error, not panic
-    let _rv = functions::C_UnwrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        unwrap_template.as_mut_ptr(),
-        unwrap_template.len() as CK_ULONG,
-        &mut unwrapped_key,
-    );
+    let _rv = unsafe {
+        functions::C_UnwrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            unwrap_template.as_mut_ptr(),
+            unwrap_template.len() as CK_ULONG,
+            &mut unwrapped_key,
+        )
+    };
 
-    let _ = functions::C_DestroyObject(session, wrapping_key);
+    let _ = unsafe { functions::C_DestroyObject(session, wrapping_key) };
     close_session(session);
 }
 
@@ -499,7 +519,7 @@ fn fuzz_wrap_random_mechanism(data: &[u8]) {
     let target_key = match generate_target_key(session, true) {
         Some(k) => k,
         None => {
-            let _ = functions::C_DestroyObject(session, wrapping_key);
+            let _ = unsafe { functions::C_DestroyObject(session, wrapping_key) };
             close_session(session);
             return;
         }
@@ -519,16 +539,18 @@ fn fuzz_wrap_random_mechanism(data: &[u8]) {
     let mut wrapped_len: CK_ULONG = 512;
 
     // Random mechanism — should error for unsupported mechanisms
-    let _rv = functions::C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        target_key,
-        wrapped.as_mut_ptr(),
-        &mut wrapped_len,
-    );
+    let _rv = unsafe {
+        functions::C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            target_key,
+            wrapped.as_mut_ptr(),
+            &mut wrapped_len,
+        )
+    };
 
-    let _ = functions::C_DestroyObject(session, target_key);
-    let _ = functions::C_DestroyObject(session, wrapping_key);
+    let _ = unsafe { functions::C_DestroyObject(session, target_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, wrapping_key) };
     close_session(session);
 }

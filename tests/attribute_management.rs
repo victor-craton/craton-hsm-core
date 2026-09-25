@@ -13,7 +13,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 }
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -27,47 +27,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"AttrTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed");
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -103,13 +113,15 @@ fn generate_aes_key(session: CK_SESSION_HANDLE, label: &[u8]) -> CK_OBJECT_HANDL
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "generate_aes_key failed: 0x{:08X}", rv);
     key
 }
@@ -154,13 +166,15 @@ fn generate_aes_key_with_id(
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "generate_aes_key_with_id failed: 0x{:08X}", rv);
     key
 }
@@ -181,7 +195,7 @@ fn test_get_label_attribute() {
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: buf.len() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "GetAttributeValue(LABEL) failed: 0x{:08X}", rv);
     let actual_len = template[0].value_len as usize;
     assert_eq!(&buf[..actual_len], label.as_slice());
@@ -199,7 +213,7 @@ fn test_get_id_attribute() {
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: buf.len() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     let actual_len = template[0].value_len as usize;
     assert_eq!(&buf[..actual_len], id.as_slice());
@@ -215,7 +229,7 @@ fn test_get_class_attribute() {
         p_value: &mut class_val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(class_val, CKO_SECRET_KEY);
 }
@@ -230,7 +244,7 @@ fn test_get_key_type_attribute() {
         p_value: &mut kt as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(kt, CKK_AES);
 }
@@ -245,7 +259,7 @@ fn test_get_encrypt_permission_attribute() {
         p_value: &mut enc_val as *mut _ as CK_VOID_PTR,
         value_len: 1,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(enc_val, CK_TRUE, "Key should have CKA_ENCRYPT=true");
 }
@@ -260,7 +274,7 @@ fn test_get_decrypt_permission_attribute() {
         p_value: &mut dec_val as *mut _ as CK_VOID_PTR,
         value_len: 1,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(dec_val, CK_TRUE);
 }
@@ -275,7 +289,7 @@ fn test_get_sensitive_attribute() {
         p_value: &mut sens as *mut _ as CK_VOID_PTR,
         value_len: 1,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     // Default AES keys are not sensitive unless explicitly set
 }
@@ -290,7 +304,7 @@ fn test_get_extractable_attribute() {
         p_value: &mut extr as *mut _ as CK_VOID_PTR,
         value_len: 1,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     // Default extractable may be true or false depending on implementation
     // This test verifies the attribute is readable
@@ -310,7 +324,7 @@ fn test_get_attribute_null_value_returns_size() {
         p_value: ptr::null_mut(),
         value_len: 0,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "Null-value query should return OK");
     let value_len = template[0].value_len;
     assert_eq!(value_len, 10, "Label 'size_query' is 10 bytes");
@@ -325,7 +339,7 @@ fn test_get_attribute_invalid_handle() {
         p_value: &mut val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, 0xFFFFFFFF, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, 0xFFFFFFFF, template.as_mut_ptr(), 1) };
     assert_ne!(rv, CKR_OK, "Invalid handle should fail");
 }
 
@@ -354,7 +368,7 @@ fn test_get_multiple_attributes_at_once() {
             value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
         },
     ];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 3);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 3) };
     assert_eq!(rv, CKR_OK, "Multi-attribute query should succeed");
     assert_eq!(class_val, CKO_SECRET_KEY);
     assert_eq!(kt, CKK_AES);
@@ -376,7 +390,7 @@ fn test_set_label_attribute() {
         p_value: new_label.as_ptr() as CK_VOID_PTR,
         value_len: new_label.len() as CK_ULONG,
     }];
-    let rv = C_SetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_SetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "SetAttributeValue(LABEL) failed: 0x{:08X}", rv);
 
     // Read back
@@ -386,7 +400,7 @@ fn test_set_label_attribute() {
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: buf.len() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, read_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, read_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         &buf[..read_template[0].value_len as usize],
@@ -405,7 +419,7 @@ fn test_set_id_attribute() {
         p_value: new_id.as_ptr() as CK_VOID_PTR,
         value_len: new_id.len() as CK_ULONG,
     }];
-    let rv = C_SetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_SetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "SetAttributeValue(ID) failed: 0x{:08X}", rv);
 
     let mut buf = [0u8; 64];
@@ -414,7 +428,7 @@ fn test_set_id_attribute() {
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: buf.len() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, read_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, read_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         &buf[..read_template[0].value_len as usize],
@@ -431,7 +445,7 @@ fn test_set_attribute_invalid_handle() {
         p_value: new_label.as_ptr() as CK_VOID_PTR,
         value_len: new_label.len() as CK_ULONG,
     }];
-    let rv = C_SetAttributeValue(session, 0xFFFFFFFF, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_SetAttributeValue(session, 0xFFFFFFFF, template.as_mut_ptr(), 1) };
     assert_ne!(rv, CKR_OK, "Set on invalid handle should fail");
 }
 
@@ -450,16 +464,16 @@ fn test_find_objects_by_label() {
         p_value: label.as_ptr() as CK_VOID_PTR,
         value_len: label.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(session, find_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_FindObjectsInit(session, find_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
 
     let mut found: [CK_OBJECT_HANDLE; 10] = [0; 10];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 10, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 10, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count >= 1, "Should find at least 1 object");
 
-    let rv = C_FindObjectsFinal(session);
+    let rv = unsafe { C_FindObjectsFinal(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -474,16 +488,16 @@ fn test_find_objects_by_class() {
         p_value: class_val.as_ptr() as CK_VOID_PTR,
         value_len: class_val.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(session, find_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_FindObjectsInit(session, find_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
 
     let mut found: [CK_OBJECT_HANDLE; 100] = [0; 100];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 100, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 100, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count >= 1, "Should find at least 1 secret key");
 
-    C_FindObjectsFinal(session);
+    unsafe { C_FindObjectsFinal(session) };
 }
 
 #[test]
@@ -497,16 +511,16 @@ fn test_find_objects_by_id() {
         p_value: id.as_ptr() as CK_VOID_PTR,
         value_len: id.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(session, find_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_FindObjectsInit(session, find_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
 
     let mut found: [CK_OBJECT_HANDLE; 10] = [0; 10];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 10, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 10, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count >= 1, "Should find object by CKA_ID");
 
-    C_FindObjectsFinal(session);
+    unsafe { C_FindObjectsFinal(session) };
 }
 
 #[test]
@@ -519,16 +533,16 @@ fn test_find_objects_no_match() {
         p_value: label.as_ptr() as CK_VOID_PTR,
         value_len: label.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(session, find_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_FindObjectsInit(session, find_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
 
     let mut found: [CK_OBJECT_HANDLE; 10] = [0; 10];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 10, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 10, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(count, 0, "Should find 0 objects for nonexistent label");
 
-    C_FindObjectsFinal(session);
+    unsafe { C_FindObjectsFinal(session) };
 }
 
 #[test]
@@ -537,16 +551,16 @@ fn test_find_objects_empty_template() {
     let _key = generate_aes_key(session, b"empty_tmpl_find");
 
     // Empty template → match all objects
-    let rv = C_FindObjectsInit(session, ptr::null_mut(), 0);
+    let rv = unsafe { C_FindObjectsInit(session, ptr::null_mut(), 0) };
     assert_eq!(rv, CKR_OK);
 
     let mut found: [CK_OBJECT_HANDLE; 100] = [0; 100];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 100, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 100, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count >= 1, "Empty template should match at least 1 object");
 
-    C_FindObjectsFinal(session);
+    unsafe { C_FindObjectsFinal(session) };
 }
 
 #[test]
@@ -561,7 +575,7 @@ fn test_find_objects_after_set_label() {
         p_value: new_label.as_ptr() as CK_VOID_PTR,
         value_len: new_label.len() as CK_ULONG,
     }];
-    C_SetAttributeValue(session, key, set_template.as_mut_ptr(), 1);
+    unsafe { C_SetAttributeValue(session, key, set_template.as_mut_ptr(), 1) };
 
     // Find by new label
     let mut find_template = [CK_ATTRIBUTE {
@@ -569,23 +583,23 @@ fn test_find_objects_after_set_label() {
         p_value: new_label.as_ptr() as CK_VOID_PTR,
         value_len: new_label.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(session, find_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_FindObjectsInit(session, find_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
 
     let mut found: [CK_OBJECT_HANDLE; 10] = [0; 10];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 10, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 10, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count >= 1, "Should find object by new label");
 
-    C_FindObjectsFinal(session);
+    unsafe { C_FindObjectsFinal(session) };
 }
 
 #[test]
 fn test_find_objects_final_without_init() {
     let session = setup_user_session();
     // FindObjectsFinal without FindObjectsInit — should return error or OK
-    let rv = C_FindObjectsFinal(session);
+    let rv = unsafe { C_FindObjectsFinal(session) };
     // Per PKCS#11 spec, this should return CKR_OPERATION_NOT_INITIALIZED
     // but some implementations just return OK. Accept either.
     assert!(
@@ -608,12 +622,12 @@ fn test_find_objects_multiple_with_same_label() {
         p_value: label.as_ptr() as CK_VOID_PTR,
         value_len: label.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(session, find_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_FindObjectsInit(session, find_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
 
     let mut found: [CK_OBJECT_HANDLE; 100] = [0; 100];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 100, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 100, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(
         count >= 3,
@@ -621,7 +635,7 @@ fn test_find_objects_multiple_with_same_label() {
         count
     );
 
-    C_FindObjectsFinal(session);
+    unsafe { C_FindObjectsFinal(session) };
 }
 
 // ============================================================================
@@ -657,13 +671,15 @@ fn test_get_value_of_sensitive_key() {
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Try to read CKA_VALUE from sensitive key → should fail with CKR_ATTRIBUTE_SENSITIVE
@@ -673,7 +689,7 @@ fn test_get_value_of_sensitive_key() {
         p_value: buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: buf.len() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, read_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, read_template.as_mut_ptr(), 1) };
     assert_ne!(rv, CKR_OK, "Reading CKA_VALUE of sensitive key should fail");
 }
 
@@ -687,7 +703,7 @@ fn test_get_value_len_attribute() {
         p_value: &mut val_len as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(val_len, 32, "AES-256 key should have VALUE_LEN=32");
 }
@@ -705,14 +721,14 @@ fn test_find_and_get_combined_workflow() {
         p_value: label.as_ptr() as CK_VOID_PTR,
         value_len: label.len() as CK_ULONG,
     }];
-    let rv = C_FindObjectsInit(session, find_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_FindObjectsInit(session, find_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     let mut found: [CK_OBJECT_HANDLE; 10] = [0; 10];
     let mut count: CK_ULONG = 0;
-    let rv = C_FindObjects(session, found.as_mut_ptr(), 10, &mut count);
+    let rv = unsafe { C_FindObjects(session, found.as_mut_ptr(), 10, &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count >= 1);
-    C_FindObjectsFinal(session);
+    unsafe { C_FindObjectsFinal(session) };
 
     // Read attributes from found object
     let found_handle = found[0];
@@ -722,7 +738,7 @@ fn test_find_and_get_combined_workflow() {
         p_value: read_id.as_mut_ptr() as CK_VOID_PTR,
         value_len: read_id.len() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, found_handle, read_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, found_handle, read_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         &read_id[..read_template[0].value_len as usize],

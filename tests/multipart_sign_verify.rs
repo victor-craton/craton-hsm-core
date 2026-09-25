@@ -24,7 +24,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 /// Initialize PKCS#11, open an RW session, and log in as user.
 /// Returns the session handle.
 fn setup_session() -> CK_SESSION_HANDLE {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 
     // Init token
@@ -32,52 +32,62 @@ fn setup_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"TestToken");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Open RW session
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Login as SO, init user PIN, logout, login as user
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let user_pin = b"userpin1234";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     session
@@ -115,16 +125,18 @@ fn generate_rsa_key_pair(session: CK_SESSION_HANDLE) -> (CK_OBJECT_HANDLE, CK_OB
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     (pub_key, priv_key)
 }
@@ -162,16 +174,18 @@ fn generate_ec_p256_key_pair(session: CK_SESSION_HANDLE) -> (CK_OBJECT_HANDLE, C
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     (pub_key, priv_key)
 }
@@ -209,16 +223,18 @@ fn generate_ec_p384_key_pair(session: CK_SESSION_HANDLE) -> (CK_OBJECT_HANDLE, C
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     (pub_key, priv_key)
 }
@@ -235,7 +251,7 @@ fn single_shot_sign(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(
         rv, CKR_OK,
         "C_SignInit failed for mechanism 0x{:08x}",
@@ -244,13 +260,15 @@ fn single_shot_sign(
 
     let mut sig_buf = vec![0u8; 512];
     let mut sig_len: CK_ULONG = sig_buf.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        sig_buf.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            sig_buf.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "C_Sign failed for mechanism 0x{:08x}",
@@ -272,7 +290,7 @@ fn multi_part_sign(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(
         rv, CKR_OK,
         "C_SignInit failed for multi-part mechanism 0x{:08x}",
@@ -280,11 +298,13 @@ fn multi_part_sign(
     );
 
     for chunk in chunks {
-        let rv = C_SignUpdate(
-            session,
-            chunk.as_ptr() as CK_BYTE_PTR,
-            chunk.len() as CK_ULONG,
-        );
+        let rv = unsafe {
+            C_SignUpdate(
+                session,
+                chunk.as_ptr() as CK_BYTE_PTR,
+                chunk.len() as CK_ULONG,
+            )
+        };
         assert_eq!(
             rv, CKR_OK,
             "C_SignUpdate failed for mechanism 0x{:08x}",
@@ -294,7 +314,7 @@ fn multi_part_sign(
 
     let mut sig_buf = vec![0u8; 512];
     let mut sig_len: CK_ULONG = sig_buf.len() as CK_ULONG;
-    let rv = C_SignFinal(session, sig_buf.as_mut_ptr(), &mut sig_len);
+    let rv = unsafe { C_SignFinal(session, sig_buf.as_mut_ptr(), &mut sig_len) };
     assert_eq!(
         rv, CKR_OK,
         "C_SignFinal failed for mechanism 0x{:08x}",
@@ -317,20 +337,22 @@ fn single_shot_verify(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_VerifyInit(session, &mut mechanism, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut mechanism, pub_key) };
     assert_eq!(
         rv, CKR_OK,
         "C_VerifyInit failed for mechanism 0x{:08x}",
         mechanism_type
     );
 
-    C_Verify(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        signature.as_ptr() as CK_BYTE_PTR,
-        signature.len() as CK_ULONG,
-    )
+    unsafe {
+        C_Verify(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            signature.as_ptr() as CK_BYTE_PTR,
+            signature.len() as CK_ULONG,
+        )
+    }
 }
 
 /// Multi-part verify: C_VerifyInit + C_VerifyUpdate*N + C_VerifyFinal
@@ -346,7 +368,7 @@ fn multi_part_verify(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_VerifyInit(session, &mut mechanism, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut mechanism, pub_key) };
     assert_eq!(
         rv, CKR_OK,
         "C_VerifyInit failed for multi-part mechanism 0x{:08x}",
@@ -354,11 +376,13 @@ fn multi_part_verify(
     );
 
     for chunk in chunks {
-        let rv = C_VerifyUpdate(
-            session,
-            chunk.as_ptr() as CK_BYTE_PTR,
-            chunk.len() as CK_ULONG,
-        );
+        let rv = unsafe {
+            C_VerifyUpdate(
+                session,
+                chunk.as_ptr() as CK_BYTE_PTR,
+                chunk.len() as CK_ULONG,
+            )
+        };
         assert_eq!(
             rv, CKR_OK,
             "C_VerifyUpdate failed for mechanism 0x{:08x}",
@@ -366,11 +390,13 @@ fn multi_part_verify(
         );
     }
 
-    C_VerifyFinal(
-        session,
-        signature.as_ptr() as CK_BYTE_PTR,
-        signature.len() as CK_ULONG,
-    )
+    unsafe {
+        C_VerifyFinal(
+            session,
+            signature.as_ptr() as CK_BYTE_PTR,
+            signature.len() as CK_ULONG,
+        )
+    }
 }
 
 #[test]
@@ -539,11 +565,13 @@ fn test_multipart_sign_verify() {
     // 14. Error: C_SignUpdate without C_SignInit
     // ========================================================================
     println!("Test 14: C_SignUpdate without C_SignInit");
-    let rv = C_SignUpdate(
-        session,
-        message.as_ptr() as CK_BYTE_PTR,
-        message.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_SignUpdate(
+            session,
+            message.as_ptr() as CK_BYTE_PTR,
+            message.len() as CK_ULONG,
+        )
+    };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "SignUpdate without SignInit should fail"
@@ -555,7 +583,7 @@ fn test_multipart_sign_verify() {
     println!("Test 15: C_SignFinal without C_SignInit");
     let mut sig_buf = vec![0u8; 512];
     let mut sig_len: CK_ULONG = sig_buf.len() as CK_ULONG;
-    let rv = C_SignFinal(session, sig_buf.as_mut_ptr(), &mut sig_len);
+    let rv = unsafe { C_SignFinal(session, sig_buf.as_mut_ptr(), &mut sig_len) };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "SignFinal without SignInit should fail"
@@ -565,11 +593,13 @@ fn test_multipart_sign_verify() {
     // 16. Error: C_VerifyUpdate without C_VerifyInit
     // ========================================================================
     println!("Test 16: C_VerifyUpdate without C_VerifyInit");
-    let rv = C_VerifyUpdate(
-        session,
-        message.as_ptr() as CK_BYTE_PTR,
-        message.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_VerifyUpdate(
+            session,
+            message.as_ptr() as CK_BYTE_PTR,
+            message.len() as CK_ULONG,
+        )
+    };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "VerifyUpdate without VerifyInit should fail"
@@ -580,11 +610,13 @@ fn test_multipart_sign_verify() {
     // ========================================================================
     println!("Test 17: C_VerifyFinal without C_VerifyInit");
     let dummy_sig = vec![0u8; 256];
-    let rv = C_VerifyFinal(
-        session,
-        dummy_sig.as_ptr() as CK_BYTE_PTR,
-        dummy_sig.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_VerifyFinal(
+            session,
+            dummy_sig.as_ptr() as CK_BYTE_PTR,
+            dummy_sig.len() as CK_ULONG,
+        )
+    };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "VerifyFinal without VerifyInit should fail"
@@ -619,9 +651,9 @@ fn test_multipart_sign_verify() {
     assert_eq!(rv, CKR_OK, "Many small updates sign/verify failed");
 
     // Cleanup
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert!(rv == CKR_OK || rv == CKR_USER_NOT_LOGGED_IN);
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 
     println!("All 20 multi-part sign/verify tests passed!");

@@ -23,49 +23,53 @@ fn label(s: &[u8]) -> [u8; 32] {
 }
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 }
 
 fn open_rw() -> CK_SESSION_HANDLE {
     let mut s: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut s,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut s,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     s
 }
 
 fn login(s: CK_SESSION_HANDLE, user: CK_ULONG, pin: &[u8]) -> CK_RV {
-    C_Login(s, user, pin.as_ptr() as *mut _, pin.len() as CK_ULONG)
+    unsafe { C_Login(s, user, pin.as_ptr() as *mut _, pin.len() as CK_ULONG) }
 }
 
 fn init_token(pin: &[u8]) -> CK_RV {
     let l = label(b"Regress");
-    C_InitToken(
-        0,
-        pin.as_ptr() as *mut _,
-        pin.len() as CK_ULONG,
-        l.as_ptr() as *mut _,
-    )
+    unsafe {
+        C_InitToken(
+            0,
+            pin.as_ptr() as *mut _,
+            pin.len() as CK_ULONG,
+            l.as_ptr() as *mut _,
+        )
+    }
 }
 
 /// Fresh token with a user PIN; returns a user session.
 fn fresh_user_session() -> CK_SESSION_HANDLE {
     ensure_init();
-    let _ = C_CloseAllSessions(0);
+    let _ = unsafe { C_CloseAllSessions(0) };
     assert_eq!(init_token(SO_PIN), CKR_OK);
     let s = open_rw();
     assert_eq!(login(s, CKU_SO, SO_PIN), CKR_OK);
     assert_eq!(
-        C_InitPIN(s, USER_PIN.as_ptr() as *mut _, USER_PIN.len() as CK_ULONG),
+        unsafe { C_InitPIN(s, USER_PIN.as_ptr() as *mut _, USER_PIN.len() as CK_ULONG) },
         CKR_OK
     );
-    assert_eq!(C_Logout(s), CKR_OK);
+    assert_eq!(unsafe { C_Logout(s) }, CKR_OK);
     assert_eq!(login(s, CKU_USER, USER_PIN), CKR_OK);
     s
 }
@@ -103,23 +107,28 @@ fn gen_aes(s: CK_SESSION_HANDLE, token: bool, extractable: bool) -> CK_OBJECT_HA
         },
     ];
     let mut h: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        s,
-        &mut mech,
-        tmpl.as_mut_ptr(),
-        tmpl.len() as CK_ULONG,
-        &mut h,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            s,
+            &mut mech,
+            tmpl.as_mut_ptr(),
+            tmpl.len() as CK_ULONG,
+            &mut h,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     h
 }
 
 fn count_objects(s: CK_SESSION_HANDLE) -> usize {
-    assert_eq!(C_FindObjectsInit(s, ptr::null_mut(), 0), CKR_OK);
+    assert_eq!(unsafe { C_FindObjectsInit(s, ptr::null_mut(), 0) }, CKR_OK);
     let mut found = [0 as CK_OBJECT_HANDLE; 64];
     let mut n: CK_ULONG = 0;
-    assert_eq!(C_FindObjects(s, found.as_mut_ptr(), 64, &mut n), CKR_OK);
-    assert_eq!(C_FindObjectsFinal(s), CKR_OK);
+    assert_eq!(
+        unsafe { C_FindObjects(s, found.as_mut_ptr(), 64, &mut n) },
+        CKR_OK
+    );
+    assert_eq!(unsafe { C_FindObjectsFinal(s) }, CKR_OK);
     n as usize
 }
 
@@ -138,7 +147,7 @@ fn init_token_verifies_so_pin_before_wiping() {
     // Keep the object alive in a token object, close sessions, wrong PIN.
     let t = gen_aes(s, true, false);
     let _ = t;
-    assert_eq!(C_CloseAllSessions(0), CKR_OK);
+    assert_eq!(unsafe { C_CloseAllSessions(0) }, CKR_OK);
     assert_eq!(init_token(b"wrongPIN9"), CKR_PIN_INCORRECT);
     let s2 = open_rw();
     assert_eq!(login(s2, CKU_USER, USER_PIN), CKR_OK);
@@ -147,7 +156,7 @@ fn init_token_verifies_so_pin_before_wiping() {
         1,
         "token object must survive a failed C_InitToken"
     );
-    assert_eq!(C_CloseAllSessions(0), CKR_OK);
+    assert_eq!(unsafe { C_CloseAllSessions(0) }, CKR_OK);
 
     // Correct PIN wipes the token.
     std::thread::sleep(std::time::Duration::from_millis(300));
@@ -166,7 +175,7 @@ fn sensitive_extractable_value_not_readable_via_abi() {
         value_len: buf.len() as CK_ULONG,
     }];
     assert_eq!(
-        C_GetAttributeValue(s, h, attr.as_mut_ptr(), 1),
+        unsafe { C_GetAttributeValue(s, h, attr.as_mut_ptr(), 1) },
         CKR_ATTRIBUTE_SENSITIVE
     );
     assert_eq!(attr[0].value_len, CK_UNAVAILABLE_INFORMATION);
@@ -178,7 +187,7 @@ fn sensitive_extractable_value_not_readable_via_abi() {
 fn so_cannot_access_private_user_objects() {
     let s = fresh_user_session();
     let h = gen_aes(s, true, false);
-    assert_eq!(C_Logout(s), CKR_OK);
+    assert_eq!(unsafe { C_Logout(s) }, CKR_OK);
     assert_eq!(login(s, CKU_SO, SO_PIN), CKR_OK);
     assert_eq!(count_objects(s), 0, "SO must not find private user objects");
     let mut v: CK_ULONG = 0;
@@ -188,10 +197,10 @@ fn so_cannot_access_private_user_objects() {
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
     assert_eq!(
-        C_GetAttributeValue(s, h, attr.as_mut_ptr(), 1),
+        unsafe { C_GetAttributeValue(s, h, attr.as_mut_ptr(), 1) },
         CKR_USER_NOT_LOGGED_IN
     );
-    assert_eq!(C_Logout(s), CKR_OK);
+    assert_eq!(unsafe { C_Logout(s) }, CKR_OK);
 }
 
 /// H1-06: closing the last session logs the token out; H3-07: session
@@ -200,7 +209,7 @@ fn so_cannot_access_private_user_objects() {
 fn closing_last_session_logs_out_and_destroys_session_objects() {
     let s = fresh_user_session();
     gen_aes(s, false, false);
-    assert_eq!(C_CloseSession(s), CKR_OK);
+    assert_eq!(unsafe { C_CloseSession(s) }, CKR_OK);
 
     let s2 = open_rw();
     let mut info = CK_SESSION_INFO {
@@ -209,14 +218,14 @@ fn closing_last_session_logs_out_and_destroys_session_objects() {
         flags: 0,
         device_error: 0,
     };
-    assert_eq!(C_GetSessionInfo(s2, &mut info), CKR_OK);
+    assert_eq!(unsafe { C_GetSessionInfo(s2, &mut info) }, CKR_OK);
     assert_eq!(
         info.state, CKS_RW_PUBLIC_SESSION,
         "token must be logged out"
     );
     assert_eq!(login(s2, CKU_USER, USER_PIN), CKR_OK);
     assert_eq!(count_objects(s2), 0, "session object must be destroyed");
-    assert_eq!(C_CloseSession(s2), CKR_OK);
+    assert_eq!(unsafe { C_CloseSession(s2) }, CKR_OK);
 }
 
 /// H1-13/H3-03: objects are bound to the slot of the creating session.

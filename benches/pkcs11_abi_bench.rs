@@ -306,7 +306,7 @@ impl BenchState {
         let f = lib.fns();
 
         // --- Initialize library (accept already-initialized for re-entrant runs) ---
-        let rv = (f.C_Initialize)(ptr::null_mut());
+        let rv = unsafe { (f.C_Initialize)(ptr::null_mut()) };
         assert!(
             rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
             "{}: C_Initialize returned 0x{:08X}",
@@ -317,7 +317,7 @@ impl BenchState {
         // --- Validate slot 0 exists and is a software token ---
         // This prevents accidentally reinitializing a real hardware HSM slot.
         let mut slot_count: CK_ULONG = 0;
-        let rv = (f.C_GetSlotList)(CK_FALSE, ptr::null_mut(), &mut slot_count);
+        let rv = unsafe { (f.C_GetSlotList)(CK_FALSE, ptr::null_mut(), &mut slot_count) };
         assert_eq!(
             rv, CKR_OK,
             "{}: C_GetSlotList(count) returned 0x{:08X}",
@@ -330,7 +330,7 @@ impl BenchState {
         );
 
         let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
-        let rv = (f.C_GetSlotList)(CK_FALSE, slots.as_mut_ptr(), &mut slot_count);
+        let rv = unsafe { (f.C_GetSlotList)(CK_FALSE, slots.as_mut_ptr(), &mut slot_count) };
         assert_eq!(rv, CKR_OK, "{}: C_GetSlotList returned 0x{:08X}", name, rv);
 
         let bench_slot = slots[0];
@@ -338,50 +338,60 @@ impl BenchState {
         // --- Init token (resets all objects & PINs) ---
         let mut label = [b' '; 32];
         label[..9].copy_from_slice(b"BenchTest");
-        let rv = (f.C_InitToken)(
-            bench_slot,
-            BENCH_SO_PIN.as_ptr() as *mut _,
-            BENCH_SO_PIN.len() as CK_ULONG,
-            label.as_ptr() as *mut _,
-        );
+        let rv = unsafe {
+            (f.C_InitToken)(
+                bench_slot,
+                BENCH_SO_PIN.as_ptr() as *mut _,
+                BENCH_SO_PIN.len() as CK_ULONG,
+                label.as_ptr() as *mut _,
+            )
+        };
         assert_eq!(rv, CKR_OK, "{}: C_InitToken returned 0x{:08X}", name, rv);
 
         // --- Open RW session ---
         let mut session: CK_SESSION_HANDLE = 0;
-        let rv = (f.C_OpenSession)(
-            bench_slot,
-            CKF_RW_SESSION | CKF_SERIAL_SESSION,
-            ptr::null_mut(),
-            None,
-            &mut session,
-        );
+        let rv = unsafe {
+            (f.C_OpenSession)(
+                bench_slot,
+                CKF_RW_SESSION | CKF_SERIAL_SESSION,
+                ptr::null_mut(),
+                None,
+                &mut session,
+            )
+        };
         assert_eq!(rv, CKR_OK, "{}: C_OpenSession returned 0x{:08X}", name, rv);
 
         // --- Login as SO → init user PIN → logout → login as user ---
-        let rv = (f.C_Login)(
-            session,
-            CKU_SO,
-            BENCH_SO_PIN.as_ptr() as *mut _,
-            BENCH_SO_PIN.len() as CK_ULONG,
-        );
+        let rv = unsafe {
+            (f.C_Login)(
+                session,
+                CKU_SO,
+                BENCH_SO_PIN.as_ptr() as *mut _,
+                BENCH_SO_PIN.len() as CK_ULONG,
+            )
+        };
         assert_eq!(rv, CKR_OK, "{}: C_Login(SO) returned 0x{:08X}", name, rv);
 
-        let rv = (f.C_InitPIN)(
-            session,
-            BENCH_USER_PIN.as_ptr() as *mut _,
-            BENCH_USER_PIN.len() as CK_ULONG,
-        );
+        let rv = unsafe {
+            (f.C_InitPIN)(
+                session,
+                BENCH_USER_PIN.as_ptr() as *mut _,
+                BENCH_USER_PIN.len() as CK_ULONG,
+            )
+        };
         assert_eq!(rv, CKR_OK, "{}: C_InitPIN returned 0x{:08X}", name, rv);
 
-        let rv = (f.C_Logout)(session);
+        let rv = unsafe { (f.C_Logout)(session) };
         assert_eq!(rv, CKR_OK, "{}: C_Logout returned 0x{:08X}", name, rv);
 
-        let rv = (f.C_Login)(
-            session,
-            CKU_USER,
-            BENCH_USER_PIN.as_ptr() as *mut _,
-            BENCH_USER_PIN.len() as CK_ULONG,
-        );
+        let rv = unsafe {
+            (f.C_Login)(
+                session,
+                CKU_USER,
+                BENCH_USER_PIN.as_ptr() as *mut _,
+                BENCH_USER_PIN.len() as CK_ULONG,
+            )
+        };
         assert_eq!(rv, CKR_OK, "{}: C_Login(User) returned 0x{:08X}", name, rv);
 
         // --- Generate keys ---
@@ -468,16 +478,18 @@ impl BenchState {
 
         let mut pub_key: CK_OBJECT_HANDLE = 0;
         let mut priv_key: CK_OBJECT_HANDLE = 0;
-        let rv = (f.C_GenerateKeyPair)(
-            session,
-            &mut mechanism,
-            pub_template.as_mut_ptr(),
-            pub_template.len() as CK_ULONG,
-            priv_template.as_mut_ptr(),
-            priv_template.len() as CK_ULONG,
-            &mut pub_key,
-            &mut priv_key,
-        );
+        let rv = unsafe {
+            (f.C_GenerateKeyPair)(
+                session,
+                &mut mechanism,
+                pub_template.as_mut_ptr(),
+                pub_template.len() as CK_ULONG,
+                priv_template.as_mut_ptr(),
+                priv_template.len() as CK_ULONG,
+                &mut pub_key,
+                &mut priv_key,
+            )
+        };
         assert_eq!(rv, CKR_OK, "RSA-2048 keygen returned 0x{:08X}", rv);
         (pub_key, priv_key)
     }
@@ -515,16 +527,18 @@ impl BenchState {
 
         let mut pub_key: CK_OBJECT_HANDLE = 0;
         let mut priv_key: CK_OBJECT_HANDLE = 0;
-        let rv = (f.C_GenerateKeyPair)(
-            session,
-            &mut mechanism,
-            pub_template.as_mut_ptr(),
-            pub_template.len() as CK_ULONG,
-            priv_template.as_mut_ptr(),
-            priv_template.len() as CK_ULONG,
-            &mut pub_key,
-            &mut priv_key,
-        );
+        let rv = unsafe {
+            (f.C_GenerateKeyPair)(
+                session,
+                &mut mechanism,
+                pub_template.as_mut_ptr(),
+                pub_template.len() as CK_ULONG,
+                priv_template.as_mut_ptr(),
+                priv_template.len() as CK_ULONG,
+                &mut pub_key,
+                &mut priv_key,
+            )
+        };
         assert_eq!(rv, CKR_OK, "EC P-256 keygen returned 0x{:08X}", rv);
         (pub_key, priv_key)
     }
@@ -557,13 +571,15 @@ impl BenchState {
         ];
 
         let mut key: CK_OBJECT_HANDLE = 0;
-        let rv = (f.C_GenerateKey)(
-            session,
-            &mut mechanism,
-            template.as_mut_ptr(),
-            template.len() as CK_ULONG,
-            &mut key,
-        );
+        let rv = unsafe {
+            (f.C_GenerateKey)(
+                session,
+                &mut mechanism,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut key,
+            )
+        };
         assert_eq!(rv, CKR_OK, "AES-256 keygen returned 0x{:08X}", rv);
         key
     }
@@ -582,7 +598,7 @@ impl BenchState {
             p_parameter: ptr::null_mut(),
             parameter_len: 0,
         };
-        let rv = (f.C_SignInit)(session, &mut mech, key);
+        let rv = unsafe { (f.C_SignInit)(session, &mut mech, key) };
         assert_eq!(
             rv, CKR_OK,
             "C_SignInit(0x{:08X}) returned 0x{:08X}",
@@ -591,13 +607,15 @@ impl BenchState {
 
         let mut sig = vec![0u8; 512];
         let mut sig_len: CK_ULONG = sig.len() as CK_ULONG;
-        let rv = (f.C_Sign)(
-            session,
-            data.as_ptr() as CK_BYTE_PTR,
-            data.len() as CK_ULONG,
-            sig.as_mut_ptr(),
-            &mut sig_len,
-        );
+        let rv = unsafe {
+            (f.C_Sign)(
+                session,
+                data.as_ptr() as CK_BYTE_PTR,
+                data.len() as CK_ULONG,
+                sig.as_mut_ptr(),
+                &mut sig_len,
+            )
+        };
         assert_eq!(
             rv, CKR_OK,
             "C_Sign(0x{:08X}) returned 0x{:08X}",
@@ -624,19 +642,21 @@ impl BenchState {
             p_parameter: ptr::null_mut(),
             parameter_len: 0,
         };
-        let rv = (f.C_EncryptInit)(session, &mut mech, key);
+        let rv = unsafe { (f.C_EncryptInit)(session, &mut mech, key) };
         assert_eq!(rv, CKR_OK, "C_EncryptInit(AES-GCM) returned 0x{:08X}", rv);
 
         // Output buffer: nonce(12) + ciphertext(len) + tag(16)
         let mut out = vec![0u8; data.len() + 256];
         let mut out_len: CK_ULONG = out.len() as CK_ULONG;
-        let rv = (f.C_Encrypt)(
-            session,
-            data.as_ptr() as CK_BYTE_PTR,
-            data.len() as CK_ULONG,
-            out.as_mut_ptr(),
-            &mut out_len,
-        );
+        let rv = unsafe {
+            (f.C_Encrypt)(
+                session,
+                data.as_ptr() as CK_BYTE_PTR,
+                data.len() as CK_ULONG,
+                out.as_mut_ptr(),
+                &mut out_len,
+            )
+        };
         assert_eq!(rv, CKR_OK, "C_Encrypt(AES-GCM) returned 0x{:08X}", rv);
         assert!(
             (out_len as usize) <= out.len(),
@@ -655,16 +675,16 @@ impl Drop for BenchState {
         // Destroy key objects explicitly before closing the session.
         // C_Finalize would clean up anyway, but explicit cleanup is safer if
         // an earlier step panics or the library doesn't fully clean up on finalize.
-        let _ = (f.C_DestroyObject)(self.session, self.rsa_pub_key);
-        let _ = (f.C_DestroyObject)(self.session, self.rsa_priv_key);
-        let _ = (f.C_DestroyObject)(self.session, self.ec_pub_key);
-        let _ = (f.C_DestroyObject)(self.session, self.ec_priv_key);
+        let _ = unsafe { (f.C_DestroyObject)(self.session, self.rsa_pub_key) };
+        let _ = unsafe { (f.C_DestroyObject)(self.session, self.rsa_priv_key) };
+        let _ = unsafe { (f.C_DestroyObject)(self.session, self.ec_pub_key) };
+        let _ = unsafe { (f.C_DestroyObject)(self.session, self.ec_priv_key) };
         if let Some(aes_key) = self.aes_key {
-            let _ = (f.C_DestroyObject)(self.session, aes_key);
+            let _ = unsafe { (f.C_DestroyObject)(self.session, aes_key) };
         }
-        let _ = (f.C_Logout)(self.session);
-        let _ = (f.C_CloseSession)(self.session);
-        let _ = (f.C_Finalize)(ptr::null_mut());
+        let _ = unsafe { (f.C_Logout)(self.session) };
+        let _ = unsafe { (f.C_CloseSession)(self.session) };
+        let _ = unsafe { (f.C_Finalize)(ptr::null_mut()) };
     }
 }
 
@@ -683,17 +703,19 @@ fn bench_rsa_sign(group: &mut BenchmarkGroup<WallTime>, state: &BenchState) {
                 p_parameter: ptr::null_mut(),
                 parameter_len: 0,
             };
-            let rv = (f.C_SignInit)(session, &mut mech, state.rsa_priv_key);
+            let rv = unsafe { (f.C_SignInit)(session, &mut mech, state.rsa_priv_key) };
             assert_eq!(rv, CKR_OK);
             let mut sig = [0u8; 512];
             let mut sig_len: CK_ULONG = 512;
-            let rv = (f.C_Sign)(
-                session,
-                data.as_ptr() as CK_BYTE_PTR,
-                32,
-                sig.as_mut_ptr(),
-                &mut sig_len,
-            );
+            let rv = unsafe {
+                (f.C_Sign)(
+                    session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    32,
+                    sig.as_mut_ptr(),
+                    &mut sig_len,
+                )
+            };
             assert_eq!(rv, CKR_OK);
         })
     });
@@ -710,15 +732,17 @@ fn bench_rsa_verify(group: &mut BenchmarkGroup<WallTime>, state: &BenchState) {
                 p_parameter: ptr::null_mut(),
                 parameter_len: 0,
             };
-            let rv = (f.C_VerifyInit)(session, &mut mech, state.rsa_pub_key);
+            let rv = unsafe { (f.C_VerifyInit)(session, &mut mech, state.rsa_pub_key) };
             assert_eq!(rv, CKR_OK);
-            let rv = (f.C_Verify)(
-                session,
-                data.as_ptr() as CK_BYTE_PTR,
-                32,
-                state.rsa_signature.as_ptr() as CK_BYTE_PTR,
-                state.rsa_signature.len() as CK_ULONG,
-            );
+            let rv = unsafe {
+                (f.C_Verify)(
+                    session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    32,
+                    state.rsa_signature.as_ptr() as CK_BYTE_PTR,
+                    state.rsa_signature.len() as CK_ULONG,
+                )
+            };
             assert_eq!(rv, CKR_OK);
         })
     });
@@ -735,17 +759,19 @@ fn bench_ecdsa_sign(group: &mut BenchmarkGroup<WallTime>, state: &BenchState) {
                 p_parameter: ptr::null_mut(),
                 parameter_len: 0,
             };
-            let rv = (f.C_SignInit)(session, &mut mech, state.ec_priv_key);
+            let rv = unsafe { (f.C_SignInit)(session, &mut mech, state.ec_priv_key) };
             assert_eq!(rv, CKR_OK);
             let mut sig = [0u8; 128];
             let mut sig_len: CK_ULONG = 128;
-            let rv = (f.C_Sign)(
-                session,
-                data.as_ptr() as CK_BYTE_PTR,
-                32,
-                sig.as_mut_ptr(),
-                &mut sig_len,
-            );
+            let rv = unsafe {
+                (f.C_Sign)(
+                    session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    32,
+                    sig.as_mut_ptr(),
+                    &mut sig_len,
+                )
+            };
             assert_eq!(rv, CKR_OK);
         })
     });
@@ -762,15 +788,17 @@ fn bench_ecdsa_verify(group: &mut BenchmarkGroup<WallTime>, state: &BenchState) 
                 p_parameter: ptr::null_mut(),
                 parameter_len: 0,
             };
-            let rv = (f.C_VerifyInit)(session, &mut mech, state.ec_pub_key);
+            let rv = unsafe { (f.C_VerifyInit)(session, &mut mech, state.ec_pub_key) };
             assert_eq!(rv, CKR_OK);
-            let rv = (f.C_Verify)(
-                session,
-                data.as_ptr() as CK_BYTE_PTR,
-                32,
-                state.ec_signature.as_ptr() as CK_BYTE_PTR,
-                state.ec_signature.len() as CK_ULONG,
-            );
+            let rv = unsafe {
+                (f.C_Verify)(
+                    session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    32,
+                    state.ec_signature.as_ptr() as CK_BYTE_PTR,
+                    state.ec_signature.len() as CK_ULONG,
+                )
+            };
             assert_eq!(rv, CKR_OK);
         })
     });
@@ -791,17 +819,19 @@ fn bench_aes_gcm_encrypt(group: &mut BenchmarkGroup<WallTime>, state: &BenchStat
                 p_parameter: ptr::null_mut(),
                 parameter_len: 0,
             };
-            let rv = (f.C_EncryptInit)(session, &mut mech, aes_key);
+            let rv = unsafe { (f.C_EncryptInit)(session, &mut mech, aes_key) };
             assert_eq!(rv, CKR_OK);
             let mut out = [0u8; 4096 + 256];
             let mut out_len: CK_ULONG = out.len() as CK_ULONG;
-            let rv = (f.C_Encrypt)(
-                session,
-                data.as_ptr() as CK_BYTE_PTR,
-                4096,
-                out.as_mut_ptr(),
-                &mut out_len,
-            );
+            let rv = unsafe {
+                (f.C_Encrypt)(
+                    session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    4096,
+                    out.as_mut_ptr(),
+                    &mut out_len,
+                )
+            };
             assert_eq!(rv, CKR_OK);
         })
     });
@@ -821,17 +851,19 @@ fn bench_aes_gcm_decrypt(group: &mut BenchmarkGroup<WallTime>, state: &BenchStat
                 p_parameter: ptr::null_mut(),
                 parameter_len: 0,
             };
-            let rv = (f.C_DecryptInit)(session, &mut mech, aes_key);
+            let rv = unsafe { (f.C_DecryptInit)(session, &mut mech, aes_key) };
             assert_eq!(rv, CKR_OK);
             let mut out = [0u8; 4096 + 256];
             let mut out_len: CK_ULONG = out.len() as CK_ULONG;
-            let rv = (f.C_Decrypt)(
-                session,
-                ct.as_ptr() as CK_BYTE_PTR,
-                ct.len() as CK_ULONG,
-                out.as_mut_ptr(),
-                &mut out_len,
-            );
+            let rv = unsafe {
+                (f.C_Decrypt)(
+                    session,
+                    ct.as_ptr() as CK_BYTE_PTR,
+                    ct.len() as CK_ULONG,
+                    out.as_mut_ptr(),
+                    &mut out_len,
+                )
+            };
             assert_eq!(rv, CKR_OK);
         })
     });
@@ -848,17 +880,19 @@ fn bench_sha256_digest(group: &mut BenchmarkGroup<WallTime>, state: &BenchState)
                 p_parameter: ptr::null_mut(),
                 parameter_len: 0,
             };
-            let rv = (f.C_DigestInit)(session, &mut mech);
+            let rv = unsafe { (f.C_DigestInit)(session, &mut mech) };
             assert_eq!(rv, CKR_OK);
             let mut digest = [0u8; 32];
             let mut digest_len: CK_ULONG = 32;
-            let rv = (f.C_Digest)(
-                session,
-                data.as_ptr() as CK_BYTE_PTR,
-                4096,
-                digest.as_mut_ptr(),
-                &mut digest_len,
-            );
+            let rv = unsafe {
+                (f.C_Digest)(
+                    session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    4096,
+                    digest.as_mut_ptr(),
+                    &mut digest_len,
+                )
+            };
             assert_eq!(rv, CKR_OK);
         })
     });
@@ -870,8 +904,8 @@ fn bench_keygen_rsa(group: &mut BenchmarkGroup<WallTime>, state: &BenchState) {
     group.bench_function(&state.name, |b| {
         b.iter(|| {
             let (pub_key, priv_key) = BenchState::gen_rsa_2048(f, session);
-            let _ = (f.C_DestroyObject)(session, pub_key);
-            let _ = (f.C_DestroyObject)(session, priv_key);
+            let _ = unsafe { (f.C_DestroyObject)(session, pub_key) };
+            let _ = unsafe { (f.C_DestroyObject)(session, priv_key) };
         })
     });
 }
@@ -882,8 +916,8 @@ fn bench_keygen_ec(group: &mut BenchmarkGroup<WallTime>, state: &BenchState) {
     group.bench_function(&state.name, |b| {
         b.iter(|| {
             let (pub_key, priv_key) = BenchState::gen_ec_p256(f, session);
-            let _ = (f.C_DestroyObject)(session, pub_key);
-            let _ = (f.C_DestroyObject)(session, priv_key);
+            let _ = unsafe { (f.C_DestroyObject)(session, pub_key) };
+            let _ = unsafe { (f.C_DestroyObject)(session, priv_key) };
         })
     });
 }
@@ -894,7 +928,7 @@ fn bench_keygen_aes(group: &mut BenchmarkGroup<WallTime>, state: &BenchState) {
     group.bench_function(&state.name, |b| {
         b.iter(|| {
             let key = BenchState::gen_aes_256(f, session);
-            let _ = (f.C_DestroyObject)(session, key);
+            let _ = unsafe { (f.C_DestroyObject)(session, key) };
         })
     });
 }

@@ -22,33 +22,35 @@ mod common;
 use common::ensure_init;
 
 fn cleanup_sessions() {
-    let _ = functions::C_CloseAllSessions(0);
+    let _ = unsafe { functions::C_CloseAllSessions(0) };
 }
 
 fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = functions::C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION | CKF_RW_SESSION,
-        std::ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        functions::C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     if rv != CKR_OK {
         return None;
     }
     // Log in with the policy-compliant User PIN provisioned by
     // `common::ensure_init` (A3-13).
     if common::login_user(session) != CKR_OK {
-        let _ = functions::C_CloseSession(session);
+        let _ = unsafe { functions::C_CloseSession(session) };
         return None;
     }
     Some(session)
 }
 
 fn close_session(session: CK_SESSION_HANDLE) {
-    let _ = functions::C_Logout(session);
-    let _ = functions::C_CloseSession(session);
+    let _ = unsafe { functions::C_Logout(session) };
+    let _ = unsafe { functions::C_CloseSession(session) };
 }
 
 /// Generate an AES key to use as the target for attribute mutation.
@@ -91,13 +93,15 @@ fn generate_test_key(session: CK_SESSION_HANDLE) -> Option<CK_OBJECT_HANDLE> {
     };
 
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
 
     if rv == CKR_OK {
         Some(key)
@@ -185,15 +189,17 @@ fn fuzz_set_random_attributes(data: &[u8]) {
     }
 
     if !attrs.is_empty() {
-        let _rv = functions::C_SetAttributeValue(
-            session,
-            key,
-            attrs.as_mut_ptr(),
-            attrs.len() as CK_ULONG,
-        );
+        let _rv = unsafe {
+            functions::C_SetAttributeValue(
+                session,
+                key,
+                attrs.as_mut_ptr(),
+                attrs.len() as CK_ULONG,
+            )
+        };
     }
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -224,7 +230,7 @@ fn fuzz_set_readonly_attributes(data: &[u8]) {
         p_value: &new_class as *const _ as *mut _,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     };
-    let rv = functions::C_SetAttributeValue(session, key, &mut class_attr, 1);
+    let rv = unsafe { functions::C_SetAttributeValue(session, key, &mut class_attr, 1) };
     assert!(
         rv != CKR_OK,
         "C_SetAttributeValue allowed changing CKA_CLASS (read-only)"
@@ -237,7 +243,7 @@ fn fuzz_set_readonly_attributes(data: &[u8]) {
         p_value: &new_key_type as *const _ as *mut _,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     };
-    let rv = functions::C_SetAttributeValue(session, key, &mut kt_attr, 1);
+    let rv = unsafe { functions::C_SetAttributeValue(session, key, &mut kt_attr, 1) };
     assert!(
         rv != CKR_OK,
         "C_SetAttributeValue allowed changing CKA_KEY_TYPE (read-only)"
@@ -250,7 +256,7 @@ fn fuzz_set_readonly_attributes(data: &[u8]) {
         p_value: &true_val as *const _ as *mut _,
         value_len: 1,
     };
-    let _rv = functions::C_SetAttributeValue(session, key, &mut sensitive_attr, 1);
+    let _rv = unsafe { functions::C_SetAttributeValue(session, key, &mut sensitive_attr, 1) };
 
     // Try to set CKA_EXTRACTABLE from true to false (one-way transition)
     let false_val: CK_BBOOL = CK_FALSE;
@@ -259,7 +265,7 @@ fn fuzz_set_readonly_attributes(data: &[u8]) {
         p_value: &false_val as *const _ as *mut _,
         value_len: 1,
     };
-    let _rv = functions::C_SetAttributeValue(session, key, &mut extract_attr, 1);
+    let _rv = unsafe { functions::C_SetAttributeValue(session, key, &mut extract_attr, 1) };
 
     // Try to change the label with fuzz data
     let label = &data[..data.len().min(64)];
@@ -268,9 +274,9 @@ fn fuzz_set_readonly_attributes(data: &[u8]) {
         p_value: label.as_ptr() as *mut _,
         value_len: label.len() as CK_ULONG,
     };
-    let _rv = functions::C_SetAttributeValue(session, key, &mut label_attr, 1);
+    let _rv = unsafe { functions::C_SetAttributeValue(session, key, &mut label_attr, 1) };
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -297,15 +303,17 @@ fn fuzz_set_on_invalid_handle(data: &[u8]) {
     };
 
     // FIX #11: Must return error, not succeed
-    let rv = functions::C_SetAttributeValue(session, fake_handle, &mut attr, 1);
+    let rv = unsafe { functions::C_SetAttributeValue(session, fake_handle, &mut attr, 1) };
     assert!(
         rv != CKR_OK,
         "C_SetAttributeValue succeeded with invalid object handle"
     );
 
     // Also try with null template
-    let _rv = functions::C_SetAttributeValue(session, fake_handle, std::ptr::null_mut(), 0);
-    let rv = functions::C_SetAttributeValue(session, fake_handle, std::ptr::null_mut(), 5);
+    let _rv =
+        unsafe { functions::C_SetAttributeValue(session, fake_handle, std::ptr::null_mut(), 0) };
+    let rv =
+        unsafe { functions::C_SetAttributeValue(session, fake_handle, std::ptr::null_mut(), 5) };
     assert!(
         rv != CKR_OK,
         "C_SetAttributeValue succeeded with null template + non-zero count"
@@ -365,15 +373,17 @@ fn fuzz_set_conflicting_booleans(data: &[u8]) {
     }
 
     if !attrs.is_empty() {
-        let _rv = functions::C_SetAttributeValue(
-            session,
-            key,
-            attrs.as_mut_ptr(),
-            attrs.len() as CK_ULONG,
-        );
+        let _rv = unsafe {
+            functions::C_SetAttributeValue(
+                session,
+                key,
+                attrs.as_mut_ptr(),
+                attrs.len() as CK_ULONG,
+            )
+        };
     }
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -404,7 +414,7 @@ fn fuzz_set_mismatched_lengths(data: &[u8]) {
         p_value: &true_val as *const _ as *mut _,
         value_len: data[0] as CK_ULONG, // Fuzzed: could be 0, 255, etc.
     };
-    let _rv = functions::C_SetAttributeValue(session, key, &mut attr, 1);
+    let _rv = unsafe { functions::C_SetAttributeValue(session, key, &mut attr, 1) };
 
     // FIX #11: Null value pointer with non-zero length — must not succeed
     let mut null_attr = CK_ATTRIBUTE {
@@ -413,19 +423,19 @@ fn fuzz_set_mismatched_lengths(data: &[u8]) {
         value_len: data[1] as CK_ULONG,
     };
     if data[1] > 0 {
-        let rv = functions::C_SetAttributeValue(session, key, &mut null_attr, 1);
+        let rv = unsafe { functions::C_SetAttributeValue(session, key, &mut null_attr, 1) };
         assert!(
             rv != CKR_OK,
             "C_SetAttributeValue succeeded with null p_value + non-zero value_len"
         );
     } else {
-        let _rv = functions::C_SetAttributeValue(session, key, &mut null_attr, 1);
+        let _rv = unsafe { functions::C_SetAttributeValue(session, key, &mut null_attr, 1) };
     }
 
     // Extreme count
-    let _rv = functions::C_SetAttributeValue(session, key, &mut attr, CK_ULONG::MAX);
+    let _rv = unsafe { functions::C_SetAttributeValue(session, key, &mut attr, CK_ULONG::MAX) };
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -477,13 +487,15 @@ fn fuzz_copy_object_extractable_bypass(data: &[u8]) {
     };
 
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKey(
-        session,
-        &mut mechanism,
-        gen_template.as_mut_ptr(),
-        gen_template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKey(
+            session,
+            &mut mechanism,
+            gen_template.as_mut_ptr(),
+            gen_template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     if rv != CKR_OK {
         close_session(session);
         return;
@@ -497,13 +509,15 @@ fn fuzz_copy_object_extractable_bypass(data: &[u8]) {
     }];
 
     let mut copy_handle: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_CopyObject(
-        session,
-        key,
-        copy_template.as_mut_ptr(),
-        copy_template.len() as CK_ULONG,
-        &mut copy_handle,
-    );
+    let rv = unsafe {
+        functions::C_CopyObject(
+            session,
+            key,
+            copy_template.as_mut_ptr(),
+            copy_template.len() as CK_ULONG,
+            &mut copy_handle,
+        )
+    };
 
     // Security-critical assertion — extractable bypass is a CVE-class bug
     assert!(
@@ -518,15 +532,17 @@ fn fuzz_copy_object_extractable_bypass(data: &[u8]) {
         value_len: 1,
     }];
 
-    let rv_sens = functions::C_CopyObject(
-        session,
-        key,
-        sensitive_template.as_mut_ptr(),
-        sensitive_template.len() as CK_ULONG,
-        &mut copy_handle,
-    );
+    let rv_sens = unsafe {
+        functions::C_CopyObject(
+            session,
+            key,
+            sensitive_template.as_mut_ptr(),
+            sensitive_template.len() as CK_ULONG,
+            &mut copy_handle,
+        )
+    };
     if rv_sens == CKR_OK {
-        let _ = functions::C_DestroyObject(session, copy_handle);
+        let _ = unsafe { functions::C_DestroyObject(session, copy_handle) };
     }
 
     // Copy with fuzz-controlled attributes
@@ -563,19 +579,21 @@ fn fuzz_copy_object_extractable_bypass(data: &[u8]) {
     }
 
     if !fuzz_attrs.is_empty() {
-        let rv_fuzz = functions::C_CopyObject(
-            session,
-            key,
-            fuzz_attrs.as_mut_ptr(),
-            fuzz_attrs.len() as CK_ULONG,
-            &mut copy_handle,
-        );
+        let rv_fuzz = unsafe {
+            functions::C_CopyObject(
+                session,
+                key,
+                fuzz_attrs.as_mut_ptr(),
+                fuzz_attrs.len() as CK_ULONG,
+                &mut copy_handle,
+            )
+        };
         if rv_fuzz == CKR_OK {
-            let _ = functions::C_DestroyObject(session, copy_handle);
+            let _ = unsafe { functions::C_DestroyObject(session, copy_handle) };
         }
     }
 
-    let _ = functions::C_DestroyObject(session, key);
+    let _ = unsafe { functions::C_DestroyObject(session, key) };
     close_session(session);
 }
 
@@ -603,27 +621,32 @@ fn fuzz_copy_object_invalid_handles(data: &[u8]) {
 
     // Copy with invalid source handle — must fail
     let mut copy_handle: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_CopyObject(session, fake_handle, &mut attr, 1, &mut copy_handle);
+    let rv =
+        unsafe { functions::C_CopyObject(session, fake_handle, &mut attr, 1, &mut copy_handle) };
     assert!(
         rv != CKR_OK,
         "C_CopyObject succeeded with invalid source handle"
     );
 
     // Copy with null output handle — must fail
-    let rv = functions::C_CopyObject(session, fake_handle, &mut attr, 1, std::ptr::null_mut());
+    let rv = unsafe {
+        functions::C_CopyObject(session, fake_handle, &mut attr, 1, std::ptr::null_mut())
+    };
     assert!(
         rv != CKR_OK,
         "C_CopyObject succeeded with null output handle"
     );
 
     // Copy with null template + non-zero count — must fail
-    let rv = functions::C_CopyObject(
-        session,
-        fake_handle,
-        std::ptr::null_mut(),
-        5,
-        &mut copy_handle,
-    );
+    let rv = unsafe {
+        functions::C_CopyObject(
+            session,
+            fake_handle,
+            std::ptr::null_mut(),
+            5,
+            &mut copy_handle,
+        )
+    };
     assert!(
         rv != CKR_OK,
         "C_CopyObject succeeded with null template + non-zero count"

@@ -23,55 +23,65 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 
 /// Initialize PKCS#11, open an RW session, and log in as user.
 fn setup_session() -> CK_SESSION_HANDLE {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 
     let so_pin = b"12345678";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"TestToken");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let user_pin = b"userpin1234";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     session
@@ -119,13 +129,15 @@ fn generate_aes_key(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
     ];
 
     let mut key_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key_handle,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key_handle,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     key_handle
 }
@@ -148,18 +160,20 @@ fn single_shot_encrypt(
         },
         parameter_len: iv_copy.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK, "C_EncryptInit failed");
 
     let mut out_buf = vec![0u8; data.len() + 32]; // Extra for padding/nonce
     let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        out_buf.as_mut_ptr(),
-        &mut out_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            out_buf.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Encrypt failed");
     out_buf.truncate(out_len as usize);
     out_buf
@@ -183,18 +197,20 @@ fn single_shot_decrypt(
         },
         parameter_len: iv_copy.len() as CK_ULONG,
     };
-    let rv = C_DecryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_DecryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK, "C_DecryptInit failed");
 
     let mut out_buf = vec![0u8; ciphertext.len() + 32];
     let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_ptr() as CK_BYTE_PTR,
-        ciphertext.len() as CK_ULONG,
-        out_buf.as_mut_ptr(),
-        &mut out_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_ptr() as CK_BYTE_PTR,
+            ciphertext.len() as CK_ULONG,
+            out_buf.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Decrypt failed");
     out_buf.truncate(out_len as usize);
     out_buf
@@ -218,18 +234,20 @@ fn multi_part_encrypt(
         },
         parameter_len: iv_copy.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK, "C_EncryptInit failed for multi-part");
 
     for chunk in chunks {
         let mut out_len: CK_ULONG = 0;
-        let rv = C_EncryptUpdate(
-            session,
-            chunk.as_ptr() as CK_BYTE_PTR,
-            chunk.len() as CK_ULONG,
-            ptr::null_mut(), // accumulation mode: no output from Update
-            &mut out_len,
-        );
+        let rv = unsafe {
+            C_EncryptUpdate(
+                session,
+                chunk.as_ptr() as CK_BYTE_PTR,
+                chunk.len() as CK_ULONG,
+                ptr::null_mut(), // accumulation mode: no output from Update
+                &mut out_len,
+            )
+        };
         assert_eq!(rv, CKR_OK, "C_EncryptUpdate failed");
         assert_eq!(
             out_len, 0,
@@ -241,7 +259,7 @@ fn multi_part_encrypt(
     let total_len: usize = chunks.iter().map(|c| c.len()).sum();
     let mut out_buf = vec![0u8; total_len + 32]; // Extra for padding
     let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
-    let rv = C_EncryptFinal(session, out_buf.as_mut_ptr(), &mut out_len);
+    let rv = unsafe { C_EncryptFinal(session, out_buf.as_mut_ptr(), &mut out_len) };
     assert_eq!(rv, CKR_OK, "C_EncryptFinal failed");
     out_buf.truncate(out_len as usize);
     out_buf
@@ -265,18 +283,20 @@ fn multi_part_decrypt(
         },
         parameter_len: iv_copy.len() as CK_ULONG,
     };
-    let rv = C_DecryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_DecryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK, "C_DecryptInit failed for multi-part");
 
     for chunk in chunks {
         let mut out_len: CK_ULONG = 0;
-        let rv = C_DecryptUpdate(
-            session,
-            chunk.as_ptr() as CK_BYTE_PTR,
-            chunk.len() as CK_ULONG,
-            ptr::null_mut(),
-            &mut out_len,
-        );
+        let rv = unsafe {
+            C_DecryptUpdate(
+                session,
+                chunk.as_ptr() as CK_BYTE_PTR,
+                chunk.len() as CK_ULONG,
+                ptr::null_mut(),
+                &mut out_len,
+            )
+        };
         assert_eq!(rv, CKR_OK, "C_DecryptUpdate failed");
         assert_eq!(
             out_len, 0,
@@ -287,7 +307,7 @@ fn multi_part_decrypt(
     let total_len: usize = chunks.iter().map(|c| c.len()).sum();
     let mut out_buf = vec![0u8; total_len + 32];
     let mut out_len: CK_ULONG = out_buf.len() as CK_ULONG;
-    let rv = C_DecryptFinal(session, out_buf.as_mut_ptr(), &mut out_len);
+    let rv = unsafe { C_DecryptFinal(session, out_buf.as_mut_ptr(), &mut out_len) };
     assert_eq!(rv, CKR_OK, "C_DecryptFinal failed");
     out_buf.truncate(out_len as usize);
     out_buf
@@ -398,17 +418,19 @@ fn test_multipart_encrypt_decrypt() {
             p_parameter: ptr::null_mut(),
             parameter_len: 0,
         };
-        let rv = C_EncryptInit(session, &mut mechanism, aes_key);
+        let rv = unsafe { C_EncryptInit(session, &mut mechanism, aes_key) };
         assert_eq!(rv, CKR_OK, "GCM EncryptInit should succeed");
 
         let mut out_len: CK_ULONG = 0;
-        let rv = C_EncryptUpdate(
-            session,
-            plaintext.as_ptr() as CK_BYTE_PTR,
-            plaintext.len() as CK_ULONG,
-            ptr::null_mut(),
-            &mut out_len,
-        );
+        let rv = unsafe {
+            C_EncryptUpdate(
+                session,
+                plaintext.as_ptr() as CK_BYTE_PTR,
+                plaintext.len() as CK_ULONG,
+                ptr::null_mut(),
+                &mut out_len,
+            )
+        };
         assert_eq!(
             rv, CKR_MECHANISM_INVALID,
             "GCM EncryptUpdate should return MECHANISM_INVALID"
@@ -425,18 +447,20 @@ fn test_multipart_encrypt_decrypt() {
             p_parameter: ptr::null_mut(),
             parameter_len: 0,
         };
-        let rv = C_DecryptInit(session, &mut mechanism, aes_key);
+        let rv = unsafe { C_DecryptInit(session, &mut mechanism, aes_key) };
         assert_eq!(rv, CKR_OK, "GCM DecryptInit should succeed");
 
         let dummy = [0u8; 32];
         let mut out_len: CK_ULONG = 0;
-        let rv = C_DecryptUpdate(
-            session,
-            dummy.as_ptr() as CK_BYTE_PTR,
-            dummy.len() as CK_ULONG,
-            ptr::null_mut(),
-            &mut out_len,
-        );
+        let rv = unsafe {
+            C_DecryptUpdate(
+                session,
+                dummy.as_ptr() as CK_BYTE_PTR,
+                dummy.len() as CK_ULONG,
+                ptr::null_mut(),
+                &mut out_len,
+            )
+        };
         assert_eq!(
             rv, CKR_MECHANISM_INVALID,
             "GCM DecryptUpdate should return MECHANISM_INVALID"
@@ -502,26 +526,30 @@ fn test_multipart_encrypt_decrypt() {
     // ========================================================================
     println!("Test 13: C_EncryptUpdate without Init");
     let mut out_len: CK_ULONG = 0;
-    let rv = C_EncryptUpdate(
-        session,
-        plaintext.as_ptr() as CK_BYTE_PTR,
-        plaintext.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut out_len,
-    );
+    let rv = unsafe {
+        C_EncryptUpdate(
+            session,
+            plaintext.as_ptr() as CK_BYTE_PTR,
+            plaintext.len() as CK_ULONG,
+            ptr::null_mut(),
+            &mut out_len,
+        )
+    };
     assert_eq!(rv, CKR_OPERATION_NOT_INITIALIZED);
 
     // ========================================================================
     // 14. Error: C_DecryptUpdate without C_DecryptInit
     // ========================================================================
     println!("Test 14: C_DecryptUpdate without Init");
-    let rv = C_DecryptUpdate(
-        session,
-        plaintext.as_ptr() as CK_BYTE_PTR,
-        plaintext.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut out_len,
-    );
+    let rv = unsafe {
+        C_DecryptUpdate(
+            session,
+            plaintext.as_ptr() as CK_BYTE_PTR,
+            plaintext.len() as CK_ULONG,
+            ptr::null_mut(),
+            &mut out_len,
+        )
+    };
     assert_eq!(rv, CKR_OPERATION_NOT_INITIALIZED);
 
     // ========================================================================
@@ -536,9 +564,9 @@ fn test_multipart_encrypt_decrypt() {
     assert_eq!(dec.as_slice(), odd_data.as_slice());
 
     // Cleanup
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert!(rv == CKR_OK || rv == CKR_USER_NOT_LOGGED_IN);
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 
     println!("All 15 multi-part encrypt/decrypt tests passed!");

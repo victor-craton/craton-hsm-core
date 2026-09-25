@@ -15,55 +15,65 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 
 /// Initialize PKCS#11, open an RW session, and log in as user.
 fn setup_session() -> CK_SESSION_HANDLE {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 
     let so_pin = b"12345678";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"TestToken");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let user_pin = b"userpin1234";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     session
@@ -129,13 +139,15 @@ fn generate_aes_key(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
     ];
 
     let mut key_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key_handle,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key_handle,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     key_handle
 }
@@ -200,13 +212,15 @@ fn generate_sensitive_aes_key(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
     ];
 
     let mut key_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key_handle,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key_handle,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     key_handle
 }
@@ -223,7 +237,7 @@ fn get_attribute(
         p_value: ptr::null_mut(),
         value_len: 0,
     };
-    let rv = C_GetAttributeValue(session, handle, &mut tmpl, 1);
+    let rv = unsafe { C_GetAttributeValue(session, handle, &mut tmpl, 1) };
     assert_eq!(
         rv, CKR_OK,
         "get attr size failed for attr_type 0x{:08x}",
@@ -238,7 +252,7 @@ fn get_attribute(
     // Second call: get the data
     let mut buf = vec![0u8; tmpl.value_len as usize];
     tmpl.p_value = buf.as_mut_ptr() as CK_VOID_PTR;
-    let rv = C_GetAttributeValue(session, handle, &mut tmpl, 1);
+    let rv = unsafe { C_GetAttributeValue(session, handle, &mut tmpl, 1) };
     assert_eq!(
         rv, CKR_OK,
         "get attr value failed for attr_type 0x{:08x}",
@@ -255,27 +269,31 @@ fn aes_gcm_encrypt(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE, plaintext:
         parameter_len: 0,
     };
 
-    let rv = C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK);
 
     let mut ct_len: CK_ULONG = 0;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut ct_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ptr::null_mut(),
+            &mut ct_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut ciphertext = vec![0u8; ct_len as usize];
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ciphertext.as_mut_ptr(),
-        &mut ct_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ct_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     ciphertext.truncate(ct_len as usize);
     ciphertext
@@ -293,27 +311,31 @@ fn aes_gcm_decrypt(
         parameter_len: 0,
     };
 
-    let rv = C_DecryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_DecryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK);
 
     let mut pt_len: CK_ULONG = 0;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_ptr() as *mut _,
-        ciphertext.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut pt_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_ptr() as *mut _,
+            ciphertext.len() as CK_ULONG,
+            ptr::null_mut(),
+            &mut pt_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut plaintext = vec![0u8; pt_len as usize];
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_ptr() as *mut _,
-        ciphertext.len() as CK_ULONG,
-        plaintext.as_mut_ptr(),
-        &mut pt_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_ptr() as *mut _,
+            ciphertext.len() as CK_ULONG,
+            plaintext.as_mut_ptr(),
+            &mut pt_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     plaintext.truncate(pt_len as usize);
     plaintext
@@ -330,7 +352,7 @@ fn test_01_copy_aes_key_basic() {
 
     // Copy with no template modifications
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(session, key, ptr::null_mut(), 0, &mut new_handle);
+    let rv = unsafe { C_CopyObject(session, key, ptr::null_mut(), 0, &mut new_handle) };
     assert_eq!(
         rv, CKR_OK,
         "C_CopyObject should succeed with empty template"
@@ -346,7 +368,7 @@ fn test_01_copy_aes_key_basic() {
     let copy_kt = get_attribute(session, new_handle, CKA_KEY_TYPE);
     assert_eq!(orig_kt, copy_kt, "Copy should have same key type");
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -363,13 +385,15 @@ fn test_02_copy_with_modified_label() {
     }];
 
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(
-        session,
-        key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut new_handle,
-    );
+    let rv = unsafe {
+        C_CopyObject(
+            session,
+            key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut new_handle,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Verify original label unchanged
@@ -380,7 +404,7 @@ fn test_02_copy_with_modified_label() {
     let copy_label = get_attribute(session, new_handle, CKA_LABEL);
     assert_eq!(&copy_label, b"copied-key");
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -390,7 +414,7 @@ fn test_03_copy_key_roundtrip_encrypt_decrypt() {
 
     // Copy the key
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(session, key, ptr::null_mut(), 0, &mut new_handle);
+    let rv = unsafe { C_CopyObject(session, key, ptr::null_mut(), 0, &mut new_handle) };
     assert_eq!(rv, CKR_OK);
 
     // Encrypt with original key
@@ -404,7 +428,7 @@ fn test_03_copy_key_roundtrip_encrypt_decrypt() {
         "Copied key should decrypt data encrypted by original"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -414,14 +438,14 @@ fn test_04_copy_sensitive_key_remains_sensitive() {
 
     // Copy without changing sensitivity
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(session, key, ptr::null_mut(), 0, &mut new_handle);
+    let rv = unsafe { C_CopyObject(session, key, ptr::null_mut(), 0, &mut new_handle) };
     assert_eq!(rv, CKR_OK);
 
     // Verify copy is also sensitive
     let sensitive = get_attribute(session, new_handle, CKA_SENSITIVE);
     assert_eq!(sensitive[0], 1, "Copy of sensitive key should be sensitive");
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -438,19 +462,21 @@ fn test_05_copy_cannot_decrease_sensitivity() {
     }];
 
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(
-        session,
-        key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut new_handle,
-    );
+    let rv = unsafe {
+        C_CopyObject(
+            session,
+            key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut new_handle,
+        )
+    };
     assert_eq!(
         rv, CKR_TEMPLATE_INCONSISTENT,
         "Cannot decrease sensitivity on copy"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -467,19 +493,21 @@ fn test_06_copy_cannot_increase_extractability() {
     }];
 
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(
-        session,
-        key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut new_handle,
-    );
+    let rv = unsafe {
+        C_CopyObject(
+            session,
+            key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut new_handle,
+        )
+    };
     assert_eq!(
         rv, CKR_TEMPLATE_INCONSISTENT,
         "Cannot increase extractability on copy"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -496,13 +524,15 @@ fn test_07_copy_can_increase_sensitivity() {
     }];
 
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(
-        session,
-        key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut new_handle,
-    );
+    let rv = unsafe {
+        C_CopyObject(
+            session,
+            key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut new_handle,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Should be able to increase sensitivity on copy");
 
     let sensitive = get_attribute(session, new_handle, CKA_SENSITIVE);
@@ -512,7 +542,7 @@ fn test_07_copy_can_increase_sensitivity() {
     let orig_sensitive = get_attribute(session, key, CKA_SENSITIVE);
     assert_eq!(orig_sensitive[0], 0, "Original should remain non-sensitive");
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -529,16 +559,18 @@ fn test_08_copy_cannot_change_class() {
     }];
 
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(
-        session,
-        key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut new_handle,
-    );
+    let rv = unsafe {
+        C_CopyObject(
+            session,
+            key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut new_handle,
+        )
+    };
     assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT, "Cannot change class on copy");
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -546,13 +578,13 @@ fn test_09_copy_nonexistent_object() {
     let session = setup_session();
 
     let mut new_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_CopyObject(session, 99999, ptr::null_mut(), 0, &mut new_handle);
+    let rv = unsafe { C_CopyObject(session, 99999, ptr::null_mut(), 0, &mut new_handle) };
     assert_eq!(
         rv, CKR_OBJECT_HANDLE_INVALID,
         "Copying non-existent object should fail"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -560,10 +592,10 @@ fn test_10_copy_null_new_handle_ptr() {
     let session = setup_session();
     let key = generate_aes_key(session);
 
-    let rv = C_CopyObject(session, key, ptr::null_mut(), 0, ptr::null_mut());
+    let rv = unsafe { C_CopyObject(session, key, ptr::null_mut(), 0, ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD, "Null new handle pointer should fail");
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 // ============================================================================
@@ -584,20 +616,20 @@ fn test_11_digest_key_basic() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
     let data = b"hello";
-    let rv = C_DigestUpdate(session, data.as_ptr() as *mut _, data.len() as CK_ULONG);
+    let rv = unsafe { C_DigestUpdate(session, data.as_ptr() as *mut _, data.len() as CK_ULONG) };
     assert_eq!(rv, CKR_OK);
 
     // Digest the key
-    let rv = C_DigestKey(session, key);
+    let rv = unsafe { C_DigestKey(session, key) };
     assert_eq!(rv, CKR_OK);
 
     let mut digest = [0u8; 32];
     let mut digest_len: CK_ULONG = 32;
-    let rv = C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len);
+    let rv = unsafe { C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(digest_len, 32);
 
@@ -614,7 +646,7 @@ fn test_11_digest_key_basic() {
         "C_DigestKey result should match manual hash"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -631,15 +663,15 @@ fn test_12_digest_key_only() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_DigestKey(session, key);
+    let rv = unsafe { C_DigestKey(session, key) };
     assert_eq!(rv, CKR_OK);
 
     let mut digest = [0u8; 32];
     let mut digest_len: CK_ULONG = 32;
-    let rv = C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len);
+    let rv = unsafe { C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len) };
     assert_eq!(rv, CKR_OK);
 
     // Manual SHA-256(key_value)
@@ -651,7 +683,7 @@ fn test_12_digest_key_only() {
         "C_DigestKey-only result should match SHA-256(key_value)"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -660,13 +692,13 @@ fn test_13_digest_key_without_init() {
     let key = generate_aes_key(session);
 
     // No C_DigestInit — should fail
-    let rv = C_DigestKey(session, key);
+    let rv = unsafe { C_DigestKey(session, key) };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "DigestKey without DigestInit should fail"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -679,17 +711,17 @@ fn test_14_digest_key_sensitive_non_extractable() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
     // Cannot digest a sensitive+non-extractable key (can't read value)
-    let rv = C_DigestKey(session, key);
+    let rv = unsafe { C_DigestKey(session, key) };
     assert_eq!(
         rv, CKR_KEY_INDIGESTIBLE,
         "Sensitive+non-extractable key should be indigestible"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }
 
 #[test]
@@ -701,14 +733,14 @@ fn test_15_digest_key_nonexistent() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_DigestKey(session, 99999);
+    let rv = unsafe { C_DigestKey(session, 99999) };
     assert_eq!(
         rv, CKR_KEY_HANDLE_INVALID,
         "Nonexistent key should return KEY_HANDLE_INVALID"
     );
 
-    C_Finalize(ptr::null_mut());
+    unsafe { C_Finalize(ptr::null_mut()) };
 }

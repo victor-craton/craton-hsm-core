@@ -27,7 +27,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 
 /// Ensure HSM is initialized. Idempotent.
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -42,47 +42,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"ConformTe");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed: 0x{:08X}", rv);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -113,13 +123,15 @@ fn generate_aes_key(session: CK_SESSION_HANDLE, key_len: CK_ULONG) -> CK_OBJECT_
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "generate_aes_key failed: 0x{:08X}", rv);
     key
 }
@@ -140,7 +152,7 @@ fn test_aes_cbc_zero_iv_rejected() {
         parameter_len: zero_iv.len() as CK_ULONG,
     };
 
-    let rv = C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mechanism, key) };
     // Should reject all-zero IV
     assert_ne!(rv, CKR_OK, "All-zero IV should be rejected for AES-CBC");
 }
@@ -161,7 +173,7 @@ fn test_aes_ctr_zero_iv_rejected() {
         parameter_len: zero_iv.len() as CK_ULONG,
     };
 
-    let rv = C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mechanism, key) };
     assert_ne!(rv, CKR_OK, "All-zero IV should be rejected for AES-CTR");
 }
 
@@ -176,31 +188,35 @@ fn test_double_session_close() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"DblClose");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // First close should succeed
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 
     // Second close should return SESSION_HANDLE_INVALID, not crash or underflow
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(
         rv, CKR_SESSION_HANDLE_INVALID,
         "Double close should return SESSION_HANDLE_INVALID"
@@ -219,13 +235,15 @@ fn test_pin_complexity_all_same_char() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinTest!");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        weak_pin.as_ptr() as *mut _,
-        weak_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            weak_pin.as_ptr() as *mut _,
+            weak_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(
         rv, CKR_PIN_INVALID,
         "PIN with all same character should be rejected"
@@ -240,13 +258,15 @@ fn test_pin_complexity_single_class() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinCls1!");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        weak_pin.as_ptr() as *mut _,
-        weak_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            weak_pin.as_ptr() as *mut _,
+            weak_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(
         rv, CKR_PIN_INVALID,
         "PIN with single character class should be rejected"
@@ -261,13 +281,15 @@ fn test_pin_complexity_valid() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinGood!");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        good_pin.as_ptr() as *mut _,
-        good_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            good_pin.as_ptr() as *mut _,
+            good_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Valid PIN should be accepted");
 }
 
@@ -282,13 +304,15 @@ fn test_pin_too_short() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinShort");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        short_pin.as_ptr() as *mut _,
-        short_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            short_pin.as_ptr() as *mut _,
+            short_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_PIN_LEN_RANGE, "Too-short PIN should be rejected");
 }
 
@@ -299,11 +323,11 @@ fn test_pin_too_short() {
 #[test]
 fn test_init_finalize_reinit_cycle() {
     // Should be able to init, finalize, and init again (PKCS#11 spec requirement)
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 
     // Finalize
-    let rv = C_Finalize(ptr::null_mut());
+    let rv = unsafe { C_Finalize(ptr::null_mut()) };
     assert_eq!(rv, CKR_OK);
 
     // Operations should fail when not initialized
@@ -314,14 +338,14 @@ fn test_init_finalize_reinit_cycle() {
         library_description: [0u8; 32],
         library_version: CK_VERSION { major: 0, minor: 0 },
     };
-    let rv = C_GetInfo(&mut info);
+    let rv = unsafe { C_GetInfo(&mut info) };
     assert_eq!(
         rv, CKR_CRYPTOKI_NOT_INITIALIZED,
         "Operations should fail after C_Finalize"
     );
 
     // Re-initialize should work
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert_eq!(
         rv, CKR_OK,
         "Re-initialization should succeed after C_Finalize"
@@ -336,7 +360,7 @@ fn test_init_finalize_reinit_cycle() {
 fn test_finalize_non_null_reserved() {
     ensure_init();
     let dummy: u8 = 0;
-    let rv = C_Finalize(&dummy as *const u8 as CK_VOID_PTR);
+    let rv = unsafe { C_Finalize(&dummy as *const u8 as CK_VOID_PTR) };
     assert_eq!(
         rv, CKR_ARGUMENTS_BAD,
         "C_Finalize with non-null p_reserved should return CKR_ARGUMENTS_BAD"
@@ -349,10 +373,10 @@ fn test_finalize_non_null_reserved() {
 
 #[test]
 fn test_double_initialize() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert_eq!(
         rv, CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "Second C_Initialize should return CKR_CRYPTOKI_ALREADY_INITIALIZED"
@@ -366,28 +390,28 @@ fn test_double_initialize() {
 #[test]
 fn test_null_pointer_get_info() {
     ensure_init();
-    let rv = C_GetInfo(ptr::null_mut());
+    let rv = unsafe { C_GetInfo(ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD);
 }
 
 #[test]
 fn test_null_pointer_get_slot_info() {
     ensure_init();
-    let rv = C_GetSlotInfo(0, ptr::null_mut());
+    let rv = unsafe { C_GetSlotInfo(0, ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD);
 }
 
 #[test]
 fn test_null_pointer_get_token_info() {
     ensure_init();
-    let rv = C_GetTokenInfo(0, ptr::null_mut());
+    let rv = unsafe { C_GetTokenInfo(0, ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD);
 }
 
 #[test]
 fn test_null_pointer_get_slot_list_count() {
     ensure_init();
-    let rv = C_GetSlotList(CK_FALSE, ptr::null_mut(), ptr::null_mut());
+    let rv = unsafe { C_GetSlotList(CK_FALSE, ptr::null_mut(), ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD);
 }
 
@@ -399,7 +423,7 @@ fn test_null_pointer_get_slot_list_count() {
 fn test_invalid_slot_id() {
     ensure_init();
     let mut info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
-    let rv = C_GetSlotInfo(999, &mut info);
+    let rv = unsafe { C_GetSlotInfo(999, &mut info) };
     assert_eq!(
         rv, CKR_SLOT_ID_INVALID,
         "Invalid slot should return CKR_SLOT_ID_INVALID"
@@ -413,12 +437,12 @@ fn test_invalid_slot_id() {
 #[test]
 fn test_session_without_serial_flag() {
     let session = setup_user_session();
-    let _ = C_Logout(session);
-    let _ = C_CloseSession(session);
+    let _ = unsafe { C_Logout(session) };
+    let _ = unsafe { C_CloseSession(session) };
 
     let mut new_session: CK_SESSION_HANDLE = 0;
     // Open session without CKF_SERIAL_SESSION — should be rejected per PKCS#11 spec
-    let rv = C_OpenSession(0, CKF_RW_SESSION, ptr::null_mut(), None, &mut new_session);
+    let rv = unsafe { C_OpenSession(0, CKF_RW_SESSION, ptr::null_mut(), None, &mut new_session) };
     assert_eq!(
         rv, CKR_SESSION_PARALLEL_NOT_SUPPORTED,
         "Missing CKF_SERIAL_SESSION should be rejected"
@@ -435,10 +459,10 @@ fn test_operation_on_invalid_session() {
     let invalid_session: CK_SESSION_HANDLE = 0xDEADBEEF;
 
     let mut info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
-    let rv = C_GetSessionInfo(invalid_session, &mut info);
+    let rv = unsafe { C_GetSessionInfo(invalid_session, &mut info) };
     assert_eq!(rv, CKR_SESSION_HANDLE_INVALID);
 
-    let rv = C_Logout(invalid_session);
+    let rv = unsafe { C_Logout(invalid_session) };
     assert_eq!(rv, CKR_SESSION_HANDLE_INVALID);
 }
 
@@ -449,15 +473,17 @@ fn test_operation_on_invalid_session() {
 #[test]
 fn test_login_invalid_user_type() {
     let session = setup_user_session();
-    let _ = C_Logout(session);
+    let _ = unsafe { C_Logout(session) };
 
     let pin = b"userpin1";
-    let rv = C_Login(
-        session,
-        99, // Invalid user type
-        pin.as_ptr() as *mut _,
-        pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            99, // Invalid user type
+            pin.as_ptr() as *mut _,
+            pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(
         rv, CKR_USER_TYPE_INVALID,
         "Invalid user type should return CKR_USER_TYPE_INVALID"
@@ -474,14 +500,14 @@ fn test_get_slot_list_buffer_too_small() {
 
     // First, query the count
     let mut count: CK_ULONG = 0;
-    let rv = C_GetSlotList(CK_FALSE, ptr::null_mut(), &mut count);
+    let rv = unsafe { C_GetSlotList(CK_FALSE, ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count > 0, "Should have at least one slot");
 
     // Now try with a too-small buffer
     let mut small_count: CK_ULONG = 0;
     let mut slot_id: CK_SLOT_ID = 0;
-    let rv = C_GetSlotList(CK_FALSE, &mut slot_id, &mut small_count);
+    let rv = unsafe { C_GetSlotList(CK_FALSE, &mut slot_id, &mut small_count) };
     assert_eq!(
         rv, CKR_BUFFER_TOO_SMALL,
         "Should return CKR_BUFFER_TOO_SMALL when buffer is too small"
@@ -507,35 +533,39 @@ fn test_aes_gcm_roundtrip_via_abi() {
     };
 
     // Encrypt
-    let rv = C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK);
 
     let plaintext = b"Hello, PKCS#11 conformance test!";
     let mut ciphertext = vec![0u8; plaintext.len() + 128]; // extra space for tag
     let mut cipher_len: CK_ULONG = ciphertext.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ciphertext.as_mut_ptr(),
-        &mut cipher_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut cipher_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     ciphertext.truncate(cipher_len as usize);
 
     // Decrypt
-    let rv = C_DecryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_DecryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK);
 
     let mut decrypted = vec![0u8; ciphertext.len() + 64];
     let mut decrypted_len: CK_ULONG = decrypted.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_mut_ptr(),
-        cipher_len,
-        decrypted.as_mut_ptr(),
-        &mut decrypted_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            cipher_len,
+            decrypted.as_mut_ptr(),
+            &mut decrypted_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     decrypted.truncate(decrypted_len as usize);
 
@@ -551,13 +581,13 @@ fn test_generate_random() {
     let session = setup_user_session();
 
     let mut buf1 = [0u8; 32];
-    let rv = C_GenerateRandom(session, buf1.as_mut_ptr(), 32);
+    let rv = unsafe { C_GenerateRandom(session, buf1.as_mut_ptr(), 32) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(buf1, [0u8; 32], "Random output should not be all zeros");
 
     // Two consecutive random draws should differ
     let mut buf2 = [0u8; 32];
-    let rv = C_GenerateRandom(session, buf2.as_mut_ptr(), 32);
+    let rv = unsafe { C_GenerateRandom(session, buf2.as_mut_ptr(), 32) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(buf1, buf2, "Two random outputs should differ");
 }
@@ -590,13 +620,15 @@ fn test_aes_key_gen_invalid_length() {
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_ne!(rv, CKR_OK, "AES key gen with invalid length should fail");
 }
 
@@ -609,7 +641,7 @@ fn test_token_info_flags() {
     let _session = setup_user_session();
 
     let mut info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
-    let rv = C_GetTokenInfo(0, &mut info);
+    let rv = unsafe { C_GetTokenInfo(0, &mut info) };
     assert_eq!(rv, CKR_OK);
 
     // Token should be initialized and have user PIN
@@ -640,7 +672,7 @@ fn test_session_info_state() {
     let session = setup_user_session();
 
     let mut info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
-    let rv = C_GetSessionInfo(session, &mut info);
+    let rv = unsafe { C_GetSessionInfo(session, &mut info) };
     assert_eq!(rv, CKR_OK);
 
     let slot_id = info.slot_id;
@@ -673,27 +705,31 @@ fn test_logout_without_login() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LgOutNoL");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Should fail - not logged in
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(
         rv, CKR_USER_NOT_LOGGED_IN,
         "Logout without login should return CKR_USER_NOT_LOGGED_IN"
@@ -707,14 +743,14 @@ fn test_logout_without_login() {
 #[test]
 fn test_get_function_list() {
     let mut func_list: *mut CK_FUNCTION_LIST = ptr::null_mut();
-    let rv = C_GetFunctionList(&mut func_list);
+    let rv = unsafe { C_GetFunctionList(&mut func_list) };
     assert_eq!(rv, CKR_OK);
     assert!(!func_list.is_null(), "Function list should not be null");
 }
 
 #[test]
 fn test_get_function_list_null_arg() {
-    let rv = C_GetFunctionList(ptr::null_mut());
+    let rv = unsafe { C_GetFunctionList(ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD);
 }
 
@@ -729,48 +765,54 @@ fn test_close_all_sessions() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"ClsAllSs");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Open multiple sessions
     let mut sessions = [0 as CK_SESSION_HANDLE; 3];
     for s in sessions.iter_mut() {
-        let rv = C_OpenSession(
-            0,
-            CKF_RW_SESSION | CKF_SERIAL_SESSION,
-            ptr::null_mut(),
-            None,
-            s,
-        );
+        let rv = unsafe {
+            C_OpenSession(
+                0,
+                CKF_RW_SESSION | CKF_SERIAL_SESSION,
+                ptr::null_mut(),
+                None,
+                s,
+            )
+        };
         assert_eq!(rv, CKR_OK);
     }
 
     // Close all
-    let rv = C_CloseAllSessions(0);
+    let rv = unsafe { C_CloseAllSessions(0) };
     assert_eq!(rv, CKR_OK);
 
     // All sessions should now be invalid
     for &s in sessions.iter() {
         let mut info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
-        let rv = C_GetSessionInfo(s, &mut info);
+        let rv = unsafe { C_GetSessionInfo(s, &mut info) };
         assert_eq!(rv, CKR_SESSION_HANDLE_INVALID);
     }
 
     // Should be able to open new sessions after close-all
     let mut new_session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut new_session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut new_session,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "Should be able to open sessions after C_CloseAllSessions"
@@ -785,7 +827,7 @@ fn test_close_all_sessions() {
 fn test_get_info_version() {
     ensure_init();
     let mut info = unsafe { std::mem::zeroed::<CK_INFO>() };
-    let rv = C_GetInfo(&mut info);
+    let rv = unsafe { C_GetInfo(&mut info) };
     assert_eq!(rv, CKR_OK);
 
     // PKCS#11 v3.0
@@ -816,13 +858,15 @@ fn test_encrypt_without_init() {
     let plaintext = b"test data";
     let mut ciphertext = vec![0u8; 128];
     let mut cipher_len: CK_ULONG = ciphertext.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ciphertext.as_mut_ptr(),
-        &mut cipher_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut cipher_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "Encrypt without EncryptInit should fail"
@@ -839,13 +883,15 @@ fn test_sign_without_init() {
     let data = b"test data";
     let mut signature = vec![0u8; 512];
     let mut sig_len: CK_ULONG = signature.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "Sign without SignInit should fail"
@@ -897,16 +943,18 @@ fn test_rsa_keygen_sign_verify_via_abi() {
         parameter_len: 0,
     };
 
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "RSA key pair generation should succeed");
 
     // Sign with SHA256_RSA_PKCS
@@ -915,47 +963,53 @@ fn test_rsa_keygen_sign_verify_via_abi() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let message = b"Test message for RSA conformance";
     let mut signature = vec![0u8; 512];
     let mut sig_len: CK_ULONG = signature.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        message.as_ptr() as *mut _,
-        message.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            message.as_ptr() as *mut _,
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     signature.truncate(sig_len as usize);
 
     // Verify
-    let rv = C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Verify(
-        session,
-        message.as_ptr() as *mut _,
-        message.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        C_Verify(
+            session,
+            message.as_ptr() as *mut _,
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Signature verification should succeed");
 
     // Verify with wrong message should fail
-    let rv = C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(rv, CKR_OK);
 
     let wrong_message = b"Wrong message";
-    let rv = C_Verify(
-        session,
-        wrong_message.as_ptr() as *mut _,
-        wrong_message.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        C_Verify(
+            session,
+            wrong_message.as_ptr() as *mut _,
+            wrong_message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_ne!(rv, CKR_OK, "Verification with wrong message should fail");
 }
 
@@ -998,16 +1052,18 @@ fn test_ec_p256_keygen_sign_verify_via_abi() {
         parameter_len: 0,
     };
 
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "EC P-256 key pair generation should succeed");
 
     // Sign with ECDSA
@@ -1016,7 +1072,7 @@ fn test_ec_p256_keygen_sign_verify_via_abi() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     // ECDSA expects pre-hashed data (32 bytes for SHA-256)
@@ -1024,27 +1080,31 @@ fn test_ec_p256_keygen_sign_verify_via_abi() {
     let hash = Sha256::digest(b"Test message for ECDSA conformance");
     let mut signature = vec![0u8; 128];
     let mut sig_len: CK_ULONG = signature.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        hash.as_ptr() as *mut _,
-        hash.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            hash.as_ptr() as *mut _,
+            hash.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     signature.truncate(sig_len as usize);
 
     // Verify
-    let rv = C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Verify(
-        session,
-        hash.as_ptr() as *mut _,
-        hash.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        C_Verify(
+            session,
+            hash.as_ptr() as *mut _,
+            hash.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "ECDSA verification should succeed");
 }
 
@@ -1062,19 +1122,21 @@ fn test_sha256_digest_via_abi() {
         parameter_len: 0,
     };
 
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
     let data = b"abc";
     let mut digest = [0u8; 32];
     let mut digest_len: CK_ULONG = digest.len() as CK_ULONG;
-    let rv = C_Digest(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        digest.as_mut_ptr(),
-        &mut digest_len,
-    );
+    let rv = unsafe {
+        C_Digest(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            digest.as_mut_ptr(),
+            &mut digest_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     assert_eq!(digest_len, 32);
 
@@ -1097,22 +1159,22 @@ fn test_find_objects_lifecycle() {
     let _key = generate_aes_key(session, 32);
 
     // FindObjectsInit
-    let rv = C_FindObjectsInit(session, ptr::null_mut(), 0);
+    let rv = unsafe { C_FindObjectsInit(session, ptr::null_mut(), 0) };
     assert_eq!(rv, CKR_OK);
 
     // FindObjects
     let mut handles = [0 as CK_OBJECT_HANDLE; 10];
     let mut found: CK_ULONG = 0;
-    let rv = C_FindObjects(session, handles.as_mut_ptr(), 10, &mut found);
+    let rv = unsafe { C_FindObjects(session, handles.as_mut_ptr(), 10, &mut found) };
     assert_eq!(rv, CKR_OK);
     assert!(found > 0, "Should find at least one object");
 
     // FindObjectsFinal
-    let rv = C_FindObjectsFinal(session);
+    let rv = unsafe { C_FindObjectsFinal(session) };
     assert_eq!(rv, CKR_OK);
 
     // FindObjects after Final should fail
-    let rv = C_FindObjects(session, handles.as_mut_ptr(), 10, &mut found);
+    let rv = unsafe { C_FindObjects(session, handles.as_mut_ptr(), 10, &mut found) };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "FindObjects after Final should fail"
@@ -1129,7 +1191,7 @@ fn test_destroy_object() {
     let key = generate_aes_key(session, 32);
 
     // Destroy the key
-    let rv = C_DestroyObject(session, key);
+    let rv = unsafe { C_DestroyObject(session, key) };
     assert_eq!(rv, CKR_OK);
 
     // Using the destroyed key should fail
@@ -1139,7 +1201,7 @@ fn test_destroy_object() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mechanism, key) };
     assert_ne!(rv, CKR_OK, "Using destroyed key should fail");
 }
 
@@ -1282,22 +1344,22 @@ fn test_operation_state_save_restore_digest() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
     // Feed some data
     let part1 = b"Hello, ";
-    let rv = C_DigestUpdate(session, part1.as_ptr() as *mut _, part1.len() as CK_ULONG);
+    let rv = unsafe { C_DigestUpdate(session, part1.as_ptr() as *mut _, part1.len() as CK_ULONG) };
     assert_eq!(rv, CKR_OK);
 
     // Save state
     let mut state_len: CK_ULONG = 0;
-    let rv = C_GetOperationState(session, ptr::null_mut(), &mut state_len);
+    let rv = unsafe { C_GetOperationState(session, ptr::null_mut(), &mut state_len) };
     assert_eq!(rv, CKR_OK);
     assert!(state_len > 0, "State should have non-zero length");
 
     let mut state = vec![0u8; state_len as usize];
-    let rv = C_GetOperationState(session, state.as_mut_ptr(), &mut state_len);
+    let rv = unsafe { C_GetOperationState(session, state.as_mut_ptr(), &mut state_len) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -1315,20 +1377,20 @@ fn test_multipart_digest_sha256() {
         parameter_len: 0,
     };
 
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
     // Feed "abc" in parts: "a", "b", "c"
-    let rv = C_DigestUpdate(session, b"a".as_ptr() as *mut _, 1);
+    let rv = unsafe { C_DigestUpdate(session, b"a".as_ptr() as *mut _, 1) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_DigestUpdate(session, b"b".as_ptr() as *mut _, 1);
+    let rv = unsafe { C_DigestUpdate(session, b"b".as_ptr() as *mut _, 1) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_DigestUpdate(session, b"c".as_ptr() as *mut _, 1);
+    let rv = unsafe { C_DigestUpdate(session, b"c".as_ptr() as *mut _, 1) };
     assert_eq!(rv, CKR_OK);
 
     let mut digest = [0u8; 32];
     let mut digest_len: CK_ULONG = 32;
-    let rv = C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len);
+    let rv = unsafe { C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len) };
     assert_eq!(rv, CKR_OK);
 
     // Should match SHA-256("abc")
@@ -1354,63 +1416,75 @@ fn test_login_lockout() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LockTst!");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Set up user PIN
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
 
     // Try wrong PIN repeatedly until lockout
     let wrong_pin = b"wrongpn1";
     let mut locked = false;
     for _attempt in 0..10 {
-        let mut rv = C_Login(
-            session,
-            CKU_USER,
-            wrong_pin.as_ptr() as *mut _,
-            wrong_pin.len() as CK_ULONG,
-        );
-        // Per-account exponential backoff (max 5 s) rejects attempts that
-        // arrive too quickly with CKR_FUNCTION_FAILED; wait and retry.
-        if rv == CKR_FUNCTION_FAILED {
-            std::thread::sleep(std::time::Duration::from_millis(5100));
-            rv = C_Login(
+        let mut rv = unsafe {
+            C_Login(
                 session,
                 CKU_USER,
                 wrong_pin.as_ptr() as *mut _,
                 wrong_pin.len() as CK_ULONG,
-            );
+            )
+        };
+        // Per-account exponential backoff (max 5 s) rejects attempts that
+        // arrive too quickly with CKR_FUNCTION_FAILED; wait and retry.
+        if rv == CKR_FUNCTION_FAILED {
+            std::thread::sleep(std::time::Duration::from_millis(5100));
+            rv = unsafe {
+                C_Login(
+                    session,
+                    CKU_USER,
+                    wrong_pin.as_ptr() as *mut _,
+                    wrong_pin.len() as CK_ULONG,
+                )
+            };
         }
         if rv == CKR_PIN_LOCKED {
             locked = true;
@@ -1421,12 +1495,14 @@ fn test_login_lockout() {
     assert!(locked, "Account should be locked after max failed attempts");
 
     // Even correct PIN should be rejected when locked
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(
         rv, CKR_PIN_LOCKED,
         "Correct PIN should still be rejected when account is locked"
@@ -1443,13 +1519,13 @@ fn test_mechanism_list_and_info() {
 
     // Query mechanism count
     let mut count: CK_ULONG = 0;
-    let rv = C_GetMechanismList(0, ptr::null_mut(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count > 0, "Should report at least one mechanism");
 
     // Get the list
     let mut mechanisms = vec![0 as CK_MECHANISM_TYPE; count as usize];
-    let rv = C_GetMechanismList(0, mechanisms.as_mut_ptr(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, mechanisms.as_mut_ptr(), &mut count) };
     assert_eq!(rv, CKR_OK);
 
     // Should include common mechanisms
@@ -1468,7 +1544,7 @@ fn test_mechanism_list_and_info() {
 
     // Get info for AES-GCM
     let mut info = unsafe { std::mem::zeroed::<CK_MECHANISM_INFO>() };
-    let rv = C_GetMechanismInfo(0, CKM_AES_GCM, &mut info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_AES_GCM, &mut info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         info.flags & CKF_ENCRYPT_FLAG,

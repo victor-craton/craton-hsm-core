@@ -10,7 +10,7 @@ use craton_hsm::pkcs11_abi::functions;
 use craton_hsm::pkcs11_abi::types::*;
 
 fn init_and_login() -> CK_SESSION_HANDLE {
-    let rv = functions::C_Initialize(std::ptr::null_mut());
+    let rv = unsafe { functions::C_Initialize(std::ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 
     // Init token with SO PIN
@@ -18,59 +18,69 @@ fn init_and_login() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"TestToken");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = functions::C_CloseAllSessions(0);
-    let rv = functions::C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { functions::C_CloseAllSessions(0) };
+    let rv = unsafe {
+        functions::C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = functions::C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION | CKF_RW_SESSION,
-        std::ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        functions::C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Login as SO, init user PIN, logout, then login as user
-    let rv = functions::C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        functions::C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let user_pin = b"userpin1234";
-    let rv = functions::C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        functions::C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_Logout(session);
+    let rv = unsafe { functions::C_Logout(session) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        functions::C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     session
 }
 
 fn cleanup(session: CK_SESSION_HANDLE) {
-    let _ = functions::C_Logout(session);
-    let _ = functions::C_CloseSession(session);
+    let _ = unsafe { functions::C_Logout(session) };
+    let _ = unsafe { functions::C_CloseSession(session) };
 }
 
 /// Generate RSA key pair → pairwise test runs → sign/verify roundtrip succeeds.
@@ -116,16 +126,18 @@ fn rsa_keygen_with_pairwise_test() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "RSA key generation (with pairwise test) should succeed"
@@ -144,36 +156,40 @@ fn rsa_keygen_with_pairwise_test() {
     let data = b"pairwise roundtrip test data";
 
     // Sign
-    let rv = functions::C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { functions::C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let mut sig = [0u8; 512];
     let mut sig_len: CK_ULONG = 512;
-    let rv = functions::C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Verify
-    let rv = functions::C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { functions::C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_Verify(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Verify(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "RSA signature verification should succeed");
 
     // Cleanup
-    let _ = functions::C_DestroyObject(session, pub_key);
-    let _ = functions::C_DestroyObject(session, priv_key);
+    let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     cleanup(session);
 }
 
@@ -213,16 +229,18 @@ fn ecdsa_p256_keygen_with_pairwise_test() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "EC P-256 key generation (with pairwise test) should succeed"
@@ -237,37 +255,41 @@ fn ecdsa_p256_keygen_with_pairwise_test() {
 
     let data = b"ecdsa pairwise roundtrip";
 
-    let rv = functions::C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { functions::C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let mut sig = [0u8; 256];
     let mut sig_len: CK_ULONG = 256;
-    let rv = functions::C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { functions::C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_Verify(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Verify(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "ECDSA P-256 signature verification should succeed"
     );
 
-    let _ = functions::C_DestroyObject(session, pub_key);
-    let _ = functions::C_DestroyObject(session, priv_key);
+    let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     cleanup(session);
 }
 
@@ -307,16 +329,18 @@ fn ecdsa_p384_keygen_with_pairwise_test() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "EC P-384 key generation (with pairwise test) should succeed"
@@ -331,37 +355,41 @@ fn ecdsa_p384_keygen_with_pairwise_test() {
 
     let data = b"ecdsa p384 pairwise roundtrip";
 
-    let rv = functions::C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { functions::C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let mut sig = [0u8; 256];
     let mut sig_len: CK_ULONG = 256;
-    let rv = functions::C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { functions::C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_Verify(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Verify(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "ECDSA P-384 signature verification should succeed"
     );
 
-    let _ = functions::C_DestroyObject(session, pub_key);
-    let _ = functions::C_DestroyObject(session, priv_key);
+    let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     cleanup(session);
 }
 
@@ -392,16 +420,18 @@ fn ed25519_keygen_with_pairwise_test() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "Ed25519 key generation (with pairwise test) should succeed"
@@ -416,34 +446,38 @@ fn ed25519_keygen_with_pairwise_test() {
 
     let data = b"ed25519 pairwise roundtrip";
 
-    let rv = functions::C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { functions::C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let mut sig = [0u8; 128];
     let mut sig_len: CK_ULONG = 128;
-    let rv = functions::C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { functions::C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_Verify(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Verify(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Ed25519 signature verification should succeed");
 
-    let _ = functions::C_DestroyObject(session, pub_key);
-    let _ = functions::C_DestroyObject(session, priv_key);
+    let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     cleanup(session);
 }
 
@@ -474,16 +508,18 @@ fn ml_dsa_keygen_with_pairwise_test() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "ML-DSA-44 key generation (with pairwise test) should succeed"
@@ -498,37 +534,41 @@ fn ml_dsa_keygen_with_pairwise_test() {
 
     let data = b"ml-dsa pairwise roundtrip test data";
 
-    let rv = functions::C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { functions::C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let mut sig = [0u8; 4096];
     let mut sig_len: CK_ULONG = 4096;
-    let rv = functions::C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { functions::C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = functions::C_Verify(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        sig.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        functions::C_Verify(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            sig.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "ML-DSA-44 signature verification should succeed"
     );
 
-    let _ = functions::C_DestroyObject(session, pub_key);
-    let _ = functions::C_DestroyObject(session, priv_key);
+    let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     cleanup(session);
 }
 
@@ -568,16 +608,18 @@ fn post_failed_not_set_after_successful_keygen() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // POST_FAILED should not be set
@@ -586,7 +628,7 @@ fn post_failed_not_set_after_successful_keygen() {
         "POST should not have failed after successful keygen"
     );
 
-    let _ = functions::C_DestroyObject(session, pub_key);
-    let _ = functions::C_DestroyObject(session, priv_key);
+    let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     cleanup(session);
 }

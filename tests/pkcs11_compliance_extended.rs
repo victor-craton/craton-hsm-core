@@ -15,7 +15,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 #[test]
 fn test_extended_pkcs11_compliance() {
     // Initialize (may already be initialized by other test)
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 
     // Init token with SO PIN
@@ -23,20 +23,22 @@ fn test_extended_pkcs11_compliance() {
     let mut label = [b' '; 32];
     label[..12].copy_from_slice(b"ExtTestToken");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // ========================================================================
     // Test 1: C_GetMechanismList includes PQC mechanisms
     // ========================================================================
     let mut mech_count: CK_ULONG = 0;
-    let rv = C_GetMechanismList(0, ptr::null_mut(), &mut mech_count);
+    let rv = unsafe { C_GetMechanismList(0, ptr::null_mut(), &mut mech_count) };
     assert_eq!(rv, CKR_OK);
     // 39 = full list after removing the hybrid ML-DSA+ECDSA mechanism and the
     // (not yet parameter-capable) generic CKM_RSA_PKCS_PSS (H2-19 / A2-13).
@@ -47,7 +49,7 @@ fn test_extended_pkcs11_compliance() {
     );
 
     let mut mech_list = vec![0 as CK_MECHANISM_TYPE; mech_count as usize];
-    let rv = C_GetMechanismList(0, mech_list.as_mut_ptr(), &mut mech_count);
+    let rv = unsafe { C_GetMechanismList(0, mech_list.as_mut_ptr(), &mut mech_count) };
     assert_eq!(rv, CKR_OK);
 
     assert!(
@@ -69,41 +71,43 @@ fn test_extended_pkcs11_compliance() {
     // ========================================================================
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
 
-    let rv = C_GetMechanismInfo(0, CKM_ML_KEM_768, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_ML_KEM_768, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(mech_info.flags & CKF_GENERATE_KEY_PAIR_FLAG, 0);
     assert_ne!(mech_info.flags & CKF_DERIVE_FLAG, 0);
 
-    let rv = C_GetMechanismInfo(0, CKM_ML_DSA_65, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_ML_DSA_65, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(mech_info.flags & CKF_SIGN_FLAG, 0);
     assert_ne!(mech_info.flags & CKF_VERIFY_FLAG, 0);
     assert_ne!(mech_info.flags & CKF_GENERATE_KEY_PAIR_FLAG, 0);
 
-    let rv = C_GetMechanismInfo(0, CKM_SLH_DSA_SHA2_128S, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_SLH_DSA_SHA2_128S, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(mech_info.flags & CKF_SIGN_FLAG, 0);
     assert_ne!(mech_info.flags & CKF_VERIFY_FLAG, 0);
 
     // Invalid mechanism
-    let rv = C_GetMechanismInfo(0, 0xFFFFFFFF, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, 0xFFFFFFFF, &mut mech_info) };
     assert_eq!(rv, CKR_MECHANISM_INVALID);
 
     // ========================================================================
     // Test 3: Session state machine — RO session limitations
     // ========================================================================
     let mut ro_session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut ro_session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut ro_session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut sess_info: CK_SESSION_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetSessionInfo(ro_session, &mut sess_info);
+    let rv = unsafe { C_GetSessionInfo(ro_session, &mut sess_info) };
     assert_eq!(rv, CKR_OK);
     let state = sess_info.state;
     assert_eq!(state, CKS_RO_PUBLIC_SESSION);
@@ -121,56 +125,66 @@ fn test_extended_pkcs11_compliance() {
         value_len: value_len_bytes.len() as CK_ULONG,
     }];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        ro_session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            ro_session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(rv, CKR_SESSION_READ_ONLY);
 
-    let rv = C_CloseSession(ro_session);
+    let rv = unsafe { C_CloseSession(ro_session) };
     assert_eq!(rv, CKR_OK);
 
     // ========================================================================
     // Test 4: Operations require login
     // ========================================================================
     let mut rw_session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut rw_session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut rw_session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Login SO, init user PIN
-    let rv = C_Login(
-        rw_session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            rw_session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpass1";
-    let rv = C_InitPIN(
-        rw_session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            rw_session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(rw_session);
+    let rv = unsafe { C_Logout(rw_session) };
     assert_eq!(rv, CKR_OK);
 
     // Login as user
-    let rv = C_Login(
-        rw_session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            rw_session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // ========================================================================
@@ -195,16 +209,18 @@ fn test_extended_pkcs11_compliance() {
     }];
     let mut ml_pub: CK_OBJECT_HANDLE = 0;
     let mut ml_priv: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        rw_session,
-        &mut ml_dsa_mechanism,
-        pub_template_ml.as_mut_ptr(),
-        pub_template_ml.len() as CK_ULONG,
-        priv_template_ml.as_mut_ptr(),
-        priv_template_ml.len() as CK_ULONG,
-        &mut ml_pub,
-        &mut ml_priv,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            rw_session,
+            &mut ml_dsa_mechanism,
+            pub_template_ml.as_mut_ptr(),
+            pub_template_ml.len() as CK_ULONG,
+            priv_template_ml.as_mut_ptr(),
+            priv_template_ml.len() as CK_ULONG,
+            &mut ml_pub,
+            &mut ml_priv,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     assert_ne!(ml_pub, 0);
     assert_ne!(ml_priv, 0);
@@ -218,47 +234,53 @@ fn test_extended_pkcs11_compliance() {
         parameter_len: 0,
     };
 
-    let rv = C_SignInit(rw_session, &mut sign_mechanism, ml_priv);
+    let rv = unsafe { C_SignInit(rw_session, &mut sign_mechanism, ml_priv) };
     assert_eq!(rv, CKR_OK);
 
     let message = b"PQC ABI compliance test message";
     let mut sig_buf = vec![0u8; 8192]; // ML-DSA-44 sig is 2420 bytes
     let mut sig_len: CK_ULONG = sig_buf.len() as CK_ULONG;
-    let rv = C_Sign(
-        rw_session,
-        message.as_ptr() as CK_BYTE_PTR,
-        message.len() as CK_ULONG,
-        sig_buf.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            rw_session,
+            message.as_ptr() as CK_BYTE_PTR,
+            message.len() as CK_ULONG,
+            sig_buf.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     assert_eq!(sig_len, 2420, "ML-DSA-44 signature should be 2420 bytes");
 
     // Verify
-    let rv = C_VerifyInit(rw_session, &mut sign_mechanism, ml_pub);
+    let rv = unsafe { C_VerifyInit(rw_session, &mut sign_mechanism, ml_pub) };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Verify(
-        rw_session,
-        message.as_ptr() as CK_BYTE_PTR,
-        message.len() as CK_ULONG,
-        sig_buf.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        C_Verify(
+            rw_session,
+            message.as_ptr() as CK_BYTE_PTR,
+            message.len() as CK_ULONG,
+            sig_buf.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Verify with wrong message should fail
-    let rv = C_VerifyInit(rw_session, &mut sign_mechanism, ml_pub);
+    let rv = unsafe { C_VerifyInit(rw_session, &mut sign_mechanism, ml_pub) };
     assert_eq!(rv, CKR_OK);
 
     let wrong_msg = b"wrong message";
-    let rv = C_Verify(
-        rw_session,
-        wrong_msg.as_ptr() as CK_BYTE_PTR,
-        wrong_msg.len() as CK_ULONG,
-        sig_buf.as_mut_ptr(),
-        sig_len,
-    );
+    let rv = unsafe {
+        C_Verify(
+            rw_session,
+            wrong_msg.as_ptr() as CK_BYTE_PTR,
+            wrong_msg.len() as CK_ULONG,
+            sig_buf.as_mut_ptr(),
+            sig_len,
+        )
+    };
     assert_eq!(rv, CKR_SIGNATURE_INVALID);
 
     // ========================================================================
@@ -279,20 +301,22 @@ fn test_extended_pkcs11_compliance() {
         },
     ];
 
-    let rv = C_FindObjectsInit(
-        rw_session,
-        find_template.as_mut_ptr(),
-        find_template.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_FindObjectsInit(
+            rw_session,
+            find_template.as_mut_ptr(),
+            find_template.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut found = vec![0 as CK_OBJECT_HANDLE; 10];
     let mut found_count: CK_ULONG = 0;
-    let rv = C_FindObjects(rw_session, found.as_mut_ptr(), 10, &mut found_count);
+    let rv = unsafe { C_FindObjects(rw_session, found.as_mut_ptr(), 10, &mut found_count) };
     assert_eq!(rv, CKR_OK);
     assert!(found_count >= 1, "Should find at least 1 ML-DSA public key");
 
-    let rv = C_FindObjectsFinal(rw_session);
+    let rv = unsafe { C_FindObjectsFinal(rw_session) };
     assert_eq!(rv, CKR_OK);
 
     // ========================================================================
@@ -304,12 +328,14 @@ fn test_extended_pkcs11_compliance() {
         p_value: key_type_buf.as_mut_ptr() as CK_VOID_PTR,
         value_len: key_type_buf.len() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(
-        rw_session,
-        ml_pub,
-        get_template.as_mut_ptr(),
-        get_template.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_GetAttributeValue(
+            rw_session,
+            ml_pub,
+            get_template.as_mut_ptr(),
+            get_template.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let returned_kt = CK_ULONG::from_ne_bytes(key_type_buf);
     assert_eq!(returned_kt, CKK_ML_DSA, "Key type should be CKK_ML_DSA");
@@ -317,57 +343,63 @@ fn test_extended_pkcs11_compliance() {
     // ========================================================================
     // Test 9: C_DestroyObject
     // ========================================================================
-    let rv = C_DestroyObject(rw_session, ml_pub);
+    let rv = unsafe { C_DestroyObject(rw_session, ml_pub) };
     assert_eq!(rv, CKR_OK);
 
     // Verify it's gone — VerifyInit with destroyed key should fail
-    let rv = C_VerifyInit(rw_session, &mut sign_mechanism, ml_pub);
+    let rv = unsafe { C_VerifyInit(rw_session, &mut sign_mechanism, ml_pub) };
     assert_eq!(rv, CKR_KEY_HANDLE_INVALID);
 
     // ========================================================================
     // Test 10: PIN change via C_SetPIN
     // ========================================================================
     let new_pin = b"newuserpin";
-    let rv = C_SetPIN(
-        rw_session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-        new_pin.as_ptr() as *mut _,
-        new_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_SetPIN(
+            rw_session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+            new_pin.as_ptr() as *mut _,
+            new_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // ========================================================================
     // Test 11: Wrong PIN should fail login
     // ========================================================================
-    let rv = C_Logout(rw_session);
+    let rv = unsafe { C_Logout(rw_session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        rw_session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            rw_session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_PIN_INCORRECT);
 
     // Correct new PIN should work
-    let rv = C_Login(
-        rw_session,
-        CKU_USER,
-        new_pin.as_ptr() as *mut _,
-        new_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            rw_session,
+            CKU_USER,
+            new_pin.as_ptr() as *mut _,
+            new_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // ========================================================================
     // Test 12: Invalid session handle
     // ========================================================================
-    let rv = C_GetSessionInfo(9999, &mut sess_info);
+    let rv = unsafe { C_GetSessionInfo(9999, &mut sess_info) };
     assert_eq!(rv, CKR_SESSION_HANDLE_INVALID);
 
     // Cleanup
-    let rv = C_Logout(rw_session);
+    let rv = unsafe { C_Logout(rw_session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_CloseSession(rw_session);
+    let rv = unsafe { C_CloseSession(rw_session) };
     assert_eq!(rv, CKR_OK);
 }
