@@ -1,3 +1,8 @@
+# Pinned development / CI / release toolchain (A3-08, A1-19).
+# Update deliberately (and record it in CHANGELOG.md): the toolchain is a
+# configuration item of the module. It must be >= the MSRV declared in
+# Cargo.toml (`rust-version`), which CI checks separately with an MSRV job.
 [toolchain]
-channel = "stable"
+channel = "1.94.1"
 components = ["rustfmt", "clippy"]
+profile = "minimal"
