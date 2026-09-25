@@ -196,18 +196,28 @@ When used as an `rlib` (Rust library), the public API is organized into the modu
 use craton_hsm::config::config::HsmConfig;
 use craton_hsm::core::HsmCore;
 
-// Configuration from CRATON_HSM_CONFIG / ./craton_hsm.toml (defaults if absent)
+// Configuration from $CRATON_HSM_CONFIG, else /etc/craton-hsm/craton_hsm.toml,
+// else built-in defaults (never ./craton_hsm.toml)
 let config = HsmConfig::load()?;
-let hsm = HsmCore::try_new(&config)?;
+// Opens the core INCLUDING its persistent state when token.persist_objects =
+// true: exclusive store lock, token record, lockout counters, audit-chain check.
+let hsm = HsmCore::open(&config)?;
 
-// Or from an explicit (relative) path, validated
-let config = HsmConfig::load_from_path("craton_hsm.toml")?;
-config.validate()?;
-let hsm = HsmCore::try_new(&config)?;
+// Or from an explicit path (validated; a missing file is an error)
+let config = HsmConfig::load_from_path("/etc/craton-hsm/craton_hsm.toml")?;
+let hsm = HsmCore::open(&config)?;
 
 // Custom crypto backend
 let hsm = HsmCore::try_new_with_backend(&config, my_backend)?;
+
+// Lifecycle services (audited; same semantics as the PKCS#11 functions)
+hsm.init_token(slot, &so_pin, &label32)?;   // SessionExists if sessions are open
+let s = hsm.open_session(slot, flags, app_id)?;
+hsm.login(s, CKU_USER, &pin)?;             // unlocks and loads the slot's token objects
+hsm.finalize();                             // zeroizes keys, PIN verifiers, storage keys
 ```
+
+`HsmCore::new` panics on errors; use `open` (alias of `try_new`).
 
 ### `craton_hsm::config` — Configuration
 
@@ -215,9 +225,8 @@ let hsm = HsmCore::try_new_with_backend(&config, my_backend)?;
 use craton_hsm::config::config::{AlgorithmConfig, AuditConfig, HsmConfig, SecurityConfig, TokenConfig};
 
 let config = HsmConfig::default();
-let config = HsmConfig::load()?;                        // env var / default path
-let config = HsmConfig::load_from_path("craton_hsm.toml")?;
-config.validate()?;
+let config = HsmConfig::load()?;                        // $CRATON_HSM_CONFIG / system path / defaults
+let config = HsmConfig::load_from_path("/etc/craton-hsm/craton_hsm.toml")?; // validates
 ```
 
 See [Configuration Reference](configuration-reference.md) for all fields.
@@ -283,7 +292,35 @@ use craton_hsm::token::slot::SlotManager;
 
 ```rust
 use craton_hsm::audit::log::{AuditLog, AuditOperation, AuditResult};
+
+// Offline verification of a persisted log (keyed chain + anchor); do not
+// construct an HsmCore next to a running writer (single-writer lock).
+let (events, last_seq) = AuditLog::verify_file(log_path, key_path)?;
 ```
+
+## gRPC Daemon API (`craton-hsm-daemon`)
+
+The daemon exposes `craton_hsm.HsmService`
+(`craton-hsm-daemon/proto/craton_hsm.proto`) over TLS 1.3 with mutual TLS. It
+is **outside** the module's cryptographic boundary and is not a PKCS#11
+implementation; it maps a subset of services onto the core:
+
+| RPC | Notes |
+|-----|-------|
+| `OpenSession`, `CloseSession` | Sessions belong to the client certificate identity that opened them; other clients get `NOT_FOUND`. Per-client quota `max_sessions_per_client`; idle sessions close after `session_idle_timeout_secs`; all of a client's sessions close on disconnect. |
+| `Login`, `Logout` | Login state is **per client and slot**. `CKU_SO` requires an administrator certificate (`admin_client_cert_sha256`). Failed attempts are throttled per client/slot/role in addition to the token lockout. Closing the client's last session on a slot logs it out. |
+| `GetTokenInfo` | `login_state` is the caller's own state; token-wide counters are only returned to administrators. |
+| `InitToken` | Administrator only; fails while any session is open on the slot; verifies the SO PIN before destroying that slot's objects. |
+| `InitPin` | Administrator only; sets the User PIN after SO-PIN verification. |
+| `GenerateKey`, `GenerateKeyPair` | Templates are allow-listed (`craton-hsm-daemon/src/template.rs`); `CKA_TOKEN=true` is refused while the token is ephemeral. Requires `CKU_USER`. |
+| `FindObjects`, `GetAttributeValue`, `DestroyObject` | Private objects are visible only to a client logged in as `CKU_USER`; sensitive attributes are never returned. |
+| `Sign`, `Verify`, `Encrypt`, `Decrypt` | The mechanism selects the algorithm and must match the key. Raw `CKM_RSA_PKCS`, generic `CKM_RSA_PKCS_PSS`, `CKM_ECDSA`, `CKM_ECDSA_SHA512`, unpadded `CKM_AES_CBC` and GCM/OAEP parameters are rejected by the daemon. ECDSA signatures are raw `r‖s`. |
+| `Digest` | Algorithm policy enforced (SHA-1 blocked in approved-only mode); audited. |
+| `GenerateRandom` | At most `max_random_length` bytes per request. |
+
+A separate plaintext listener (`health_bind`) serves only
+`grpc.health.v1.Health`. See [configuration-reference.md](configuration-reference.md#daemon-grpc-server-craton-hsm-daemon-only)
+for limits and TLS settings.
 
 ## Generated Rustdoc
 

@@ -18,8 +18,10 @@ rust-version = "1.89"
 # Only ship what is needed to build the library. Everything else (docs/*.pdf,
 # deploy/, kreya/, fuzz/, tests/ fixtures, CI config, local agent settings) is
 # kept out of the crates.io package (A3-01, A3-23).
+# `/src/**` (not only `*.rs`): the POST known-answer vectors under
+# src/crypto/kat/ are compiled in with `include_bytes!`.
 include = [
-    "/src/**/*.rs",
+    "/src/**",
     "/build.rs",
     "/Cargo.toml",
     "/Cargo.lock",
@@ -93,7 +95,10 @@ dashmap = "6"
 # Config and logging
 toml = "1"
 serde = { version = "1", features = ["derive"] }
-tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
+# No compile-time level caps on the library: Cargo feature unification would
+# impose them on every consumer (A3-26). The shipped binaries (daemon, admin
+# CLI) set `max_level_info` / `release_max_level_info` themselves.
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 
 # Randomness
@@ -125,9 +130,10 @@ tempfile = "3"
 hex = "0.4"
 criterion = { version = "0.8", features = ["html_reports"] }
 libloading = "0.9"
-# craton_hsm-awslc: only available with the enterprise repo; see docs/fips-mode-guide.md
-# To run FIPS backend tests locally, clone craton_hsm-enterprise alongside this repo and uncomment:
-# craton_hsm-awslc = { path = "../craton_hsm-enterprise/craton_hsm-awslc" }
+# The AWS-LC backend is in-tree (src/crypto/awslc_backend.rs, feature
+# `awslc-backend`; implied by `fips`). Its tests and the cross-backend
+# differential test run with `cargo test --features awslc-backend`
+# (needs cmake, Go and a C compiler); see docs/fips-mode-guide.md.
 
 [[bench]]
 name = "crypto_bench"
@@ -136,6 +142,13 @@ harness = false
 [[bench]]
 name = "pkcs11_abi_bench"
 harness = false
+
+# PBKDF2 (600,000 iterations per PIN operation), the DRBG and the PQC crates
+# are unusably slow when unoptimised, which makes the ABI test suites take
+# hours in debug builds. Optimise dependencies (not this crate, so its own
+# debug assertions and debuggability are kept) in dev/test builds.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 lto = true

@@ -14,7 +14,10 @@
 > | HMAC-SHA256 integrity test with `.hmac` sidecar | Ed25519 signature with `.sig` sidecar; HMAC tooling removed ([release-signing.md](release-signing.md)) |
 > | "17 POST tests", "617+ tests in 33 suites", "5 fuzz targets" | Self-test list in [fips-140-3-certification.md §9](fips-140-3-certification.md#9-self-tests); 35 integration test files; 12 fuzz targets |
 > | aws-lc-rs backend "FIPS 140-3 validated" | Links the AWS-LC FIPS module; Craton HSM is not validated and not all services use AWS-LC |
-> | "RSA blinding" side-channel resistance | RSA on the RustCrypto backend is affected by the Marvin attack (RUSTSEC-2023-0071), not mitigated |
+> | "RSA blinding" side-channel resistance | Blinding is applied, but RSA on the RustCrypto backend is still affected by the Marvin attack (RUSTSEC-2023-0071): not constant time; `fips` builds use AWS-LC ([security-model.md](security-model.md)) |
+> | "41 cryptographic mechanisms" | 39 advertised mechanisms ([api-reference.md](api-reference.md)) |
+> | Lockout "default: 10 attempts" | Default `max_failed_logins` is 5 |
+> | Audit log "chained SHA-256 hashes" | Keyed HMAC-SHA256 chain with a MAC-protected anchor ([security-model.md](security-model.md#audit-integrity)) |
 > | Algorithm indicator (IG 2.4.C), "all technical requirements implemented" | No API-visible indicator; the module is **not ready** for FIPS submission ([fips-gap-analysis.md](fips-gap-analysis.md)) |
 > | Admin CLI output samples | Illustrative; see `craton-hsm-admin --help` |
 

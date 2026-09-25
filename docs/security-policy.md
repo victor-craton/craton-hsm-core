@@ -89,7 +89,7 @@ The complete services table with SSP access is in
 [fips-140-3-certification.md §3.2](fips-140-3-certification.md#32-services).
 
 **PIN policy (defaults):** 8–64 bytes; at least 3 distinct byte values; ASCII
-PINs need at least 2 character classes; lockout after 10 consecutive failures
+PINs need at least 2 character classes; lockout after 5 consecutive failures
 (`security.max_failed_logins`) with exponential back-off (100 ms doubling to
 5 s). **There is no default PIN**: a new token is uninitialised; the SO PIN
 is set by `C_InitToken` and the User PIN by the SO with `C_InitPIN`.
@@ -200,8 +200,9 @@ performed on them.
 ## 9. Mitigation of other attacks
 
 None claimed. Voluntary measures: constant-time PIN comparison, best-effort
-memory locking and zeroization, fork detection, and a hash-chained audit log
-(unkeyed; detects accidental corruption only). The RustCrypto `rsa` crate is
-affected by the Marvin timing side channel (RUSTSEC-2023-0071); this is **not**
-mitigated — use the AWS-LC backend for RSA private-key operations where timing
-attacks are in scope.
+memory locking and zeroization, fork detection, and a keyed (HMAC-SHA256)
+hash-chained audit log with a MAC-protected anchor. The RustCrypto `rsa` crate
+is affected by the Marvin timing side channel (RUSTSEC-2023-0071); base
+blinding reduces but does **not** remove the exposure. `fips` builds use the
+AWS-LC backend; use it for RSA private-key operations where timing attacks are
+in scope.

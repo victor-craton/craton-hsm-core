@@ -2,6 +2,8 @@
 
 Audited revision: `2f76874` (version 0.9.1). The audit was a static review by parallel reviewers, one per crate, with the root crate split into three areas, plus three certification auditors. A baseline build, clippy and test run backs it up.
 
+Remediation status of every finding: [REMEDIATION.md](REMEDIATION.md).
+
 ## Reports
 
 | ID | Report | Scope | Crit | High | Med | Low | Info | Total |

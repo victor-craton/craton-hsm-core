@@ -34,13 +34,13 @@ v2.40 functions that return `CKR_FUNCTION_NOT_SUPPORTED`.
 
 - **PKCS#11 C ABI**: the 68 PKCS#11 v2.40 entry points plus v3.0 interface discovery
 - **Classical cryptography**: RSA (2048/3072/4096), ECDSA and ECDH (P-256/P-384), EdDSA (Ed25519), AES (GCM/CBC/CTR, key wrap), SHA-1/SHA-2/SHA-3 digests
-- **Post-quantum cryptography** (vendor-defined mechanisms): ML-KEM-512/768/1024, ML-DSA-44/65/87, SLH-DSA-SHA2-128s/256s. *The PQC crates are pre-release (release-candidate) versions with no stability guarantee and no CAVP validation; see [FIPS Gap Analysis](docs/fips-gap-analysis.md).*
+- **Post-quantum cryptography** (vendor-defined mechanisms): ML-KEM-512/768/1024, ML-DSA-44/65/87, SLH-DSA-SHA2-128s/256s. *The PQC crates are pre-release (release-candidate) versions, pinned exactly, with no independent audit history, no stability guarantee (encodings may change between candidates) and no CAVP validation; PQC is disabled in approved-only mode and `fips` builds. See [Security Model](docs/security-model.md#pre-release-post-quantum-crates) and [FIPS Gap Analysis](docs/fips-gap-analysis.md).*
 - **Multi-part operations**: streaming sign/verify and encrypt/decrypt
 - **SP 800-90A HMAC_DRBG** (HMAC-SHA-256, prediction resistance) used for key generation and `C_GenerateRandom`; seeded from the operating-system RNG (the entropy source is not SP 800-90B/ESV validated)
 - **Power-on self-tests**: Ed25519 software-integrity test plus known-answer self-tests (see [FIPS 140-3 document §9](docs/fips-140-3-certification.md#9-self-tests) for the exact list); pairwise-consistency tests on every key-pair generation
 - **SP 800-57 key lifecycle**: date-based activation/deactivation
 - **Memory hardening**: mlock/VirtualLock for key material (best effort), zeroize-on-drop, constant-time PIN comparison
-- **Audit log** with a chained SHA-256 hash (tamper-*evident* against accidental corruption; the chain is unkeyed)
+- **Audit log** with a keyed HMAC-SHA256 hash chain and a MAC-protected anchor (tamper-evident against anyone without the audit key; forward it off-host for stronger guarantees)
 - **Crypto backends**: RustCrypto (default) and an in-tree AWS-LC backend (`awslc-backend` feature, Apache-2.0, in this repository); not every service is routed through AWS-LC yet
 - **Encrypted persistent storage** of token objects (`persist_objects = true`): redb + per-object AES-256-GCM
 - **gRPC daemon** (`craton-hsm-daemon`) with mutual TLS and per-client authorization — *outside* the module's cryptographic boundary
@@ -127,7 +127,7 @@ injected programmatically with `HsmCore::new_with_backend()`.
 - **PIN security**: PBKDF2-HMAC-SHA-256 (600 000 iterations), constant-time comparison, configurable lockout
 - **Self-tests**: power-on self-tests run inside `C_Initialize` before any service is available; a failure puts the module in an error state
 - **Integrity**: released libraries verify an Ed25519 signature over their own file at every `C_Initialize`
-- **Audit trail**: security-relevant operations are logged with a chained SHA-256 hash
+- **Audit trail**: security-relevant operations are logged with a keyed HMAC-SHA256 hash chain
 - **Key lifecycle**: SP 800-57 states (pre-activation, active, deactivated, compromised)
 
 Known limitations are tracked in [FIPS Gap Analysis](docs/fips-gap-analysis.md)

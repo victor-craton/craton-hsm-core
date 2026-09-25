@@ -53,7 +53,7 @@ Principal dependencies and their licences (from Cargo.lock metadata):
   MIT OR Apache-2.0
 
 - dashmap, tracing, tracing-subscriber, tokio, tower, tonic, tonic-prost,
-  async-stream, comfy-table: MIT
+  tonic-health, async-stream: MIT
 
 - prost, prost-types, rpassword: Apache-2.0
 

@@ -53,18 +53,18 @@ Status legend used below:
 | A1-17 | Persistent storage claims not implemented | Remediated | Encrypted persistence with a per-slot DEK wrapped under PIN-derived KEKs, authenticated manifest. **Open:** whole-file rollback detection needs an external monotonic counter. |
 | A1-18 | SSP table incomplete | Documented | [fips-140-3-certification.md §8.1](fips-140-3-certification.md#81-ssp-inventory). |
 | A1-19 | Operational environment not specified | Partially remediated | Tested OEs pinned in CI (Ubuntu 24.04 x86_64, Windows Server 2025 x86_64, macOS 15 arm64). **Open:** ACVP on each claimed OE; PAA documentation per OE. |
-| A1-20 | Life-cycle: no FIPS build/delivery pipeline | Remediated | Gated release workflow with a `fips,awslc-backend` flavour, embedded key, `.sig`, SBOM, provenance; CI builds the `fips` and `awslc-backend` features. |
+| A1-20 | Life-cycle: no FIPS build/delivery pipeline | Remediated | Gated release workflow with a `fips` flavour, embedded key, `.sig`, SBOM, provenance. CI builds **and tests** `awslc-backend`, `fips` and `--no-default-features --features fips` (test executables signed with an ephemeral key so the fail-closed integrity test runs). |
 | A1-21 | Out-of-date approval statements | Documented | Ed25519 is approved (FIPS 186-5); ML-KEM/ML-DSA/SLH-DSA are approved algorithms (FIPS 203/204/205) whose implementations here are not validated and are not offered in approved mode. |
 | A1-22 | Operation-state functions undocumented | Documented | [fips-140-3-certification.md §2.4](fips-140-3-certification.md#24-operation-state-service). |
 | A1-23 | PIN policy / default PIN docs wrong; unlimited SO guessing via `C_InitToken` | Remediated | Docs describe the real policy (no default PIN); `C_InitToken` verification subject to SO lockout. |
 | A1-24 | Approved-mode activation advisory, no status output | Partially remediated | The `fips` build is the approved-only mode and cannot be overridden at run time. **Open:** mode/status output through `C_GetInfo`. |
-| A1-25 | EC domain parameters not validated | Open (verify) | Must reject anything other than P-256/P-384 with `CKR_CURVE_NOT_SUPPORTED` / `CKR_DOMAIN_PARAMS_INVALID`. |
-| A1-26 | "RSA blinding" claim vs RUSTSEC-2023-0071 | Documented | Claim removed; the Marvin side channel on the RustCrypto backend is **not mitigated** (see `deny.toml`). |
+| A1-25 | EC domain parameters not validated | Partially remediated | Key generation accepts only P-256/P-384 (named-curve OIDs) and rejects others with `CKR_CURVE_NOT_SUPPORTED`. **Open (wave-2 ABI):** an absent `CKA_EC_PARAMS` still defaults to P-256 instead of `CKR_TEMPLATE_INCOMPLETE`; `C_CreateObject` / `C_UnwrapKey` must validate `CKA_EC_PARAMS` too. |
+| A1-26 | "RSA blinding" claim vs RUSTSEC-2023-0071 | Documented | Blinding is now applied to every RustCrypto RSA private-key operation and there is no PKCS#1 v1.5 decryption service, but the bignum code is not constant time: the Marvin side channel on the RustCrypto backend is **not** claimed as mitigated (see `deny.toml`, time-boxed exception). `fips` builds use AWS-LC. |
 | A1-27 | Physical / non-invasive N/A wording | Documented | SP 800-140B wording used. |
 | A1-28 | Integrity check reads the file on disk | Documented | Accepted at Level 1; operator guidance added. |
 | A1-29 | POST/PBKDF2 performance | Open (observation) | Fixed-key CASTs removed key generation from POST. |
-| A1-30 | Key-type / mechanism consistency | Open (verify) | `*Init` should return `CKR_KEY_TYPE_INCONSISTENT` for wrong key types. |
-| A1-31 | Audit log is not a security function | Documented | Unkeyed hash chain; not the IG 2.4.C indicator. |
+| A1-30 | Key-type / mechanism consistency | Open (wave-2 ABI) | `*Init` should return `CKR_KEY_TYPE_INCONSISTENT` for wrong key types. |
+| A1-31 | Audit log is not a security function | Documented | Keyed HMAC chain + anchor since the H3-10 fix; still not a security function and not the IG 2.4.C indicator. |
 | A1-32 | Stale line citations | Documented | FIPS documents cite files/functions only. |
 
 ## Pre-release post-quantum dependencies (A3-07)

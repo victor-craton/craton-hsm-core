@@ -5,6 +5,11 @@ edition = "2021"
 description = "Craton HSM network daemon — gRPC over TLS for remote HSM access"
 license = "Apache-2.0"
 repository = "https://github.com/craton-co/craton-hsm-core"
+# Same MSRV as the craton-hsm library it links (A3-08).
+rust-version = "1.89"
+# Distributed only as release binaries / container image, never on crates.io
+# (also required by cargo-deny `wildcards = "deny"` for the path dependency).
+publish = false
 
 [[bin]]
 name = "craton-hsm-daemon"
@@ -22,7 +27,8 @@ prost = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging"] }
 rustls-pemfile = "2"
-tracing = "0.1"
+# Compile-time log level caps belong to the binary, not the library (A3-26).
+tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
 tracing-subscriber = { version = "0.3", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"

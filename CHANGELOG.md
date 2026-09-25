@@ -6,26 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-Remediation of the 2026-09-24 security / certification-readiness audit
-(reports H1–H6, A1–A3). Entries below cover build, CI, supply chain and
-documentation; code changes are listed by their respective areas.
+Remediation of the 2026-09-24 security and certification-readiness audit
+(reports H1–H6, A1–A3; see [docs/audit/2026-09-24/README.md](docs/audit/2026-09-24/README.md)).
+The status of every finding, with the fixing commits and the items that are
+still open, is tracked in
+[docs/audit/2026-09-24/REMEDIATION.md](docs/audit/2026-09-24/REMEDIATION.md).
+The version is not bumped yet.
 
-### Build, CI and supply chain
+### Security fixes — Critical / High
+- **`C_InitToken` no longer destroys data before authenticating (H1-01, H3-01, A1-07, A2-02, H3-14):** refuses with `CKR_SESSION_EXISTS` while sessions are open, verifies the SO PIN first under the SO lockout (InitToken guesses count), then wipes only that slot's objects and crypto-shreds its storage key.
+- **Sensitive key material (H1-02, H3-02, A1-08, A2-04):** `CKA_VALUE` and private-key components are never returned for sensitive **or** non-extractable keys; backups skip non-extractable keys by default.
+- **Role separation and logout (H1-05, H1-06, H3-06, H3-08, A2-03, A1-12):** only `CKU_USER` sessions may use keys or see private objects; closing the last session logs the token out; `C_Login` is atomic and rolled back on failure.
+- **Slot isolation (H1-13, H3-03, A2-15):** objects are bound to their slot; lookups, finds and destruction are slot-scoped; each slot has its own PINs, lockout counters and storage key.
+- **Persistent, encrypted token state (H3-04, H3-15, H1-34, A1-17, A2-17):** `persist_objects = true` persists the token record, PIN verifiers, lockout counters and token objects in redb: per-slot random DEK wrapped under PBKDF2-derived SO and User PIN keys, AES-256-GCM records with AAD, HMAC-authenticated manifest, exclusive process lock, crypto-shredding on re-initialisation. `HsmCore::open` opens it.
+- **Tamper-evident audit log (H3-10, H3-11, H3-22, H4-16):** keyed HMAC-SHA256 chain with a separate key file and a MAC-protected anchor (truncation/deletion detected), bounded queue with group-commit `fsync`, synchronous recording of authentication and key-management events, optional fail-closed mode, refusal to start on a broken chain, correct verification across rotation.
+- **Configuration planting (H3-12, H3-13, H5-11):** configuration is never read from the working directory (`$CRATON_HSM_CONFIG` or `/etc/craton-hsm/craton_hsm.toml`); files must be owned by the user or root and not be group/world-writable; symlink-safe, mode-0600/0700 file handling for store, audit and lock files.
+- **gRPC daemon (H4-01..H4-28, A3-02):** per-client sessions and login state bound to the mTLS identity; administrator certificates required for InitToken, InitPin and SO login; mutual TLS mandatory by default; allow-listed key templates (no caller-supplied key material or provenance); bounded connections, handshakes, messages, sessions and objects; mechanism bound to the key type and algorithm policy; SIGTERM drain with audit flush; health endpoint; strict configuration parsing.
+- **Committed credentials removed (A3-01, H4-05):** the public test endpoint and its PINs were removed from `kreya/` and the docs, certificate validation re-enabled, secret scanning added. Rotating the PINs and taking the endpoint down are owner actions.
+- **AES-GCM (H2-01, H2-02, A1-15, A2-09):** `CK_GCM_PARAMS` (IV, AAD, tag length) honoured; in approved mode the module generates the IV from the DRBG; per-key invocation limit and rejection of recently seen (key, IV) pairs.
+- **RSA (H2-03, A1-26, A3-05):** every RustCrypto RSA private-key operation is blinded and there is no PKCS#1 v1.5 decryption service. The Marvin timing side channel (RUSTSEC-2023-0071) is **not** fully mitigated — the advisory exception in `deny.toml` is now honest and time-boxed; `fips` builds use AWS-LC.
+- **pkcs11-spy (H6-01..H6-17):** the spy returns its own v2.40/v3.0 function tables (so it actually logs), ignores `PKCS11_SPY_*` in secure-execution contexts, opens logs safely, never panics across FFI and redacts PINs and data.
+- **Admin CLI (H5-01..H5-24):** fails closed instead of reporting success on a throw-away core, SO authentication plus typed confirmation for destructive commands, prompts only (no PINs in argv), on-disk audit verification, locked replay guard, hardened signing-key tooling; obsolete HMAC scripts that leaked the key via `argv` removed (H5-07, A3-15).
+- **Dependencies (A3-05, A3-06):** `Cargo.lock` updated to clear RUSTSEC-2026-0190 (anyhow), -0204 (crossbeam-epoch), -0258 (h2), -0097 (rand), -0285 (rustls), -0098/-0099/-0104 (rustls-webpki) and the yanked `der` 0.8.0 / `spin` 0.9.8; `fuzz/Cargo.lock` re-synchronised.
+
+### PKCS#11 conformance
+- Mechanism semantics (H1-16, H2-06, H2-07, H2-13, H2-14, A1-13, A1-14, A1-16, A2-07..A2-13): raw `r‖s` ECDSA with the mechanism's hash, unpadded `CKM_AES_CBC` vs `CKM_AES_CBC_PAD`, real RFC 5649 KWP, `CK_ECDH1_DERIVE_PARAMS` with symmetric SP 800-56C KDFs (`CKD_NULL` refused in approved mode), `CKM_RSA_PKCS` sign/verify over DigestInfo, `CK_RSA_PKCS_OAEP_PARAMS` required; generic `CKM_RSA_PKCS_PSS` and the composite ML-DSA/ECDSA mechanism are no longer advertised (39 mechanisms).
+- Session objects are destroyed with their session (H1-18, A2-14); cryptographically random, collision-checked handles (H3-19, H1-29).
+- Pending in wave 2 (see REMEDIATION.md): `unsafe extern "C"` exports (H1-22), v3.0 `C_GetInterfaceList`/`C_GetInterface` and correct version fields (A2-01, A3-16), remaining authorization checks in C_WrapKey / C_SetOperationState / C_DestroyObject / C_CopyObject / key creation (H1-03, H1-04, H1-07, H1-08, H1-10), key-type consistency (A1-30).
+
+### FIPS 140-3 readiness
+- **DRBG (A1-01, A1-02, H2-15, A2-16):** `C_GenerateRandom` and all module randomness come from a process-wide, fork-aware SP 800-90A HMAC_DRBG (AWS-LC's DRBG with the AWS-LC backend) with RCT/APT entropy health tests and a CAVP known-answer test; failures latch the error state.
+- **Self-tests (A1-04, H2-08, A1-29):** fixed-vector CASTs for every approved algorithm, run through the selected backend; SHA-256/512 and Ed25519 before the integrity test; latched error state (A1-09).
+- **Integrity test (A1-05, H2-16, H2-17, A3-04):** fails closed in `fips` builds (missing `.sig`, placeholder key, unresolvable module path); releases embed the public key and ship an Ed25519 `.sig`.
+- **Backend (H2-05, A1-03, H2-04):** `fips` implies `awslc-backend` and the POST refuses a non-validated backend; the AWS-LC backend reaches parity with the RustCrypto policy layer (A1-03 default-backend selection pending wave 2).
+- **Zeroization and key hygiene (A1-10, H2-09, H2-10, H2-18):** zeroize features in the RustCrypto dependencies, decrypted/unwrapped secrets returned as `Zeroizing`, RSA key cache evicted on destroy and cleared on `C_Finalize`/`C_InitToken`, reference-counted `mlock`, keys/PIN verifiers/storage keys wiped at `C_Finalize`.
+- Draft Security Policy rewritten against the code (A1-05, A1-06, A1-11, A1-18, A1-19, A1-24); gap analysis tracks every A1 finding.
+
+### Supply chain and release
 - **Release pipeline gated and complete (A3-03):** tag must match `Cargo.toml` and CHANGELOG; the full CI suite and the security audit run on the tagged commit before anything is built; all shipped binaries (library, admin CLI, daemon, pkcs11-spy) are built with `--locked`; crates.io publishing uses trusted publishing (OIDC) from a protected environment instead of a long-lived token.
-- **Integrity self-test in force for releases (A3-04, A1-05):** release builds embed `CRATON_HSM_INTEGRITY_PUBLIC_KEY`, sign every library with Ed25519 in a protected environment (`.sig` shipped next to the library), and a load/tamper smoke test proves the check runs. New Linux `-fips` flavour built with `fips,awslc-backend`.
+- **Integrity self-test in force for releases (A3-04, A1-05):** release builds embed `CRATON_HSM_INTEGRITY_PUBLIC_KEY`, sign every library with Ed25519 in a protected environment (`.sig` shipped next to the library), and a load/tamper smoke test proves the check runs. New Linux `-fips` flavour.
 - **Release artefacts (A3-11, A3-12):** deterministic tarballs, `SHA256SUMS`, cosign keyless bundles (`*.sigstore.json`), SLSA build provenance, CycloneDX SBOMs, `THIRD-PARTY-LICENSES.txt`, `LICENSE` and `NOTICE` in every tarball.
-- **Dependency policy (A3-05, A3-06):** `deny.toml` is the single source of advisory suppressions, each with an honest reason and an expiry enforced by CI; the false "raw RSA decryption not exposed" justification for RUSTSEC-2023-0071 was removed (the risk is **not** mitigated); stale suppressions for already-patched advisories were dropped; `cargo deny` now checks advisories, bans (duplicates, wildcards), licences and sources for the whole workspace, and runs with `cargo audit` on every pull request.
-- **GitHub Actions hardening (A3-10):** `permissions: contents: read` by default in every workflow, all third-party actions pinned by commit SHA (one previously pinned SHA did not exist), job-scoped CLA permissions, Pages deployment moved to a push-only workflow, secret scanning.
-- **Toolchain (A3-08):** toolchain pinned to 1.94.1 in `rust-toolchain.toml`; `rust-version` corrected from 1.75 to the real MSRV 1.89 and checked by an MSRV job; `-A clippy::incompatible_msrv` and `-A clippy::not_unsafe_ptr_arg_deref` removed from CI; test runners pinned to Ubuntu 24.04, Windows Server 2025 and macOS 15 (tested OEs, A1-19).
-- **CI coverage:** `fips` and `awslc-backend` feature builds, doc-tests, a check that every `tests/*.rs` file is scheduled, Miri on more modules (A3-14), a 60-second smoke run of all 12 fuzz targets (A3-13), Helm lint/template.
-- **Fuzzing (A3-13):** the harness now resolves (`craton-hsm` dependency), `fuzz/Cargo.lock` regenerated, and the authenticated targets provision the token with policy-compliant PINs so logged-in paths are actually fuzzed.
-- **Packaging (A3-01, A3-23):** the crates.io package contains only the library sources, `LICENSE`, `NOTICE` and `README.md`; `.claude/settings.local.json` is no longer tracked; `.gitignore` excludes key material and CLI state files.
-- Dependabot covers `fuzz/`, Docker and npm; PQC crates receive security and release-candidate updates (A3-07).
+- **Dependency policy (A3-05, A3-06, A3-07):** `deny.toml` is the single source of advisory suppressions, each with an honest reason and an expiry enforced by CI; `cargo deny` checks advisories, bans (duplicates, wildcards), licences and sources for the whole workspace and runs with `cargo audit` on every pull request; pre-release PQC crates pinned exactly; unused `cipher`/`secrecy` removed (A3-26).
+- **Packaging (A3-01, A3-23):** the crates.io package contains only the library sources (including the POST known-answer vectors), `Cargo.lock`, `LICENSE`, `NOTICE` and `README.md`; the admin CLI and daemon are `publish = false`; `.gitignore` excludes key material, CLI state, the redb store and audit sidecar files (`.key`, `.anchor`, `.lock`, rotations).
+- **GitHub Actions hardening (A3-10):** `permissions: contents: read` by default, all third-party actions pinned by commit SHA, job-scoped CLA permissions, push-only Pages deployment, secret scanning.
+- **Toolchain (A3-08):** toolchain pinned to 1.94.1; `rust-version` 1.89 for the library, admin CLI and daemon (1.81 for pkcs11-spy) and checked by an MSRV job; Docker builder on the pinned toolchain.
+
+### Tooling and CI
+- CI builds **and tests** the `awslc-backend`, `fips` and `--no-default-features --features fips` configurations (fips test executables are signed with an ephemeral key so the fail-closed integrity test and the approved-mode ABI tests run) (A1-20, H2-05).
+- CI builds the container image (`deploy/Dockerfile`), checks the non-root user, renders the Helm chart and feeds the rendered `craton_hsm.toml` to the daemon inside the image; `helm lint --strict`; insecure chart configurations must refuse to render (A3-09, H4-13, H4-14, H4-23).
+- The spy's end-to-end test runs against the real cdylib in CI (H6-17); every `tests/*.rs` file must be scheduled; clippy on all targets without the `not_unsafe_ptr_arg_deref` / `incompatible_msrv` allowances (A3-14, A2-26); Miri on more modules; 60-second smoke run of all 12 fuzz targets with provisioned tokens (A3-13, A2-24).
+- Tracing level caps moved from the library to the daemon and admin binaries (A3-26).
+- Deployment: buildable digest-pinned Dockerfile with verified protoc, root `.dockerignore`, sample configuration, plaintext health port, single rendered configuration, hardened Helm chart (`Recreate`, image digest) (A3-09, H4-13, H4-14, H4-23, H4-24).
 
 ### Documentation
-- Draft FIPS 140-3 Security Policy rewritten against the code: one module-boundary definition (daemon and admin CLI are outside), Ed25519 integrity scheme, complete SSP table, tested operational environments, approved-service indicator status, self-test and error-state descriptions (A1-05, A1-06, A1-11, A1-18, A1-19, A1-24).
-- Corrected claims across README and docs: PKCS#11 v2.40 function set plus v3.0 interface discovery (not "v3.0-compliant"), 12 fuzz targets, no stale `unsafe`/line counts, Helm chart path and defaults, NOTICE licence attributions (dalek crates are BSD-3-Clause, prost is Apache-2.0; the in-tree AWS-LC backend is Apache-2.0).
-- The generated `docs/fips-140-3-certification.pdf` was removed (stale, no provenance).
+- Configuration reference rewritten: configuration sources, validation rules, every `[daemon]` key, persistent-storage set-up and key hierarchy, keyed audit log (H3-13, A1-17, H4).
+- Operator runbook: admin CLI prerequisites (persistent store, daemon stopped), backup/restore, keyed audit verification, daemon start-up, mTLS/admin certificates, systemd, Kubernetes; install guide: `protoc` is required for any workspace build, fips build and signing, container paths/UID, Helm values.
+- API reference: persistent `HsmCore::open` and lifecycle services, gRPC daemon RPC semantics (InitPin, per-client login); pre-release PQC crate risk statement (A3-07, H2-20).
+- Corrected claims across README and docs: PKCS#11 v2.40 function set plus v3.0 interface discovery, 12 fuzz targets, no stale `unsafe`/line counts, Helm chart path and defaults, NOTICE licence attributions, lockout default 5, keyed audit chain; stale `docs/fips-140-3-certification.pdf` removed (A3-22).
+- Audit status table: [docs/audit/2026-09-24/REMEDIATION.md](docs/audit/2026-09-24/REMEDIATION.md).
+
+### Changed (behaviour visible to users)
+- Default `max_failed_logins` is 5; the audit `log_level = "none"` value was removed (disable auditing with `enabled = false` plus `allow_disabled_insecure = true`).
+- ECDSA signatures are raw `r‖s` (not DER); `CKM_AES_CBC` no longer pads; `CKM_RSA_PKCS_OAEP` requires parameters; `CKM_HYBRID_ML_DSA_ECDSA` was removed.
+- The daemon requires mutual TLS unless `allow_no_client_auth = true`, rejects unknown configuration keys, and binds sessions and login state to the client certificate.
+- Token objects of a persistent slot become visible after the first login on that slot after start-up.
+- Backup files use format v2 (authenticated header); v1 backups are rejected.
 
 ### Corrections to earlier entries
 - The HMAC-SHA256 `.hmac` integrity test described under 0.9.1 and 0.7.x was later replaced by an Ed25519 signature over the module file (`.sig` sidecar); that change was not recorded at the time. The `compute-integrity-hmac` tools have been removed.

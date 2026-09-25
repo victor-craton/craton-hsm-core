@@ -99,9 +99,10 @@ java.util.Arrays.fill(pin, '\0');
 ## Using the gRPC Daemon
 
 ```bash
-# Start the daemon
-cd craton-hsm-daemon
-cargo run --release -- --config craton_hsm.toml
+# Start the daemon: the config file is the first positional argument (there
+# is no --config flag). Start from craton-hsm-daemon/craton_hsm.example.toml;
+# mutual TLS is required unless explicitly disabled.
+cargo run --release -p craton-hsm-daemon -- /etc/craton-hsm/craton_hsm.toml
 
 # Key generation and other token operations go through PKCS#11
 # (C_GenerateKey / C_GenerateKeyPair) or the daemon's gRPC API.

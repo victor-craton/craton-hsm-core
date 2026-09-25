@@ -164,6 +164,12 @@ jobs:
       - name: Run doc-tests
         run: cargo test --locked --doc -p craton-hsm
 
+      - name: Build the craton-hsm cdylib for the spy integration test
+        # tools/pkcs11-spy/tests/spy_integration.rs wraps the real
+        # target/debug/libcraton_hsm.{so,dylib} (or craton_hsm.dll) and only
+        # prints SKIPPED when it has not been built (H6-17).
+        run: cargo build --locked -p craton-hsm --lib
+
       - name: Run workspace member tests
         run: >-
           cargo test --locked
@@ -173,19 +179,29 @@ jobs:
           --
           --test-threads=1
 
-  # ── Feature matrix: the FIPS / AWS-LC configurations must at least build ──
-  # (A1-20: CI previously never compiled `fips` or `awslc-backend`.)
+  # ── Feature matrix: the FIPS / AWS-LC configurations must build AND pass ──
+  # (A1-20: CI previously never compiled `fips` or `awslc-backend`; H2-05 /
+  # crypto handoff: the AWS-LC backend has its own CASTs and a cross-backend
+  # differential test that only run with the feature enabled.)
+  # `fips` implies `awslc-backend`. The recommended FIPS build is
+  # `--no-default-features --features fips` (RustCrypto backend not compiled).
   features:
-    name: Feature build (${{ matrix.features }})
+    name: Features (${{ matrix.name }})
     needs: fmt-check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        features:
-          - "fips"
-          - "awslc-backend"
-          - "fips,awslc-backend"
+        include:
+          - name: awslc-backend
+            flags: --features awslc-backend
+            sign: false
+          - name: fips
+            flags: --features fips
+            sign: true
+          - name: fips only (release flavour)
+            flags: --no-default-features --features fips
+            sign: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -199,11 +215,51 @@ jobs:
       - name: Cache cargo registry & build
         uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
-          key: features-${{ matrix.features }}
+          key: features-${{ matrix.name }}
 
-      - name: Build library and tests with --features ${{ matrix.features }}
-        # aws-lc-fips-sys needs cmake, Go and clang, which ubuntu-latest provides.
-        run: cargo build --locked -p craton-hsm --features "${{ matrix.features }}" --all-targets
+      - name: Ephemeral integrity key (fips builds fail closed without a valid .sig)
+        # `fips` builds refuse to start with the placeholder key or without a
+        # `.sig` sidecar next to the module (A1-05). The test executables are
+        # the "module" here, so they are signed with a throw-away key that is
+        # embedded at build time. Release builds use the real key (release.yml).
+        if: matrix.sign
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm Ed25519 -out "$RUNNER_TEMP/ci-integrity.pem"
+          pub=$(openssl pkey -in "$RUNNER_TEMP/ci-integrity.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          echo "CRATON_HSM_INTEGRITY_PUBLIC_KEY=$pub" >> "$GITHUB_ENV"
+
+      - name: Build library, tests, benches and examples
+        # aws-lc-fips-sys needs cmake, Go and a C compiler (preinstalled on
+        # the ubuntu-24.04 runner image).
+        run: cargo build --locked -p craton-hsm ${{ matrix.flags }} --all-targets
+
+      - name: Build (and for fips, sign) the test executables
+        run: |
+          set -euo pipefail
+          cargo test --locked -p craton-hsm ${{ matrix.flags }} \
+            --lib --test fips_approved_mode --test crypto_vectors \
+            --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' \
+            > "$RUNNER_TEMP/test-executables.txt"
+          cat "$RUNNER_TEMP/test-executables.txt"
+          if [ "${{ matrix.sign }}" = "true" ]; then
+            while read -r exe; do
+              bash tools/sign-integrity.sh "$exe" "$RUNNER_TEMP/ci-integrity.pem"
+            done < "$RUNNER_TEMP/test-executables.txt"
+          fi
+
+      - name: Library unit tests (POST/CASTs, integrity, DRBG, AWS-LC differential tests)
+        run: cargo test --locked -p craton-hsm ${{ matrix.flags }} --lib -- --test-threads=1
+
+      - name: Approved-mode ABI tests (serial)
+        run: >-
+          cargo test --locked -p craton-hsm ${{ matrix.flags }}
+          --test fips_approved_mode
+          --test crypto_vectors
+          --
+          --test-threads=1
 
   # ── MSRV: the declared rust-version must actually build (A3-08) ──
   msrv:
@@ -380,10 +436,11 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
-      - name: helm lint
+      - name: helm lint (strict)
         # The chart refuses to render without mTLS configuration (by design),
-        # so lint/template with a client-CA secret name set.
-        run: helm lint deploy/helm/craton-hsm --set tls.clientCaSecretName=ci-client-ca
+        # so lint/template with a client-CA secret name set. `--strict` turns
+        # lint warnings into failures (A3-09, H4-23).
+        run: helm lint --strict deploy/helm/craton-hsm --set tls.clientCaSecretName=ci-client-ca
 
       - name: helm template
         run: helm template ci deploy/helm/craton-hsm --set tls.clientCaSecretName=ci-client-ca > /dev/null
@@ -396,6 +453,86 @@ jobs:
           fi
           if helm template ci deploy/helm/craton-hsm --set tls.enabled=false --set tls.clientCaSecretName=x > /dev/null 2>&1; then
             echo "::error::chart rendered with TLS disabled and no acknowledgement"; exit 1
+          fi
+
+  # ── Container image: deploy/Dockerfile must build, and the daemon in it
+  # must accept the configuration rendered by the Helm chart (A3-09, H4-23) ──
+  container:
+    name: Container image & rendered Helm config
+    needs: fmt-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: docker build (BuildKit, repository root as context)
+        env:
+          DOCKER_BUILDKIT: "1"
+        # The Dockerfile runs the crypto self-tests (KATs) during the build.
+        run: docker build --pull -f deploy/Dockerfile -t craton-hsm:ci .
+
+      - name: Image runs as the distroless non-root user and ships both binaries
+        run: |
+          set -euo pipefail
+          user=$(docker image inspect craton-hsm:ci --format '{{.Config.User}}')
+          if [ "$user" != "65532:65532" ]; then
+            echo "::error file=deploy/Dockerfile::image user is '$user', expected 65532:65532"; exit 1
+          fi
+          docker run --rm --entrypoint /usr/local/bin/craton-hsm-admin craton-hsm:ci --version
+          docker run --rm --entrypoint /usr/local/bin/craton-hsm-daemon craton-hsm:ci --help >/dev/null 2>&1 || true
+
+      - name: Render the chart's craton_hsm.toml
+        run: |
+          set -euo pipefail
+          helm template ci deploy/helm/craton-hsm \
+            --set tls.clientCaSecretName=ci-client-ca \
+            --set persistence.enabled=true \
+            --show-only templates/configmap.yaml > "$RUNNER_TEMP/configmap.yaml"
+          python3 - "$RUNNER_TEMP/configmap.yaml" "$RUNNER_TEMP/craton_hsm.toml" <<'PY'
+          import sys, tomllib
+          lines = open(sys.argv[1]).read().splitlines()
+          start = next(i for i, l in enumerate(lines) if l.strip() == "craton_hsm.toml: |")
+          indent = None
+          out = []
+          for line in lines[start + 1:]:
+              if not line.strip():
+                  out.append("")
+                  continue
+              cur = len(line) - len(line.lstrip(" "))
+              if indent is None:
+                  indent = cur
+              if cur < indent:
+                  break
+              out.append(line[indent:])
+          text = "\n".join(out).rstrip() + "\n"
+          tomllib.loads(text)  # must at least be valid TOML
+          open(sys.argv[2], "w").write(text)
+          PY
+          cat "$RUNNER_TEMP/craton_hsm.toml"
+
+      - name: Daemon accepts the rendered config (strict parse + validation + POST)
+        # The daemon parses the file strictly (unknown keys are fatal) and
+        # validates it before running the self-tests; reaching "POST
+        # self-tests passed" proves the chart and the daemon agree. It then
+        # stops because the TLS secrets are not mounted, which is expected.
+        run: |
+          set -uo pipefail
+          # The core refuses config files not owned by the service user or root.
+          sudo chown root:root "$RUNNER_TEMP/craton_hsm.toml"
+          sudo chmod 0444 "$RUNNER_TEMP/craton_hsm.toml"
+          timeout 120 docker run --rm \
+            -v "$RUNNER_TEMP/craton_hsm.toml:/etc/craton-hsm/craton_hsm.toml:ro" \
+            craton-hsm:ci > "$RUNNER_TEMP/daemon.log" 2>&1
+          echo "daemon exit status: $?"
+          cat "$RUNNER_TEMP/daemon.log"
+          if ! grep -q "POST self-tests passed" "$RUNNER_TEMP/daemon.log"; then
+            echo "::error file=deploy/helm/craton-hsm/templates/configmap.yaml::rendered configuration rejected by craton-hsm-daemon"
+            exit 1
           fi
 
   # ── Benchmarks: main-only, compare Craton HSM vs SoftHSMv2 ──

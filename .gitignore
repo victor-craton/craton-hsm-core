@@ -12,7 +12,17 @@ rusthsm_store
 rusthsm_audit.jsonl
 lockout_state.json
 .craton_hsm_replay_guard
+.craton_hsm_replay_guard.*
 *.rhbk
+# Runtime state written next to a configured store / audit log (H3, H5-23):
+# redb store file, keyed audit-chain sidecars (<log>.anchor, <log>.key),
+# the single-writer lock (<log>.lock) and rotated generations (<log>.1 ...),
+# whatever name the audit log is given in the config.
+craton_hsm.redb
+*.anchor
+*.jsonl.lock
+*.jsonl.[0-9]
+*.jsonl.[0-9][0-9]
 
 # Key material and signing artefacts — never commit these (H5-23).
 # Integrity/release signing keys, TLS keys/certs generated for local testing,
@@ -24,6 +34,8 @@ lockout_state.json
 *.pfx
 *-signing-key*
 *.sig
+# ...except the known-answer-test vectors compiled into the self-tests.
+!/src/crypto/kat/*.sig
 *.hmac
 # Deliberate, non-secret test fixtures may be force-added (git add -f) under
 # tests/fixtures/ with a README stating they are test-only material.

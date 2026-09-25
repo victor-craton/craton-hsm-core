@@ -35,13 +35,13 @@ embedded and the `.sig` sidecar included. Verify it as described in
 ```bash
 # Build dependencies for aws-lc-fips-sys: CMake, Clang/LLVM, Go
 export CRATON_HSM_INTEGRITY_PUBLIC_KEY=<64 hex chars>   # your Ed25519 public key
-cargo build --release --locked --features fips,awslc-backend --lib
+cargo build --release --locked -p craton-hsm --no-default-features --features fips --lib
 ./tools/sign-integrity.sh target/release/libcraton_hsm.so   # writes libcraton_hsm.sig
 ```
 
-- The `fips` feature must always be combined with `awslc-backend`: the
-  self-tests refuse to leave the error state on a backend that is not a
-  validated module.
+- `fips` implies `awslc-backend`; `--no-default-features` additionally keeps
+  the RustCrypto backend out of the build. The self-tests refuse to leave the
+  error state on a backend that is not a validated module.
 - Do **not** set `AWS_LC_SYS_NO_ASM=1` for a build you intend to use in
   approved mode: it builds a different AWS-LC implementation from the
   validated configuration. (It is only a workaround for Windows development
@@ -63,9 +63,11 @@ A `fips` build **ignores `craton_hsm.toml` and `CRATON_HSM_CONFIG` /
 | everything else | the documented defaults ([configuration-reference.md](configuration-reference.md)) |
 
 Consequently token storage, audit log path, PIN policy and session limits
-cannot be changed in a `fips` build; they use the defaults (storage in
-`craton_hsm_store` and audit log `craton_hsm_audit.jsonl`, both relative to
-the process working directory).
+cannot be changed in a `fips` build; they use the defaults: the token is
+**ephemeral** (`persist_objects = false`), and the storage directory
+`craton_hsm_store` and audit log `craton_hsm_audit.jsonl` are relative to the
+process working directory. Run the process from a dedicated, service-owned
+working directory. Audit logging is fail-closed (`audit.fail_closed = true`).
 
 ### Effect of the approved-only policy
 
@@ -152,7 +154,8 @@ reinstall the signed release artefact and investigate the cause (see
 ## 6. Deployment checklist
 
 - [ ] Use the signed `…-fips` release artefact, or build with
-      `--features fips,awslc-backend` and an embedded integrity key.
+      `-p craton-hsm --no-default-features --features fips` and an embedded
+      integrity key, then sign the library.
 - [ ] Verify the release (cosign bundle + `SHA256SUMS`) before installation.
 - [ ] Install the library **and** its `.sig` in an administrator-only directory.
 - [ ] `C_Initialize` returns `CKR_OK` (the integrity test and all CASTs passed).

@@ -25,7 +25,8 @@ cd craton-hsm-core
 # Build the core library
 cargo build --locked
 
-# Build the full workspace (requires protoc)
+# Build the full workspace (requires protoc: the daemon's build script runs
+# tonic-prost-build; set PROTOC=/path/to/protoc if it is not on PATH)
 cargo build --locked --workspace
 ```
 
@@ -36,7 +37,21 @@ cargo build --locked --workspace
 ```bash
 # Full test suite
 cargo test --locked -- --test-threads=1
+
+# Workspace members (build the cdylib first so the pkcs11-spy end-to-end test
+# wraps the real module instead of printing SKIPPED)
+cargo build --locked -p craton-hsm --lib
+cargo test --locked -p craton-hsm-admin -p pkcs11-spy -p craton-hsm-daemon -- --test-threads=1
+
+# AWS-LC backend (needs cmake, Go, clang): CASTs through AWS-LC and the
+# cross-backend differential test
+cargo test --locked -p craton-hsm --features awslc-backend --lib -- --test-threads=1
 ```
+
+`fips` builds fail closed without a signed module, so their tests need an
+embedded integrity key and signed test executables — see the `features` job
+in `.github/workflows/ci.yml` and
+[docs/fips-140-3-certification.md §10.6](docs/fips-140-3-certification.md#106-approved-only-build-procedure).
 
 CI runs every file in `tests/` explicitly (see `.github/workflows/ci.yml`).
 When you add a new integration test file, add it to one of the two lists in

@@ -473,7 +473,7 @@ AWS-LC configuration and must not be used for a claimed OE.
 |---|---|
 | Rust toolchain | as pinned in `rust-toolchain.toml` (1.94.1); MSRV 1.89 |
 | AWS-LC backend | CMake, Clang, Go (for `aws-lc-fips-sys`) |
-| Approved-only build | `cargo build --release --locked --features fips,awslc-backend`, with `CRATON_HSM_INTEGRITY_PUBLIC_KEY` set, followed by signing (§4.1) — exactly what the release workflow's `-fips` flavour does |
+| Approved-only build | `cargo build --release --locked -p craton-hsm --no-default-features --features fips` (the release workflow's `-fips` flavour builds with `craton-hsm/fips,craton-hsm/awslc-backend`), with `CRATON_HSM_INTEGRITY_PUBLIC_KEY` set, followed by signing (§4.1) |
 
 ---
 
@@ -586,7 +586,7 @@ bits (SP 800-131A); AES 128/192/256 bits; EC P-256/P-384.
 |---|---|
 | `C_DestroyObject` | the object's key value (#1–#6, #8) |
 | `C_CloseSession` / `C_CloseAllSessions` | session objects; operation buffers (#19) |
-| `C_Logout` | per-login state; persistence keyring entries for the slot |
+| `C_Logout` | per-login state (the slot's unwrapped DEK deliberately stays in the keyring until `C_Finalize` so that token objects remain loaded) |
 | `C_InitToken` | all objects of the slot, PIN verifiers (#11), DEK (#13, crypto-shredding the persisted records), GCM tracking (#18), RSA parsed-key cache |
 | `C_Finalize` | all volatile SSPs: objects in memory, DRBG state (#16), operation-state key (#21), DEK keyring (#13/#14), RSA parsed-key cache |
 | Error state | services are refused; SSPs are zeroized at `C_Finalize` |
@@ -726,9 +726,18 @@ verification procedure.
 
 ```bash
 export CRATON_HSM_INTEGRITY_PUBLIC_KEY=<64 hex chars>
-cargo build --release --locked --features fips,awslc-backend --lib
+cargo build --release --locked -p craton-hsm --no-default-features --features fips --lib
 ./tools/sign-integrity.sh target/release/libcraton_hsm.so
-cargo test --locked --features fips,awslc-backend -- --test-threads=1
+
+# Tests: in a fips build every test executable is "the module" for the
+# integrity test, so it must be signed too (CI uses a throw-away key; see the
+# `features` job in .github/workflows/ci.yml).
+cargo test --locked -p craton-hsm --no-default-features --features fips \
+  --lib --test fips_approved_mode --no-run --message-format=json \
+  | jq -r 'select(.reason=="compiler-artifact" and .profile.test and .executable!=null) | .executable' \
+  | while read -r exe; do ./tools/sign-integrity.sh "$exe" /path/to/test-key.pem; done
+cargo test --locked -p craton-hsm --no-default-features --features fips \
+  --lib --test fips_approved_mode -- --test-threads=1
 ```
 
 The configuration file is ignored in `fips` builds, so there is no FIPS
@@ -755,16 +764,18 @@ exist; they are not security functions in the FIPS sense:
 |---|---|
 | Constant-time PIN comparison | `subtle::ConstantTimeEq` |
 | Best-effort memory locking and zeroization | see §8.5–8.6 |
-| Hash-chained audit log | unkeyed SHA-256 chain: detects accidental corruption, **not** a capable attacker who can rewrite the file (A1-31) |
+| Hash-chained audit log | keyed HMAC-SHA256 chain with a MAC-protected anchor (H3-10): detects modification, truncation and deletion by a party without the audit key; not a security function in the FIPS sense (A1-31) |
 | Fork detection | the child must call `C_Initialize` again |
 | AES-NI / hardware AES | used when available by the RustCrypto `aes` crate and AWS-LC |
 
 **Known weakness:** RSA private-key operations on the RustCrypto backend
 (`C_Decrypt` with `CKM_RSA_PKCS_OAEP`, all RSA signing) use the `rsa` crate,
 which is affected by the Marvin timing side channel (RUSTSEC-2023-0071) and
-has no fixed release. No blinding-based mitigation is claimed. Use the AWS-LC
-backend for RSA private-key operations where timing attacks are in scope
-(A1-26).
+has no fixed release. Base blinding is applied to every private-key
+operation and there is no PKCS#1 v1.5 decryption service, but the bignum
+arithmetic is not constant time, so no mitigation of the timing side channel
+is claimed. `fips` builds use the AWS-LC backend; use it for RSA private-key
+operations wherever timing attacks are in scope (A1-26, H2-03).
 
 ---
 
@@ -866,15 +877,18 @@ inventory instead of a number in this document.
 
 ## Appendix E: Configuration reference (security-relevant subset)
 
-Default builds read `craton_hsm.toml` from the working directory, or the
-relative path in `CRATON_HSM_CONFIG`; absolute paths and `..` are rejected.
+Default builds read the file named by `CRATON_HSM_CONFIG` or, if unset, the
+system-wide `/etc/craton-hsm/craton_hsm.toml`; they never read the working
+directory (H3-13). The file must be owned by the user or root and not be
+group/world-writable. Storage and audit paths should be absolute,
+service-owned directories (system directories and `..` are rejected).
 `fips` builds ignore configuration files entirely.
 
 ```toml
 [token]
 label = "Craton HSM Token 0"
-storage_path = "craton_hsm_store"   # relative path only
-persist_objects = false             # true = persist token objects (encrypted)
+storage_path = "/var/lib/craton-hsm/store"
+persist_objects = true              # false = ephemeral token (development only)
 max_sessions = 100
 max_rw_sessions = 10
 slot_count = 1
@@ -882,11 +896,11 @@ slot_count = 1
 [security]
 pin_min_length = 8
 pin_max_length = 64
-max_failed_logins = 10
+max_failed_logins = 5
 pbkdf2_iterations = 600000
 
 [algorithms]
-crypto_backend = "rustcrypto"       # or "awslc" (needs the awslc-backend feature)
+crypto_backend = "rustcrypto"       # or "awslc"; `fips` builds always use AWS-LC
 fips_approved_only = false          # advisory policy switch in default builds
 enable_pqc = true
 allow_weak_rsa = false
@@ -894,8 +908,10 @@ allow_sha1_signing = false
 
 [audit]
 enabled = true
-log_path = "craton_hsm_audit.jsonl"
-log_level = "all"
+log_path = "/var/log/craton-hsm/audit.jsonl"
+log_level = "all"                   # all | crypto | auth | admin
+key_path = "/var/lib/craton-hsm/audit.key"   # HMAC key of the keyed chain
+fail_closed = true                  # default in fips builds
 ```
 
 The gRPC daemon has its own configuration file (see

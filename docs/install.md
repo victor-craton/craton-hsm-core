@@ -5,8 +5,8 @@
 | Requirement | Version | Notes |
 |-------------|---------|-------|
 | Rust | pinned in `rust-toolchain.toml` (1.94.1); MSRV 1.89 | install [rustup](https://rustup.rs/); the pinned toolchain is installed automatically |
-| protoc | 3.x+ (CI pins 36.2) | Required only for building the gRPC daemon |
-| CMake, Clang, Go | recent | Required only for the optional `awslc-backend` feature (`aws-lc-fips-sys`). The daemon's TLS stack uses `ring` and does not need them. |
+| protoc (Protocol Buffers compiler) | 3.12+ (CI pins 36.2, the container build 21.12) | Required to build the gRPC daemon, and therefore for any `--workspace` build, check, clippy or test (`craton-hsm-daemon/build.rs` runs `tonic-prost-build`). Put it on `PATH` or set `PROTOC=/path/to/protoc`. Not needed for `cargo build -p craton-hsm`. |
+| CMake, Clang, Go | recent | Required for the `awslc-backend` feature and therefore for `fips` builds (`aws-lc-fips-sys`). The daemon's TLS stack uses `ring` and does not need them. |
 | Git | any | To clone the repository |
 
 ### Platform-specific setup
@@ -48,8 +48,13 @@ software-integrity self-test is skipped (logged) unless you build with
 Prefer the signed release artefacts for production.
 
 ```bash
-# FIPS-mode (approved-only) build — see fips-mode-guide.md
-cargo build --release --locked --features fips,awslc-backend --lib
+# FIPS-mode (approved-only) build — see fips-mode-guide.md. `fips` implies
+# `awslc-backend`; without default features the RustCrypto backend is not
+# compiled in. A fips build fails closed at C_Initialize unless it embeds the
+# integrity public key and finds a valid .sig next to the library.
+CRATON_HSM_INTEGRITY_PUBLIC_KEY=<64 hex chars> \
+  cargo build --release --locked -p craton-hsm --no-default-features --features fips --lib
+./tools/sign-integrity.sh target/release/libcraton_hsm.so /path/to/signing-key.pem
 ```
 
 ### Build artifacts
@@ -59,7 +64,7 @@ cargo build --release --locked --features fips,awslc-backend --lib
 | PKCS#11 library | `target/release/libcraton_hsm.so` | `target/release/craton_hsm.dll` | Load via `dlopen`/`LoadLibrary` |
 | gRPC daemon | `target/release/craton-hsm-daemon` | `target/release/craton-hsm-daemon.exe` | Standalone network server |
 | Admin CLI | `target/release/craton-hsm-admin` | `target/release/craton-hsm-admin.exe` | Token/key/PIN management |
-| Spy wrapper | `target/release/libpkcs11_spy.so` | `target/release/pkcs11_spy.dll` | PKCS#11 call interceptor |
+| Spy wrapper | `target/release/libpkcs11_spy.so` | `target/release/pkcs11_spy.dll` | PKCS#11 v2.40/v3.0 logging interposer (debugging only; macOS: `libpkcs11_spy.dylib`) |
 
 ## Run Tests
 
@@ -67,8 +72,13 @@ cargo build --release --locked --features fips,awslc-backend --lib
 # Full suite (MUST use a single thread: ABI tests share global PKCS#11 state)
 cargo test --locked -- --test-threads=1
 
-# With aws-lc-rs backend
-cargo test --features awslc-backend -- --test-threads=1
+# With the AWS-LC backend (CASTs through AWS-LC + cross-backend differential test)
+cargo test -p craton-hsm --features awslc-backend --lib -- --test-threads=1
+
+# Workspace members (build the cdylib first so the spy's end-to-end test
+# wraps the real module instead of printing SKIPPED)
+cargo build -p craton-hsm --lib
+cargo test -p craton-hsm-admin -p pkcs11-spy -p craton-hsm-daemon -- --test-threads=1
 
 # Individual suites
 cargo test --test crypto_vectors -- --test-threads=1
@@ -96,62 +106,79 @@ cargo bench -- ml_dsa
 
 ## Configuration
 
-Craton HSM reads configuration from `craton_hsm.toml` (or the path in `CRATON_HSM_CONFIG`).
+The library reads `$CRATON_HSM_CONFIG` or, if that is unset, the system-wide
+`/etc/craton-hsm/craton_hsm.toml`; without either it runs with built-in
+defaults (an **ephemeral** token). It never reads `./craton_hsm.toml` from the
+working directory. The file must be owned by you or root and must not be
+group/world-writable.
 
 ```toml
 [token]
 label = "My HSM Token"
-storage_path = "craton_hsm_store"       # redb database directory
+persist_objects = true                        # keep token state across restarts
+storage_path = "/var/lib/craton-hsm/store"    # absolute, service-owned
 max_sessions = 100
 max_rw_sessions = 10
 
 [security]
 pin_min_length = 8
 pin_max_length = 64
-max_failed_logins = 10               # lockout threshold
-pbkdf2_iterations = 600000           # PIN hashing cost
+max_failed_logins = 5                # lockout threshold (default 5)
+pbkdf2_iterations = 600000           # PIN hashing / storage-key derivation cost
 
 [algorithms]
 allow_weak_rsa = false               # block RSA < 2048
 allow_sha1_signing = false           # block SHA-1 in signatures
-enable_pqc = true                    # ML-DSA, ML-KEM, SLH-DSA
+enable_pqc = true                    # ML-DSA, ML-KEM, SLH-DSA (pre-release crates)
 
 [audit]
 enabled = true
-log_path = "craton_hsm_audit.jsonl"
-log_level = "all"                    # "all" | "crypto" | "auth" | "admin" | "none"
-
+log_path = "/var/log/craton-hsm/audit.jsonl"
+log_level = "all"                    # "all" | "crypto" | "auth" | "admin"
 ```
 
-All fields have defaults. The **library** starts with built-in defaults when
-no `craton_hsm.toml` exists; an existing but invalid file is an error. Paths
-must be relative (absolute paths and `..` are rejected). `fips` builds ignore
-the file entirely. See [configuration-reference.md](configuration-reference.md).
+All fields have defaults; an explicitly named but missing or invalid file is
+an error. Absolute paths are recommended (system directories such as `/etc`
+or `/usr` are rejected; `..` is never allowed). `fips` builds ignore the file
+entirely. See [configuration-reference.md](configuration-reference.md),
+including the persistent-storage setup checklist.
 
-The **gRPC daemon** is different: it takes its configuration file path as
-its first argument (default `craton_hsm.toml`), the file must exist, and it
-must contain a `[daemon]` section in addition to the library sections above.
-A missing or invalid daemon configuration is fatal. See the daemon section of
-[configuration-reference.md](configuration-reference.md).
+The **gRPC daemon** takes its configuration file path as its first argument
+(default `craton_hsm.toml` in its working directory), the file must exist,
+and it must contain a `[daemon]` section in addition to the sections above;
+unknown keys are fatal. Mutual TLS is required unless explicitly disabled.
+Start from `craton-hsm-daemon/craton_hsm.example.toml`.
 
 ## Docker
 
 ```bash
-# Build the image (from repository root)
-docker build -t craton_hsm:latest -f deploy/Dockerfile .
+# Build the image (the build context MUST be the repository root, where the
+# .dockerignore lives). The build runs the crypto self-tests.
+DOCKER_BUILDKIT=1 docker build -t craton-hsm:latest -f deploy/Dockerfile .
 
-# Run with your configuration and TLS material (the daemon needs a config
-# file with a [daemon] section; there is no usable built-in default)
+# Run with your configuration and TLS material. The image ships the example
+# configuration at /etc/craton-hsm/craton_hsm.toml (mTLS, ephemeral token);
+# mount your own over it. The config file must be owned by root or UID 65532.
 docker run -p 5696:5696 \
-  -v /path/to/craton_hsm.toml:/etc/craton_hsm/craton_hsm.toml:ro \
-  -v /path/to/tls:/etc/craton_hsm/tls:ro \
-  craton_hsm:latest
+  -v /path/to/craton_hsm.toml:/etc/craton-hsm/craton_hsm.toml:ro \
+  -v /path/to/tls:/etc/craton-hsm-tls:ro \
+  -v /path/to/client-ca:/etc/craton-hsm-client-ca:ro \
+  -v craton-hsm-data:/data \
+  craton-hsm:latest
 
-# Run admin CLI inside the container
-docker exec <container> /usr/local/bin/craton-hsm-admin status
+# Admin CLI (stop the daemon first: the store is single-writer)
+docker run --rm -it --entrypoint /usr/local/bin/craton-hsm-admin \
+  -v /path/to/craton_hsm.toml:/etc/craton-hsm/craton_hsm.toml:ro -v craton-hsm-data:/data \
+  craton-hsm:latest --config /etc/craton-hsm/craton_hsm.toml status
 ```
 
-The image is based on `gcr.io/distroless/cc-debian12:nonroot` — no shell, no package manager, runs as non-root (UID 65534).
+The runtime image is `gcr.io/distroless/cc-debian12:nonroot` (pinned by
+digest): no shell, no package manager, runs as UID/GID 65532, working
+directory `/data` (volume; relative `storage_path`/`log_path` live there).
+The Docker `HEALTHCHECK` queries the plaintext health endpoint on
+`127.0.0.1:5697` (`health_bind`). `SIGTERM` drains connections and flushes
+the audit log. CI builds the image on every pull request and checks that the
+daemon inside it accepts the configuration rendered by the Helm chart.
 
 ## Kubernetes (Helm)
 
@@ -180,29 +207,31 @@ kubectl logs deploy/my-hsm-craton-hsm
 
 ### Helm values
 
-Defaults from `deploy/helm/craton-hsm/values.yaml` (the file is
-authoritative; this table is a summary):
+Main values from `deploy/helm/craton-hsm/values.yaml` (the file and its JSON
+schema are authoritative):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `image.repository` | `craton-hsm` | Container image |
-| `image.tag` | `0.9.1` | Image tag |
+| `image.repository` / `image.tag` / `image.digest` | `craton-hsm` / chart `appVersion` / `""` | Container image; prefer pinning `image.digest` |
 | `daemon.bind` | `0.0.0.0:5696` | gRPC listen address |
-| `daemon.replicas` | `1` | Replica count |
+| `daemon.healthPort` | `5697` | Plaintext `grpc.health.v1` port used by the probes |
+| `daemon.replicas` | `1` | Must stay 1 with persistence (single-writer store) |
+| `daemon.logFormat` / `daemon.logLevel` | `json` / `info` | Daemon logging |
+| `daemon.limits.*` | see values.yaml | Rendered into the `[daemon]` limits (connections, sessions, sizes, timeouts) |
 | `tls.enabled` | `true` | TLS for the gRPC endpoint (disabling it requires `tls.acceptInsecure=true`) |
-| `tls.secretName` | `craton-hsm-tls` | Kubernetes TLS secret (resource names cannot contain `_`) |
-| `tls.clientCaSecretName` | `""` | CA for client certificates (mTLS); disabling mTLS requires `tls.disableMtls=true` |
-| `persistence.enabled` | `true` | PVC for the key store |
-| `persistence.size` | `1Gi` | PVC size |
-| `config.tokenLabel` | `Craton HSM Token` | PKCS#11 token label |
-| `config.enablePqc` | `true` | Enable post-quantum mechanisms |
+| `tls.secretName` | `craton-hsm-tls` | Kubernetes TLS secret |
+| `tls.clientCaSecretName` | `""` | Secret with the client CA (`ca.crt`) for mTLS; **required** unless `tls.disableMtls=true` |
+| `tls.clientCrlSecretName` / `tls.clientCrlKeys` | `""` / `[ca.crl]` | Optional client CRLs |
+| `tls.adminCertSha256` | `[]` | Fingerprints of administrator client certificates |
+| `persistence.enabled` / `persistence.size` | `true` / `1Gi` | PVC for the store and audit log; also renders `persist_objects = true` |
+| `config.*` | see values.yaml | Token label, relative storage/audit paths under `/data`, PIN policy (`maxFailedLogins` 5), `fipsApprovedOnly`, `enablePqc` (`false`) |
+| `audit.acceptNoLogging` | `false` | Acknowledgement required to run without persistent audit storage |
+| `networkPolicy.clientPodLabels` | `craton-hsm-client: "true"` | Pods allowed to connect (not an authentication boundary; mTLS is) |
 
-> **Known deployment issues (audit A3-09, owned by the deployment
-> maintainers):** verify before production use that the image builds, that
-> the configured storage/audit paths are accepted by the configuration
-> validator (it rejects absolute paths), that the security settings you set
-> in the chart are actually loaded by the daemon, and that the readiness
-> probes succeed. See `docs/operator-runbook.md`.
+CI runs `helm lint --strict`, `helm template`, asserts that insecure
+configurations refuse to render, and feeds the rendered `craton_hsm.toml` to
+the daemon in the freshly built image. There is no end-to-end cluster (kind)
+test yet.
 
 ## Using as a PKCS#11 Provider
 
@@ -436,14 +465,14 @@ activate = 1
 module = /usr/lib/x86_64-linux-gnu/ossl-modules/pkcs11.so
 pkcs11-module-path = /path/to/libcraton_hsm.so
 # PIN read from a file readable only by the service account
-pkcs11-module-token-pin = file:/etc/craton_hsm/token.pin
+pkcs11-module-token-pin = file:/etc/craton-hsm/token.pin
 activate = 1
 ```
 
 ```bash
 # List objects in token via OpenSSL
 OPENSSL_CONF=openssl_pkcs11.cnf openssl storeutl \
-    "pkcs11:token=MyToken?pin-source=file:/etc/craton_hsm/token.pin"
+    "pkcs11:token=MyToken?pin-source=file:/etc/craton-hsm/token.pin"
 
 # Sign with a key from the token
 OPENSSL_CONF=openssl_pkcs11.cnf openssl pkeyutl -sign \
@@ -462,7 +491,7 @@ sudo apt-get install libengine-pkcs11-openssl
 # Sign using the engine
 openssl pkeyutl -engine pkcs11 -sign \
     -keyform engine \
-    -inkey "pkcs11:token=MyToken;object=my-rsa-key?pin-source=file:/etc/craton_hsm/token.pin" \
+    -inkey "pkcs11:token=MyToken;object=my-rsa-key?pin-source=file:/etc/craton-hsm/token.pin" \
     -in data.bin -out sig.bin
 ```
 
@@ -555,5 +584,6 @@ The log file is created with mode `0600`. The spy refuses (and disables logging)
 | `CKR_SESSION_COUNT` | Session limit reached | Close unused sessions; increase `max_sessions` |
 | `CKR_CRYPTOKI_NOT_INITIALIZED` | `C_Initialize` not called | Call `C_Initialize(NULL)` first |
 | `CKR_USER_PIN_NOT_INITIALIZED` / login fails on a new token | Token or User PIN not initialised | `C_InitToken`, then `C_InitPIN` as SO |
-| Daemon fails to start | protoc missing at build time | Install protobuf-compiler |
+| Build of the daemon (or any `--workspace` command) fails in `craton-hsm-daemon/build.rs` | `protoc` missing | Install protobuf-compiler (see Prerequisites) or set `PROTOC` |
+| Daemon exits at start-up with a config error | unknown key, missing `tls_client_ca`, insecure file permissions | Fix the reported key; see configuration-reference.md |
 | Daemon TLS error | Invalid cert/key path | Check paths in `[daemon]` config |

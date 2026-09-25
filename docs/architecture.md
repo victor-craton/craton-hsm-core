@@ -100,18 +100,18 @@ craton-hsm/
 │   ├── config/
 │   │   └── config.rs          TOML configuration with defaults
 │   └── audit/
-│       └── log.rs             Append-only log with chained SHA-256
+│       └── log.rs             Append-only log, keyed HMAC-SHA256 chain + anchor
 ├── craton-hsm-daemon/            gRPC daemon (tonic + rustls)
 ├── tools/
-│   ├── craton-hsm-admin/         Admin CLI (clap)
-│   └── pkcs11-spy/            PKCS#11 interceptor (cdylib)
+│   ├── craton-hsm-admin/         Admin CLI (clap; opens the persistent store, daemon stopped)
+│   └── pkcs11-spy/            PKCS#11 v2.40/v3.0 logging interposer (debug tool, cdylib)
 ├── deploy/
 │   ├── Dockerfile             Multi-stage distroless build
 │   └── helm/craton-hsm/       Kubernetes Helm chart
 ├── benches/
 │   └── crypto_bench.rs        Criterion benchmarks
 ├── fuzz/                      cargo-fuzz targets (12)
-├── tests/                     Integration tests (35 files, all run in CI)
+├── tests/                     Integration tests (all run in CI; `fmt-check` enforces the list)
 └── docs/                      Documentation
 ```
 
@@ -231,13 +231,22 @@ Mechanism categories (authoritative list: `supported_mechanisms()` in `src/crypt
 
 ### Audit Log (`src/audit/`)
 
-Append-only log with chained SHA-256 hashes (unkeyed — detects accidental or partial modification, not a full rewrite by an attacker with write access):
+Append-only NDJSON log with a **keyed** hash chain and a MAC-protected anchor (H3-10/H3-11):
 
 ```
-Entry[n].previous_hash = SHA-256(Entry[n-1])
+H_n = HMAC-SHA256(K, H_{n-1} || serialize(payload_n))   # payload includes seq = n
+K   = 256-bit key in audit.key_path (default <log_path>.key, 0600)
+<log_path>.anchor = MAC(K, last seq || H_last), replaced atomically after each durable write
 ```
 
-Modifying, deleting, or reordering an entry breaks the chain unless the rest of the file is rewritten too. Events are recorded synchronously before the PKCS#11 function returns (not fire-and-forget).
+Modification, reordering, truncation and deletion are detected when the chain
+is verified at start-up (the module refuses to start on a broken chain unless
+`audit.allow_start_with_broken_chain = true`). Events pass through a bounded
+queue with group-commit `fsync`; authentication and key-management events are
+recorded synchronously (`record_sync`), and `audit.fail_closed` turns write
+failures into `CKR_DEVICE_ERROR`. A `<log_path>.lock` file enforces a single
+writer. Whoever holds both the key and the log can still rewrite history, so
+forward events off-host.
 
 ### Self-tests (`src/crypto/self_test.rs`, `src/crypto/integrity.rs`)
 

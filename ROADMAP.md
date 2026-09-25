@@ -21,7 +21,7 @@ gRPC daemon (tonic + rustls), admin CLI (clap), PKCS#11 spy wrapper (libloading)
 FIPS backend (aws-lc-rs), storage overhaul (sled to redb), memory hardening (mlock/VirtualLock), cargo-fuzz targets, multi-process fork safety, audit documentation, FIPS POST KATs.
 
 ### Phase 7: PKCS#11 Completeness (22 tasks)
-PKCS#11 v2.40 function coverage (the v3.0-only functions were not implemented; v3.0 interface discovery `C_GetInterfaceList`/`C_GetInterface` was added in the 2026-09 remediation), approved-only policy, pairwise consistency tests, software integrity verification, algorithm indicators, intermediate zeroization.
+PKCS#11 v2.40 function coverage (the v3.0-only functions were not implemented; v3.0 interface discovery `C_GetInterfaceList`/`C_GetInterface` is part of the 2026-09 remediation), approved-only policy, pairwise consistency tests, software integrity verification, algorithm indicators, intermediate zeroization.
 
 ### Phase 8: Interop & Benchmarking (7 tasks)
 ABI benchmarks with SoftHSMv2 comparison, Java SunPKCS11 interop tests, OpenSSL 3.x provider interop tests, CI benchmark job.
@@ -44,9 +44,9 @@ Audit log export (JSON, NDJSON, syslog RFC 5424), audit chain verification, admi
 ## Current Status
 
 - **126/130 tasks complete** (2 interop tests deferred, 2 Phase 2/3 items deferred)
-- Test inventory: `cargo test -- --list` (35 integration test files, all run in CI)
+- Test inventory: `cargo test -- --list` (every `tests/*.rs` file is scheduled in CI; the `fmt-check` job enforces it)
 - **v0.9.1** is the current version. The public repository history starts at the open-sourcing commit; there are no tags for earlier versions.
-- A security and FIPS-readiness audit (2026-09-24) found the module **not ready** for FIPS 140-3 submission; remediation status is tracked in [docs/fips-gap-analysis.md](docs/fips-gap-analysis.md).
+- A security and FIPS-readiness audit (2026-09-24) found the module **not ready** for FIPS 140-3 submission; remediation status is tracked per finding in [docs/audit/2026-09-24/REMEDIATION.md](docs/audit/2026-09-24/REMEDIATION.md) and, for FIPS, in [docs/fips-gap-analysis.md](docs/fips-gap-analysis.md).
 
 ## Future Directions
 
