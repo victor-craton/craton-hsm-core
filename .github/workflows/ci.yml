@@ -381,10 +381,22 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: helm lint
-        run: helm lint deploy/helm/craton-hsm
+        # The chart refuses to render without mTLS configuration (by design),
+        # so lint/template with a client-CA secret name set.
+        run: helm lint deploy/helm/craton-hsm --set tls.clientCaSecretName=ci-client-ca
 
       - name: helm template
-        run: helm template ci deploy/helm/craton-hsm > /dev/null
+        run: helm template ci deploy/helm/craton-hsm --set tls.clientCaSecretName=ci-client-ca > /dev/null
+
+      - name: Insecure configurations must refuse to render
+        run: |
+          set -u
+          if helm template ci deploy/helm/craton-hsm > /dev/null 2>&1; then
+            echo "::error::chart rendered with TLS but without mTLS configuration"; exit 1
+          fi
+          if helm template ci deploy/helm/craton-hsm --set tls.enabled=false --set tls.clientCaSecretName=x > /dev/null 2>&1; then
+            echo "::error::chart rendered with TLS disabled and no acknowledgement"; exit 1
+          fi
 
   # ── Benchmarks: main-only, compare Craton HSM vs SoftHSMv2 ──
   benchmarks:

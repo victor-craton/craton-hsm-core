@@ -4,9 +4,9 @@
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| Rust | 1.75+ | 2021 edition; install via [rustup](https://rustup.rs/) |
-| protoc | 3.x+ | Required only for building the gRPC daemon |
-| CMake | 3.x+ | Required by `aws-lc-rs` (rustls TLS dependency) |
+| Rust | pinned in `rust-toolchain.toml` (1.94.1); MSRV 1.89 | install [rustup](https://rustup.rs/); the pinned toolchain is installed automatically |
+| protoc | 3.x+ (CI pins 36.2) | Required only for building the gRPC daemon |
+| CMake, Clang, Go | recent | Required only for the optional `awslc-backend` feature (`aws-lc-fips-sys`). The daemon's TLS stack uses `ring` and does not need them. |
 | Git | any | To clone the repository |
 
 ### Platform-specific setup
@@ -35,10 +35,21 @@ git clone https://github.com/craton-co/craton-hsm-core.git
 cd craton-hsm-core
 
 # Build core PKCS#11 library only
-cargo build --release
+cargo build --release --locked
 
 # Build everything (library + daemon + admin CLI + spy wrapper)
-cargo build --release --workspace
+cargo build --release --locked --workspace
+```
+
+A self-built library does not embed an integrity-verification key, so the
+software-integrity self-test is skipped (logged) unless you build with
+`CRATON_HSM_INTEGRITY_PUBLIC_KEY` set and sign the library — see
+[release-signing.md](release-signing.md#module-self-integrity-signature).
+Prefer the signed release artefacts for production.
+
+```bash
+# FIPS-mode (approved-only) build — see fips-mode-guide.md
+cargo build --release --locked --features fips,awslc-backend --lib
 ```
 
 ### Build artifacts
@@ -53,8 +64,8 @@ cargo build --release --workspace
 ## Run Tests
 
 ```bash
-# Full suite (617+ tests — MUST use single thread due to global PKCS#11 state)
-cargo test -- --test-threads=1
+# Full suite (MUST use a single thread: ABI tests share global PKCS#11 state)
+cargo test --locked -- --test-threads=1
 
 # With aws-lc-rs backend
 cargo test --features awslc-backend -- --test-threads=1
@@ -66,7 +77,7 @@ cargo test --test pkcs11_compliance -- --test-threads=1
 cargo test --test multipart_sign_verify -- --test-threads=1
 cargo test --test multipart_encrypt_decrypt -- --test-threads=1
 cargo test --test supplementary_functions -- --test-threads=1
-cargo test --test drbg -- --test-threads=1
+cargo test --test drbg_tests -- --test-threads=1
 ```
 
 ## Run Benchmarks
@@ -110,13 +121,18 @@ enabled = true
 log_path = "craton_hsm_audit.jsonl"
 log_level = "all"                    # "all" | "crypto" | "auth" | "admin" | "none"
 
-[daemon]
-bind = "127.0.0.1:5696"
-tls_cert = "tls.crt"                # PEM certificate
-tls_key = "tls.key"                  # PEM private key
 ```
 
-All fields have sensible defaults. A missing config file is not an error — Craton HSM starts with built-in defaults.
+All fields have defaults. The **library** starts with built-in defaults when
+no `craton_hsm.toml` exists; an existing but invalid file is an error. Paths
+must be relative (absolute paths and `..` are rejected). `fips` builds ignore
+the file entirely. See [configuration-reference.md](configuration-reference.md).
+
+The **gRPC daemon** is different: it takes its configuration file path as
+its first argument (default `craton_hsm.toml`), the file must exist, and it
+must contain a `[daemon]` section in addition to the library sections above.
+A missing or invalid daemon configuration is fatal. See the daemon section of
+[configuration-reference.md](configuration-reference.md).
 
 ## Docker
 
@@ -124,10 +140,8 @@ All fields have sensible defaults. A missing config file is not an error — Cra
 # Build the image (from repository root)
 docker build -t craton_hsm:latest -f deploy/Dockerfile .
 
-# Run with default config
-docker run -p 5696:5696 craton_hsm:latest
-
-# Run with custom config and TLS
+# Run with your configuration and TLS material (the daemon needs a config
+# file with a [daemon] section; there is no usable built-in default)
 docker run -p 5696:5696 \
   -v /path/to/craton_hsm.toml:/etc/craton_hsm/craton_hsm.toml:ro \
   -v /path/to/tls:/etc/craton_hsm/tls:ro \
@@ -142,42 +156,53 @@ The image is based on `gcr.io/distroless/cc-debian12:nonroot` — no shell, no p
 ## Kubernetes (Helm)
 
 ```bash
-# Install the Helm chart
-helm install my-hsm deploy/helm/craton_hsm/ \
-  --set image.repository=your-registry/craton_hsm \
-  --set image.tag=latest
-
-# With TLS (create the secret first)
-kubectl create secret tls craton_hsm-tls \
+# TLS with client authentication (mTLS) is required by default: create the
+# server certificate secret and a secret holding the client CA first.
+kubectl create secret tls craton-hsm-tls \
   --cert=tls.crt --key=tls.key
-helm install my-hsm deploy/helm/craton_hsm/ \
-  --set tls.enabled=true \
-  --set tls.secretName=craton_hsm-tls
+kubectl create secret generic craton-hsm-client-ca --from-file=ca.crt=client-ca.crt
 
-# With persistent storage
-helm install my-hsm deploy/helm/craton_hsm/ \
-  --set persistence.enabled=true \
-  --set persistence.size=5Gi
+# Install the Helm chart (the chart directory is deploy/helm/craton-hsm)
+helm install my-hsm deploy/helm/craton-hsm/ \
+  --set image.repository=your-registry/craton-hsm \
+  --set image.tag=0.9.1 \
+  --set tls.clientCaSecretName=craton-hsm-client-ca
 
-# Verify
-helm test my-hsm
-kubectl logs deploy/my-hsm-craton_hsm
+# Persistence (a PVC) is enabled by default; to change its size add:
+#   --set persistence.size=5Gi
+# The chart refuses to render if TLS or mTLS is disabled without an explicit
+# acknowledgement (tls.acceptInsecure / tls.disableMtls).
+
+# Verify (the chart ships no `helm test` hooks)
+kubectl get pods -l app.kubernetes.io/instance=my-hsm
+kubectl logs deploy/my-hsm-craton-hsm
 ```
 
 ### Helm values
 
+Defaults from `deploy/helm/craton-hsm/values.yaml` (the file is
+authoritative; this table is a summary):
+
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `image.repository` | `craton_hsm` | Container image |
+| `image.repository` | `craton-hsm` | Container image |
 | `image.tag` | `0.9.1` | Image tag |
 | `daemon.bind` | `0.0.0.0:5696` | gRPC listen address |
 | `daemon.replicas` | `1` | Replica count |
-| `tls.enabled` | `false` | Enable TLS |
-| `tls.secretName` | `craton_hsm-tls` | K8s TLS secret name |
-| `persistence.enabled` | `false` | Enable PVC for key store |
+| `tls.enabled` | `true` | TLS for the gRPC endpoint (disabling it requires `tls.acceptInsecure=true`) |
+| `tls.secretName` | `craton-hsm-tls` | Kubernetes TLS secret (resource names cannot contain `_`) |
+| `tls.clientCaSecretName` | `""` | CA for client certificates (mTLS); disabling mTLS requires `tls.disableMtls=true` |
+| `persistence.enabled` | `true` | PVC for the key store |
 | `persistence.size` | `1Gi` | PVC size |
 | `config.tokenLabel` | `Craton HSM Token` | PKCS#11 token label |
-| `config.enablePqc` | `true` | Enable post-quantum algorithms |
+| `config.enablePqc` | `true` | Enable post-quantum mechanisms |
+
+> **Known deployment issues (audit A3-09, owned by the deployment
+> maintainers):** verify before production use that the image builds, that
+> the configured storage/audit paths are accepted by the configuration
+> validator (it rejects absolute paths), that the security settings you set
+> in the chart are actually loaded by the daemon, and that the readiness
+> probes succeed. See `docs/operator-runbook.md`.
 
 ## Using as a PKCS#11 Provider
 
@@ -199,36 +224,36 @@ library = /path/to/libcraton_hsm.so
 slot = 0
 ```
 
-**keytool** (JDK command-line key management):
+**keytool** (JDK command-line key management). keytool prompts for the token
+PIN when `-storepass` is omitted; do not put PINs on the command line (they
+end up in shell history and `ps` output):
 ```bash
 # List token info
 keytool -providerClass sun.security.pkcs11.SunPKCS11 \
         -providerArg pkcs11.cfg \
         -keystore NONE -storetype PKCS11 \
-        -list -storepass 1234
+        -list
 
 # Generate RSA key pair
 keytool -providerClass sun.security.pkcs11.SunPKCS11 \
         -providerArg pkcs11.cfg \
         -keystore NONE -storetype PKCS11 \
         -genkeypair -alias "my-key" -keyalg RSA -keysize 2048 \
-        -sigalg SHA256withRSA -dname "CN=My App" \
-        -storepass 1234
+        -sigalg SHA256withRSA -dname "CN=My App"
 
 # Generate EC P-256 key pair
 keytool -providerClass sun.security.pkcs11.SunPKCS11 \
         -providerArg pkcs11.cfg \
         -keystore NONE -storetype PKCS11 \
         -genkeypair -alias "ec-key" -keyalg EC -groupname secp256r1 \
-        -sigalg SHA256withECDSA -dname "CN=My EC Key" \
-        -storepass 1234
+        -sigalg SHA256withECDSA -dname "CN=My EC Key"
 
 # Generate CSR (exercises signing through PKCS#11)
 keytool -providerClass sun.security.pkcs11.SunPKCS11 \
         -providerArg pkcs11.cfg \
         -keystore NONE -storetype PKCS11 \
         -certreq -alias "my-key" -sigalg SHA256withRSA \
-        -file request.csr -storepass 1234
+        -file request.csr
 ```
 
 **Programmatic Java access** (KeyStore + Signature API):
@@ -243,7 +268,9 @@ Security.addProvider(provider);
 
 // Open KeyStore
 KeyStore ks = KeyStore.getInstance("PKCS11", provider);
-ks.load(null, "1234".toCharArray());
+char[] pin = System.console().readPassword("Token PIN: ");
+ks.load(null, pin);
+java.util.Arrays.fill(pin, '\0');
 
 // Generate RSA key pair
 KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", provider);
@@ -321,22 +348,26 @@ pkcs11-tool --module $MODULE --list-slots
 # List supported mechanisms
 pkcs11-tool --module $MODULE --list-mechanisms
 
-# Initialize token
-pkcs11-tool --module $MODULE --init-token --label "MyToken" --so-pin 12345678
+# pkcs11-tool prompts for PINs when --pin / --so-pin are omitted. Never pass
+# PINs as arguments. PINs must be 8-64 characters with at least two
+# character classes (default policy).
 
-# Set user PIN
-pkcs11-tool --module $MODULE --init-pin --pin 1234 --so-pin 12345678
+# Initialize token (prompts for the new SO PIN)
+pkcs11-tool --module $MODULE --init-token --label "MyToken"
+
+# Set user PIN (log in as SO; prompts for the SO PIN and the new User PIN)
+pkcs11-tool --module $MODULE --login --login-type so --init-pin
 
 # Generate RSA-2048 key pair
 pkcs11-tool --module $MODULE --keypairgen --key-type RSA:2048 \
-    --label "my-rsa-key" --id 01 --login --pin 1234
+    --label "my-rsa-key" --id 01 --login
 
 # Generate EC P-256 key pair
 pkcs11-tool --module $MODULE --keypairgen --key-type EC:secp256r1 \
-    --label "my-ec-key" --id 02 --login --pin 1234
+    --label "my-ec-key" --id 02 --login
 
 # List all objects
-pkcs11-tool --module $MODULE --list-objects --login --pin 1234
+pkcs11-tool --module $MODULE --list-objects --login
 ```
 
 **pkcs11-tool — Sign and verify:**
@@ -346,17 +377,17 @@ dd if=/dev/urandom of=data.bin bs=32 count=1
 
 # RSA sign (SHA256-RSA-PKCS)
 pkcs11-tool --module $MODULE --sign --mechanism SHA256-RSA-PKCS \
-    --id 01 --login --pin 1234 \
+    --id 01 --login \
     --input-file data.bin --output-file sig.bin
 
 # RSA verify
 pkcs11-tool --module $MODULE --verify --mechanism SHA256-RSA-PKCS \
-    --id 01 --login --pin 1234 \
+    --id 01 --login \
     --input-file data.bin --signature-file sig.bin
 
 # ECDSA sign (raw hash, no wrapping)
 pkcs11-tool --module $MODULE --sign --mechanism ECDSA \
-    --id 02 --login --pin 1234 \
+    --id 02 --login \
     --input-file data.bin --output-file ec_sig.bin
 
 # SHA-256 digest
@@ -370,7 +401,7 @@ pkcs11-tool --module $MODULE --hash --mechanism SHA256 \
 p11tool --provider=$MODULE --list-tokens
 
 # List all objects (requires login for private objects)
-p11tool --provider=$MODULE --list-all --login --set-pin=1234
+p11tool --provider=$MODULE --list-all --login   # prompts for the PIN
 
 # List mechanisms
 p11tool --provider=$MODULE --list-mechanisms
@@ -404,14 +435,15 @@ activate = 1
 [pkcs11_sect]
 module = /usr/lib/x86_64-linux-gnu/ossl-modules/pkcs11.so
 pkcs11-module-path = /path/to/libcraton_hsm.so
-pkcs11-module-token-pin = 1234
+# PIN read from a file readable only by the service account
+pkcs11-module-token-pin = file:/etc/craton_hsm/token.pin
 activate = 1
 ```
 
 ```bash
 # List objects in token via OpenSSL
 OPENSSL_CONF=openssl_pkcs11.cnf openssl storeutl \
-    "pkcs11:token=MyToken;pin-value=1234"
+    "pkcs11:token=MyToken?pin-source=file:/etc/craton_hsm/token.pin"
 
 # Sign with a key from the token
 OPENSSL_CONF=openssl_pkcs11.cnf openssl pkeyutl -sign \
@@ -430,7 +462,7 @@ sudo apt-get install libengine-pkcs11-openssl
 # Sign using the engine
 openssl pkeyutl -engine pkcs11 -sign \
     -keyform engine \
-    -inkey "pkcs11:token=MyToken;object=my-rsa-key;pin-value=1234" \
+    -inkey "pkcs11:token=MyToken;object=my-rsa-key?pin-source=file:/etc/craton_hsm/token.pin" \
     -in data.bin -out sig.bin
 ```
 
@@ -471,27 +503,12 @@ bash tests/interop/openssl_pkcs11.sh
 
 ## Using the Admin CLI
 
-```bash
-# Initialize token (prompts for SO PIN)
-craton-hsm-admin token init --label "Production HSM"
-
-# Check status
-craton-hsm-admin status
-craton-hsm-admin status --json
-
-# Key management
-craton-hsm-admin key list
-craton-hsm-admin key import --file private.pem --label "App Key" --type RSA
-craton-hsm-admin key delete --handle 42
-
-# PIN management
-craton-hsm-admin pin change --user-type USER
-craton-hsm-admin pin reset    # SO resets user PIN
-
-# Audit log
-craton-hsm-admin audit dump --last 100
-craton-hsm-admin audit dump --last 50 --json
-```
+The admin CLI prompts for all PINs and passphrases; it never takes them as
+arguments. Run `craton-hsm-admin --help` (and `--help` on each subcommand)
+for the authoritative list of subcommands, and see the Admin CLI section of
+[examples.md](examples.md). Note that the admin CLI links the library
+directly and is outside the module's cryptographic boundary (see
+[fips-140-3-certification.md §1.5](fips-140-3-certification.md#15-module-boundary-canonical-definition)).
 
 ## Using the Spy Wrapper
 
@@ -513,10 +530,10 @@ export PKCS11_MODULE_PATH=/path/to/libpkcs11_spy.so
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `CKR_GENERAL_ERROR` on all calls | FIPS POST failed | Check binary integrity; rebuild |
-| `CKR_PIN_LOCKED` | Too many failed login attempts | SO resets via `craton-hsm-admin pin reset` |
+| `CKR_GENERAL_ERROR` on all calls | a self-test failed (module error state) | Check the log for the failing test; for an integrity failure reinstall the signed release library together with its `.sig`; then `C_Finalize` + `C_Initialize` or restart |
+| `CKR_PIN_LOCKED` | Too many failed login attempts | The SO sets a new User PIN with `C_InitPIN` (e.g. `pkcs11-tool --login --login-type so --init-pin`) |
 | `CKR_SESSION_COUNT` | Session limit reached | Close unused sessions; increase `max_sessions` |
 | `CKR_CRYPTOKI_NOT_INITIALIZED` | `C_Initialize` not called | Call `C_Initialize(NULL)` first |
-| `CKR_TOKEN_NOT_PRESENT` | Token not initialized | Run `craton-hsm-admin token init` |
+| `CKR_USER_PIN_NOT_INITIALIZED` / login fails on a new token | Token or User PIN not initialised | `C_InitToken`, then `C_InitPIN` as SO |
 | Daemon fails to start | protoc missing at build time | Install protobuf-compiler |
 | Daemon TLS error | Invalid cert/key path | Check paths in `[daemon]` config |
