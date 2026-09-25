@@ -1045,6 +1045,54 @@ impl Token {
         Ok(())
     }
 
+    /// Verify a PIN of the currently logged-in role without changing the
+    /// login state (`CKU_CONTEXT_SPECIFIC` re-authentication, A2-20; also the
+    /// per-principal PIN check requested for the daemon, H4-01).
+    ///
+    /// The same lockout, rate-limit and failure-counter rules as
+    /// [`login`](Self::login) apply. `user_type` must be `CKU_USER` or
+    /// `CKU_SO`, and that role must currently be logged in.
+    pub fn verify_pin(&self, user_type: CK_ULONG, pin: &[u8]) -> HsmResult<()> {
+        use crate::pkcs11_abi::constants::*;
+        let role = match user_type {
+            CKU_USER => Role::User,
+            CKU_SO => Role::So,
+            _ => return Err(HsmError::UserTypeInvalid),
+        };
+        let _v = self.verify_lock(role).lock();
+        let precheck = |auth: &AuthState| -> HsmResult<()> {
+            if auth.finalized {
+                return Err(HsmError::NotInitialized);
+            }
+            match (role, &auth.login) {
+                (Role::User, LoginState::UserLoggedIn) | (Role::So, LoginState::SoLoggedIn) => {
+                    Ok(())
+                }
+                _ => Err(HsmError::UserNotLoggedIn),
+            }
+        };
+        let att = {
+            let mut auth = self.auth.lock();
+            precheck(&auth)?;
+            self.begin_attempt(&mut auth, role)?
+        };
+        // PBKDF2 without the auth lock; only the PIN check is needed.
+        let ok = att.verifier.verify(pin).is_some();
+        let mut auth = self.auth.lock();
+        if att.epoch != auth.pin_epoch {
+            self.undo_attempt(&mut auth, role);
+            return Err(HsmError::GeneralError);
+        }
+        if let Err(e) = precheck(&auth) {
+            self.undo_attempt(&mut auth, role);
+            return Err(e);
+        }
+        if !ok {
+            return Err(self.record_failure(&mut auth, role));
+        }
+        self.record_success(&mut auth, role)
+    }
+
     pub fn logout(&self) -> HsmResult<()> {
         let mut auth = self.auth.lock();
         if auth.login == LoginState::Public {
