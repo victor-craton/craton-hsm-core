@@ -1284,3 +1284,86 @@ impl Token {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pkcs11_abi::constants::{CKU_SO, CKU_USER};
+
+    fn token(duration: u64) -> Token {
+        let mut cfg = crate::config::config::HsmConfig::default();
+        cfg.security.pbkdf2_iterations = 10_000;
+        cfg.security.max_failed_logins = 3;
+        cfg.security.user_lockout_duration_secs = duration;
+        let t = Token::build(Some(&cfg), 0, None);
+        let mut label = [b' '; 32];
+        label[..1].copy_from_slice(b"t");
+        t.init_token(b"Tok-So#77120", &label).unwrap();
+        t.init_pin_with_so_pin(b"Tok-So#77120", b"Tok-User#6620")
+            .unwrap();
+        t
+    }
+
+    fn lock_user(t: &Token) {
+        for _ in 0..3 {
+            // Clear the back-off window so every attempt is evaluated.
+            t.auth.lock().user_next_allowed = None;
+            let _ = t.verify_pin(CKU_USER, b"Wrong-Pin#000");
+        }
+        t.auth.lock().user_next_allowed = None;
+        assert!(matches!(
+            t.verify_pin(CKU_USER, b"Tok-User#6620"),
+            Err(HsmError::PinLocked)
+        ));
+    }
+
+    /// H4-11: the optional time-based user lockout expires; the default
+    /// lock is permanent until the SO resets the user PIN.
+    #[test]
+    fn user_lockout_expires_only_when_configured() {
+        let t = token(60);
+        lock_user(&t);
+        {
+            let mut a = t.auth.lock();
+            a.user_locked_at = Some(Token::unix_now() - 61);
+            a.user_next_allowed = None;
+        }
+        t.verify_pin(CKU_USER, b"Tok-User#6620").unwrap();
+
+        let t = token(0);
+        lock_user(&t);
+        {
+            let mut a = t.auth.lock();
+            a.user_locked_at = Some(0);
+            a.user_next_allowed = None;
+        }
+        assert!(matches!(
+            t.verify_pin(CKU_USER, b"Tok-User#6620"),
+            Err(HsmError::PinLocked)
+        ));
+        // SO reset (C_InitPIN) clears the lock.
+        t.init_pin_with_so_pin(b"Tok-So#77120", b"Tok-User#6621")
+            .unwrap();
+        t.verify_pin(CKU_USER, b"Tok-User#6621").unwrap();
+        // verify_pin never logs the token in.
+        assert_eq!(t.login_state(), LoginState::Public);
+        t.verify_pin(CKU_SO, b"Tok-So#77120").unwrap();
+        assert_eq!(t.login_state(), LoginState::Public);
+    }
+
+    /// H5-12: the core PIN policy applies to C_InitToken / C_SetPIN too.
+    #[test]
+    fn weak_pins_are_refused_when_set() {
+        let t = Token::build(None, 0, None);
+        let mut label = [b' '; 32];
+        label[..1].copy_from_slice(b"t");
+        assert!(matches!(
+            t.init_token(b"sopin123", &label),
+            Err(HsmError::PinInvalid)
+        ));
+        assert!(matches!(
+            t.init_token(b"12345678", &label),
+            Err(HsmError::PinInvalid)
+        ));
+    }
+}

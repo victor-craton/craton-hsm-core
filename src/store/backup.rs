@@ -46,7 +46,8 @@ const KDF_PBKDF2_SHA256: u8 = 1;
 const HEADER_LEN: usize = 4 + 4 + 1 + 4 + SALT_LEN + NONCE_LEN; // 57 bytes
 const MIN_PASSPHRASE_LEN: usize = 16;
 /// Bounds on the iteration count accepted from a backup header.
-const MIN_BACKUP_ITERATIONS: u32 = 100_000;
+/// Minimum PBKDF2 iteration count for backup passphrases (create and restore).
+pub const MIN_BACKUP_ITERATIONS: u32 = 100_000;
 const MAX_BACKUP_ITERATIONS: u32 = 10_000_000;
 
 /// Inner JSON payload that gets encrypted in the backup file (borrowing

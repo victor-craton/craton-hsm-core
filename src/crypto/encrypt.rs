@@ -290,6 +290,16 @@ pub fn unregister_persistent_key(key: &[u8], sink_id: &str) {
     }
 }
 
+/// Test helper: forget the in-process tracking state of one key (simulates
+/// a process restart for that key without disturbing concurrent tests).
+#[cfg(test)]
+pub(crate) fn forget_key_state(key: &[u8]) {
+    let kid = key_id(key);
+    if let Some(map) = KEY_STATE.lock().as_mut() {
+        map.remove(&kid);
+    }
+}
+
 /// Current usage state of a key in the form it is persisted.
 pub fn persisted_key_usage(key: &[u8]) -> PersistedKeyUsage {
     let kid = key_id(key);

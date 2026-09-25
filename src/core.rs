@@ -652,7 +652,10 @@ impl HsmCore {
                 &objects,
                 passphrase,
                 &binding,
-                Some(self.pbkdf2_iterations),
+                Some(
+                    self.pbkdf2_iterations
+                        .max(crate::store::backup::MIN_BACKUP_ITERATIONS),
+                ),
             )?;
             Ok((blob, objects.len()))
         })();
@@ -899,5 +902,205 @@ impl Drop for HsmCore {
     fn drop(&mut self) {
         // Zeroize keys and PIN verifiers even if C_Finalize was not called.
         self.finalize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::params::{CtrParams, GcmParams};
+    use crate::pkcs11_abi::constants::*;
+    use crate::store::object::StoredObject;
+
+    const SO_PIN: &[u8] = b"Core-So#58213";
+    const USER_PIN: &[u8] = b"Core-User#90417";
+
+    fn persistent_config(dir: &std::path::Path) -> HsmConfig {
+        let mut cfg = HsmConfig::default();
+        cfg.token.persist_objects = true;
+        cfg.token.storage_path = dir.join("store");
+        cfg.audit.log_path = dir.join("audit.jsonl");
+        cfg.security.pbkdf2_iterations = 10_000;
+        cfg
+    }
+
+    fn provision(hsm: &HsmCore) {
+        let mut label = [b' '; 32];
+        label[..4].copy_from_slice(b"core");
+        hsm.init_token(0, SO_PIN, &label).unwrap();
+        hsm.init_pin_with_so_pin(0, SO_PIN, USER_PIN, Some("test"))
+            .unwrap();
+    }
+
+    fn user_session(hsm: &HsmCore) -> CK_SESSION_HANDLE {
+        let s = hsm
+            .open_process_session(0, CKF_SERIAL_SESSION | CKF_RW_SESSION)
+            .unwrap();
+        hsm.login(s, CKU_USER, USER_PIN).unwrap();
+        s
+    }
+
+    fn token_aes_key(
+        hsm: &HsmCore,
+        session: CK_SESSION_HANDLE,
+        bytes: [u8; 32],
+    ) -> CK_OBJECT_HANDLE {
+        let mut obj = StoredObject::new(hsm.object_store().next_handle().unwrap(), CKO_SECRET_KEY);
+        obj.key_type = Some(CKK_AES);
+        obj.token_object = true;
+        obj.private = true;
+        obj.sensitive = true;
+        obj.extractable = true;
+        obj.can_encrypt = true;
+        obj.can_decrypt = true;
+        obj.value_len = Some(32);
+        obj.key_material = Some(crate::store::key_material::RawKeyMaterial::new(
+            bytes.to_vec(),
+        ));
+        hsm.object_store()
+            .insert_object_in(
+                obj,
+                &ObjectContext::new(0, session, false),
+                ObjectOrigin::Generated {
+                    mechanism: CKM_AES_KEY_GEN,
+                },
+            )
+            .unwrap()
+    }
+
+    /// H2-02/A1-15: the GCM invocation lease and the used CTR keystream
+    /// ranges of a token key survive a restart.
+    #[test]
+    fn gcm_lease_and_ctr_ranges_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = persistent_config(dir.path());
+        let key = [0x3c; 32];
+        let ctr = CtrParams::new(128, &[0x11; 16]).unwrap();
+        {
+            let hsm = HsmCore::open(&cfg).unwrap();
+            provision(&hsm);
+            let s = user_session(&hsm);
+            token_aes_key(&hsm, s, key);
+            let be = hsm.crypto_backend();
+            for _ in 0..3 {
+                be.aes_gcm_encrypt(&key, &GcmParams::legacy([0; 12]), b"data", false)
+                    .unwrap();
+            }
+            be.aes_ctr_encrypt(&key, &ctr, &[0u8; 64]).unwrap();
+        }
+        // Simulate a fresh process for this key.
+        crate::crypto::encrypt::forget_key_state(&key);
+        assert_eq!(crate::crypto::encrypt::gcm_invocation_count(&key), 0);
+
+        let hsm = HsmCore::open(&cfg).unwrap();
+        let _s = user_session(&hsm); // loads the slot's objects
+        assert!(
+            crate::crypto::encrypt::gcm_invocation_count(&key)
+                >= crate::crypto::encrypt::GCM_PERSIST_LEASE,
+            "persisted GCM lease must be restored"
+        );
+        // Re-using the persisted CTR keystream range is refused.
+        let overlap = CtrParams::new(128, &{
+            let mut cb = [0x11; 16];
+            cb[15] = 0x12;
+            cb
+        })
+        .unwrap();
+        assert!(hsm
+            .crypto_backend()
+            .aes_ctr_encrypt(&key, &overlap, &[0u8; 16])
+            .is_err());
+    }
+
+    /// H4-01: verify_pin never changes the token login state; H4-11/A1-23
+    /// lockout still applies.
+    #[test]
+    fn verify_pin_does_not_log_in() {
+        let mut cfg = HsmConfig::default();
+        cfg.audit.enabled = false;
+        cfg.audit.allow_disabled_insecure = true;
+        cfg.security.pbkdf2_iterations = 10_000;
+        let hsm = HsmCore::try_new(&cfg).unwrap();
+        provision(&hsm);
+        let token = hsm.slot_manager().get_token(0).unwrap();
+        hsm.verify_pin(0, CKU_USER, USER_PIN).unwrap();
+        assert_eq!(token.login_state(), crate::token::token::LoginState::Public);
+        assert!(matches!(
+            hsm.verify_pin(0, CKU_USER, b"Wrong-Pin#1234"),
+            Err(HsmError::PinIncorrect)
+        ));
+        // A weak new user PIN is refused by the core policy (H5-12).
+        assert!(matches!(
+            hsm.init_pin_with_so_pin(0, SO_PIN, b"userpin1", None),
+            Err(HsmError::PinInvalid)
+        ));
+        // A wrong SO PIN does not set the user PIN.
+        assert!(hsm
+            .init_pin_with_so_pin(0, b"Wrong-So#55555", b"Fresh-Pin#8841", None)
+            .is_err());
+        hsm.verify_pin(0, CKU_USER, USER_PIN).unwrap();
+    }
+
+    /// H5-04/H5-06: restore is atomic with its replay record, fresh handles,
+    /// and a replayed backup is rejected with a distinct reason.
+    #[test]
+    fn backup_restore_is_atomic_and_not_replayable() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = persistent_config(dir.path());
+        let hsm = HsmCore::open(&cfg).unwrap();
+        provision(&hsm);
+        let s = user_session(&hsm);
+        let h = token_aes_key(&hsm, s, [0x42; 32]);
+        let pass = "Core-Backup-Passphrase#1";
+        let (blob, n) = hsm.export_backup(0, pass, false, None).unwrap();
+        assert_eq!(n, 1);
+        hsm.object_store().destroy_object_in(h, 0).unwrap();
+        let restored = hsm.restore_backup(0, &blob, pass, None, None).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_ne!(restored[0], h);
+        assert!(matches!(
+            hsm.restore_backup(0, &blob, pass, None, None),
+            Err(HsmError::BackupRejected(
+                crate::error::BackupRejection::Replayed
+            ))
+        ));
+        drop(hsm);
+        // The replay record is persistent.
+        let hsm = HsmCore::open(&cfg).unwrap();
+        let _s = user_session(&hsm);
+        assert!(matches!(
+            hsm.restore_backup(0, &blob, pass, None, None),
+            Err(HsmError::BackupRejected(
+                crate::error::BackupRejection::Replayed
+            ))
+        ));
+        assert_eq!(
+            hsm.object_store()
+                .find_objects_for_slot(&[], true, Some(0))
+                .len(),
+            1
+        );
+    }
+
+    /// H4-17: unknown keys in core sections are rejected; the `[daemon]`
+    /// section of a shared file is accepted (validated by the daemon).
+    #[test]
+    fn config_rejects_unknown_keys() {
+        assert!(toml::from_str::<HsmConfig>("[security]\nmax_failed_login = 3\n").is_err());
+        assert!(toml::from_str::<HsmConfig>("[bogus]\nx = 1\n").is_err());
+        assert!(toml::from_str::<HsmConfig>("[daemon]\nbind = \"x\"\n").is_ok());
+        let fips = HsmConfig::fips_defaults();
+        assert!(!fips.algorithms.allow_rsa_pkcs1v15_decrypt);
+        assert!(!fips.algorithms.rsa_pkcs1v15_decrypt_allowed());
+        if cfg!(feature = "awslc-backend") {
+            assert_eq!(fips.algorithms.crypto_backend, "awslc");
+        }
+        let mut c = HsmConfig::default();
+        c.algorithms.fips_approved_only = true;
+        c.algorithms.allow_rsa_pkcs1v15_decrypt = true;
+        assert!(c.validate().is_err());
+        let mut c = HsmConfig::default();
+        c.security.pin_min_length = 4;
+        assert!(c.validate().is_err(), "PIN length floor is 8");
     }
 }
