@@ -1,202 +1,170 @@
 # FIPS 140-3 Mode Operator Guide
 
+> **Craton HSM is not FIPS 140-3 validated.** Following this guide gives you
+> the most restrictive, approved-algorithm-only configuration the code
+> supports. It does **not** give you a validated module; see
+> [fips-gap-analysis.md](fips-gap-analysis.md) for what is missing.
+
 ## Overview
 
-Craton HSM supports a FIPS-approved mode of operation when configured correctly. This guide covers the required build, configuration, and deployment steps for FIPS compliance.
+There are two very different things that are both loosely called "FIPS mode":
+
+| | Approved-only **build** (`fips` feature) | Approved-only **policy** (`fips_approved_only = true` or `CRATON_HSM_FIPS=1`) |
+|---|---|---|
+| How | compile-time feature | configuration file / environment variable |
+| Can be undone at run time | No — configuration files and environment overrides are ignored | Yes — by anyone who controls the configuration or environment |
+| Integrity self-test | mandatory, fails closed | optional (skipped without `.sig` or embedded key) |
+| Backend | must be the validated AWS-LC module; POST refuses anything else | whatever `crypto_backend` says (RustCrypto by default); only a warning |
+| Use it for | anything that claims FIPS alignment | development and testing only |
+
+The rest of this guide is about the approved-only **build**.
 
 ---
 
-## 1. Build for FIPS
+## 1. Obtain or build the approved-only library
 
-### Required: aws-lc-rs Backend
+### Option A — release artefact (recommended)
 
-For FIPS deployments, build with the FIPS-certified crypto backend:
+Every release ships `craton-hsm-<version>-x86_64-unknown-linux-gnu-fips.tar.gz`,
+built with `--features fips,awslc-backend`, with the integrity public key
+embedded and the `.sig` sidecar included. Verify it as described in
+[release-signing.md](release-signing.md#verifying-a-release-users).
+
+### Option B — build it yourself
 
 ```bash
-cargo build --release --features awslc-backend
+# Build dependencies for aws-lc-fips-sys: CMake, Clang/LLVM, Go
+export CRATON_HSM_INTEGRITY_PUBLIC_KEY=<64 hex chars>   # your Ed25519 public key
+cargo build --release --locked --features fips,awslc-backend --lib
+./tools/sign-integrity.sh target/release/libcraton_hsm.so   # writes libcraton_hsm.sig
 ```
 
-This uses [AWS-LC](https://github.com/aws/aws-lc), which holds FIPS 140-3 certification. The default `rustcrypto-backend` uses RustCrypto crates which are not FIPS-certified.
-
-### Build Dependencies (aws-lc-rs)
-
-- CMake 3.x
-- Clang / LLVM
-- Go (for AWS-LC build system)
-
-On Windows, set:
-```
-LIBCLANG_PATH=C:\path\to\llvm\bin
-AWS_LC_SYS_NO_ASM=1
-```
-
----
+- The `fips` feature must always be combined with `awslc-backend`: the
+  self-tests refuse to leave the error state on a backend that is not a
+  validated module.
+- Do **not** set `AWS_LC_SYS_NO_ASM=1` for a build you intend to use in
+  approved mode: it builds a different AWS-LC implementation from the
+  validated configuration. (It is only a workaround for Windows development
+  machines without an assembler toolchain.)
+- Key generation and signing tooling: [release-signing.md](release-signing.md#module-self-integrity-signature).
 
 ## 2. Configuration
 
-Create or modify `craton_hsm.toml` (or set `CRATON_HSM_CONFIG` env var):
+A `fips` build **ignores `craton_hsm.toml` and `CRATON_HSM_CONFIG` /
+`CRATON_HSM_FIPS`** and uses hard-coded settings:
 
-```toml
-[algorithms]
-# Required: use FIPS-certified backend
-crypto_backend = "awslc"
+| Setting | Value |
+|---|---|
+| `fips_approved_only` | `true` |
+| `enable_pqc` | `false` |
+| `allow_weak_rsa` | `false` |
+| `allow_sha1_signing` | `false` |
+| `audit.enabled` | `true` |
+| everything else | the documented defaults ([configuration-reference.md](configuration-reference.md)) |
 
-# Required: restrict to FIPS-approved algorithms only
-fips_approved_only = true
+Consequently token storage, audit log path, PIN policy and session limits
+cannot be changed in a `fips` build; they use the defaults (storage in
+`craton_hsm_store` and audit log `craton_hsm_audit.jsonl`, both relative to
+the process working directory).
 
-# Recommended: disable PQC (not yet FIPS-approved)
-enable_pqc = false
+### Effect of the approved-only policy
 
-# Defaults (already correct for FIPS):
-# allow_weak_rsa = false    # RSA < 2048 blocked
-# allow_sha1_signing = false # SHA-1 signing blocked
-```
-
-### Configuration Effects
-
-When `fips_approved_only = true`:
-
-| Category | Allowed | Blocked |
+| Category | Allowed | Refused (`CKR_MECHANISM_INVALID`) |
 |----------|---------|---------|
-| Symmetric | AES-128/192/256 (GCM, CBC, CTR, KW) | — |
-| RSA | RSA-2048/3072/4096 (PKCS#1v15, PSS, OAEP) | RSA < 2048 |
-| ECDSA | P-256, P-384 | — |
-| ECDH | P-256, P-384 | — |
-| Digest | SHA-256/384/512, SHA3-256/384/512 | SHA-1 |
-| MAC | HMAC-SHA256/384/512 | — |
-| EdDSA | — | Ed25519 (not FIPS-approved) |
-| PQC | — | ML-DSA, ML-KEM, SLH-DSA, Hybrids |
+| Symmetric | AES-128/192/256: GCM (module-generated IVs), CBC, CBC-PAD, CTR, KW, KWP | — |
+| RSA | 2048/3072/4096: key generation, PKCS#1 v1.5 and PSS signatures (hash-specific mechanisms), OAEP | RSA < 2048 |
+| EC | ECDSA and ECDH on P-256/P-384 (ECDH only with an approved KDF; `CKD_NULL` refused) | other curves |
+| EdDSA | Ed25519 (FIPS 186-5) | — |
+| Digest | SHA-256/384/512, SHA3-256/384/512 | SHA-1 (also as a plain digest) |
+| PQC | — | ML-KEM, ML-DSA, SLH-DSA (algorithms approved by FIPS 203/204/205, but these implementations are pre-release and not validated) |
+
+No HMAC mechanism is offered to callers in any mode.
 
 ---
 
-## 3. Software Integrity Verification
+## 3. Software integrity verification
 
-### Compute the Integrity HMAC
+The module verifies an **Ed25519 signature** over the SHA-256 digest of its
+own library file at every `C_Initialize`. The signature is read from the
+`.sig` sidecar next to the library (`libcraton_hsm.so` → `libcraton_hsm.sig`,
+`craton_hsm.dll` → `craton_hsm.sig`); the public key is compiled in.
 
-After building, compute the HMAC-SHA256 sidecar file:
+| Scenario | `fips` build |
+|----------|--------------|
+| `.sig` valid | pass |
+| library or `.sig` modified | self-test fails, error state |
+| `.sig` missing | self-test fails, error state |
+| public key not embedded at build time | self-test fails, error state |
+| module path cannot be determined | self-test fails, error state |
 
-**Linux/macOS:**
-```bash
-./tools/compute-integrity-hmac.sh target/release/libcraton_hsm.so
-```
-
-**Windows (PowerShell):**
-```powershell
-.\tools\compute-integrity-hmac.ps1 -LibPath target\release\craton_hsm.dll
-```
-
-This creates a `.hmac` file (e.g., `libcraton_hsm.hmac`) next to the library. The module verifies this HMAC at every `C_Initialize` call as part of the Power-On Self-Test.
-
-### Integrity Check Behavior
-
-| Scenario | Behavior |
-|----------|----------|
-| No `.hmac` file | Warning logged, check skipped (development mode) |
-| `.hmac` file matches | Check passes silently |
-| `.hmac` file mismatch | POST fails, module enters error state (`CKR_GENERAL_ERROR`) |
-| Binary modified after `.hmac` computed | POST fails |
-
-**Important**: Recompute the `.hmac` file after every rebuild.
+Install the library and its `.sig` together, in a directory writable only by
+administrators, and re-sign after every rebuild. There is no HMAC/`.hmac`
+integrity mechanism any more; the old `compute-integrity-hmac` scripts have
+been removed.
 
 ---
 
-## 4. Algorithm Indicator (IG 2.4.C)
+## 4. Approved-service indicator (IG 2.4.C)
 
-Every cryptographic operation records whether it used a FIPS-approved algorithm. This information is available in two places:
+**Not yet implemented as an API output.** What exists today:
 
-### 4.1 Audit Log
+- Each audit-log record for a cryptographic operation contains
+  `"fips_approved": true|false`, a static classification of the mechanism.
+  It does not reflect the backend or parameters actually used and is written
+  to a log file, so it does not satisfy IG 2.4.C on its own.
+- In a `fips` build every mechanism that `C_GetMechanismList` reports is an
+  approved algorithm (non-approved ones are refused), which is the basis for
+  the planned "approved-only mode" indicator.
 
-Each audit log entry for crypto operations includes `"fips_approved": true/false`:
-
-```json
-{
-  "timestamp": 1709740800000000000,
-  "session_handle": 1,
-  "operation": {
-    "Sign": {
-      "mechanism": 7,
-      "fips_approved": true
-    }
-  },
-  "result": "Success",
-  "previous_hash": "..."
-}
-```
-
-### 4.2 Session State
-
-After each crypto operation, the session records `last_operation_fips_approved`. This can be queried programmatically.
-
-### 4.3 Vendor-Defined Attribute
-
-`CKA_VENDOR_FIPS_APPROVED` (0x80000001) is defined for future use with `C_GetSessionInfo` extensions.
+Not implemented (do not rely on them): the session field
+`last_operation_fips_approved` is never set, and the vendor attribute
+`CKA_VENDOR_FIPS_APPROVED` is never returned. There is currently no way to
+query through `C_GetInfo` whether the library is an approved-only build;
+identify it by the release asset name (`…-fips`) and verify the artefact
+signature.
 
 ---
 
-## 5. Approved vs Non-Approved Services
+## 5. Self-tests
 
-### Approved Services (FIPS mode)
+- **Pre-operational:** SHA-256, SHA-512 and Ed25519 self-tests, then the
+  integrity test (§3).
+- **Algorithm self-tests (CASTs):** fixed-vector known-answer tests for SHA-2,
+  SHA-3, HMAC, HMAC_DRBG, HKDF/one-step KDF, PBKDF2, AES-GCM/CBC/CTR/KW/KWP,
+  RSA, ECDSA, ECDH, Ed25519, ML-KEM, ML-DSA and SLH-DSA; backend algorithms are
+  tested through the AWS-LC backend itself. Full list:
+  [fips-140-3-certification.md §9](fips-140-3-certification.md#9-self-tests).
+- **Conditional:** pair-wise consistency test after every key-pair
+  generation; entropy health tests; DRBG continuous test.
 
-| Service | Mechanisms |
-|---------|-----------|
-| Key Generation | RSA (≥2048), EC (P-256, P-384), AES |
-| Digital Signature | SHA256/384/512-RSA-PKCS, SHA256/384/512-RSA-PSS, ECDSA |
-| Verification | Same as signing |
-| Encryption | AES-GCM, AES-CBC, AES-CTR |
-| Decryption | AES-GCM, AES-CBC, AES-CTR |
-| Key Wrapping | AES Key Wrap (RFC 3394) |
-| Digest | SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-384, SHA3-512 |
-| MAC | HMAC-SHA256, HMAC-SHA384, HMAC-SHA512 |
-| Key Agreement | ECDH P-256, ECDH P-384 |
-| Random Generation | SP 800-90A HMAC_DRBG (seeded from OS CSPRNG) |
+### Error state
 
-### Non-Approved Services
-
-| Service | Mechanism | Availability |
-|---------|-----------|-------------|
-| EdDSA signing | CKM_EDDSA (Ed25519) | Blocked in FIPS mode |
-| SHA-1 digest | CKM_SHA_1 | Available for digest only, blocked for signing |
-| PQC operations | ML-DSA, ML-KEM, SLH-DSA | Blocked in FIPS mode |
+If any self-test fails, the module enters the error state: every function
+that reaches module state returns `CKR_GENERAL_ERROR`. To recover, call
+`C_Finalize` and then `C_Initialize` (or restart the process); the self-tests
+run again and the module leaves the error state only if all of them pass. If
+the failure persists, **do not rebuild from source on the production host** —
+reinstall the signed release artefact and investigate the cause (see
+[operator-runbook.md](operator-runbook.md)).
 
 ---
 
-## 6. Self-Tests
+## 6. Deployment checklist
 
-### Power-On Self-Tests (POST)
-
-Run automatically at `C_Initialize`:
-
-1. **Software integrity test** (HMAC-SHA256 of module binary)
-2. 16 Known Answer Tests (SHA-2/3, HMAC, AES-GCM/CBC/CTR, RSA, ECDSA, ML-DSA, ML-KEM, RNG, DRBG)
-
-Total: 17 self-tests (integrity + 16 KATs).
-
-### Conditional Self-Tests
-
-| Test | Trigger |
-|------|---------|
-| Pairwise consistency | After every `C_GenerateKeyPair` (sign/verify or encap/decap roundtrip) |
-| Continuous RNG health | Every `C_GenerateRandom` call |
-| DRBG continuous health | Every DRBG generate call |
-
-### Error State
-
-If any self-test fails:
-- `POST_FAILED` flag is set
-- All subsequent operations return `CKR_GENERAL_ERROR`
-- Process must be restarted to recover
-
----
-
-## 7. Deployment Checklist
-
-- [ ] Build with `--features awslc-backend`
-- [ ] Set `crypto_backend = "awslc"` in config
-- [ ] Set `fips_approved_only = true` in config
-- [ ] Compute `.hmac` integrity sidecar: `./tools/compute-integrity-hmac.sh`
-- [ ] Verify POST passes: check for `CKR_OK` from `C_Initialize`
-- [ ] Verify only approved mechanisms listed: `pkcs11-tool --module ./libcraton_hsm.so --list-mechanisms`
-- [ ] Initialize token with strong SO PIN: `pkcs11-tool --module ./libcraton_hsm.so --init-token --label "Production" --so-pin <strong-pin>`
-- [ ] Set user PIN: `pkcs11-tool --module ./libcraton_hsm.so --init-pin --pin <user-pin> --so-pin <so-pin>`
-- [ ] Review audit log periodically for algorithm indicator compliance
-- [ ] Run `cargo test --features awslc-backend -- --test-threads=1` to verify all tests pass
+- [ ] Use the signed `…-fips` release artefact, or build with
+      `--features fips,awslc-backend` and an embedded integrity key.
+- [ ] Verify the release (cosign bundle + `SHA256SUMS`) before installation.
+- [ ] Install the library **and** its `.sig` in an administrator-only directory.
+- [ ] `C_Initialize` returns `CKR_OK` (the integrity test and all CASTs passed).
+- [ ] `pkcs11-tool --module ./libcraton_hsm.so --list-mechanisms` lists no
+      PQC, SHA-1 or other non-approved mechanism.
+- [ ] Initialise the token and set the User PIN **interactively** (do not put
+      PINs on the command line or in shell history):
+      `pkcs11-tool --module ./libcraton_hsm.so --init-token --label "Production"`
+      then `pkcs11-tool --module ./libcraton_hsm.so --login --login-type so --init-pin`
+      (both prompt for the PINs). PINs must be 8–64 characters with at least
+      two character classes.
+- [ ] Do not use the gRPC daemon or admin CLI in a deployment that must stay
+      within the module boundary (they are outside it).
+- [ ] Disable core dumps for processes that load the module.
+- [ ] Review the audit log periodically.
