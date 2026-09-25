@@ -1,18 +1,32 @@
 # Default owners for the entire repository.
 # These users will be requested for review on all PRs.
+# Kept in sync with GOVERNANCE.md ("Code ownership") — A3-18.
 * @craton-co/craton_hsm-maintainers
 
-# Cryptographic core — requires crypto-team review.
+# Cryptographic core, key material and token authentication — requires
+# crypto-team review (GOVERNANCE.md).
 /src/crypto/ @craton-co/craton_hsm-crypto
 /src/store/key_material.rs @craton-co/craton_hsm-crypto
+/src/store/encrypted_store.rs @craton-co/craton_hsm-crypto
+/src/token/ @craton-co/craton_hsm-crypto
 
-# PKCS#11 ABI surface — ABI stability review.
-/src/pkcs11_abi/ @craton-co/craton_hsm-maintainers
+# PKCS#11 ABI surface — ABI stability + crypto review (unsafe FFI boundary).
+/src/pkcs11_abi/ @craton-co/craton_hsm-maintainers @craton-co/craton_hsm-crypto
 
-# CI & release infrastructure.
+# Network daemon and deployment artefacts.
+/craton-hsm-daemon/ @craton-co/craton_hsm-maintainers
+/deploy/ @craton-co/craton_hsm-maintainers
+
+# CI, release and supply-chain configuration.
 /.github/ @craton-co/craton_hsm-maintainers
 /Cargo.toml @craton-co/craton_hsm-maintainers
-
-# Security-sensitive files.
-/SECURITY.md @craton-co/craton_hsm-maintainers
+/Cargo.lock @craton-co/craton_hsm-maintainers
+/rust-toolchain.toml @craton-co/craton_hsm-maintainers
 /deny.toml @craton-co/craton_hsm-maintainers
+/fuzz/ @craton-co/craton_hsm-maintainers
+/tools/*integrity* @craton-co/craton_hsm-maintainers @craton-co/craton_hsm-crypto
+
+# Security-sensitive documents.
+/SECURITY.md @craton-co/craton_hsm-maintainers
+/docs/security-policy.md @craton-co/craton_hsm-maintainers @craton-co/craton_hsm-crypto
+/docs/fips-140-3-certification.md @craton-co/craton_hsm-maintainers @craton-co/craton_hsm-crypto

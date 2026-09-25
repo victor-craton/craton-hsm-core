@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # Rust (Cargo) dependencies
+  # Rust (Cargo) dependencies — workspace (library, daemon, admin CLI, spy)
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -10,12 +10,32 @@ updates:
     labels:
       - "dependencies"
     ignore:
-      # PQC crates are pinned to specific RC versions intentionally
+      # The PQC crates (ml-kem, ml-dsa, slh-dsa) are pre-release (release
+      # candidate) crates with no API/security stability guarantee; see
+      # docs/fips-gap-analysis.md ("Pre-release PQC dependencies"). We still
+      # want release-candidate / patch updates and ALL security updates to
+      # flow (A3-07), so only semver-major version bumps — which need a
+      # deliberate API migration — are suppressed.
       - dependency-name: "ml-kem"
+        update-types: ["version-update:semver-major"]
       - dependency-name: "ml-dsa"
+        update-types: ["version-update:semver-major"]
       - dependency-name: "slh-dsa"
+        update-types: ["version-update:semver-major"]
 
-  # GitHub Actions
+  # Fuzz harness (separate lockfile)
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "fuzz"
+
+  # GitHub Actions (all actions are pinned by commit SHA; Dependabot bumps
+  # the SHA and the version comment together)
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -25,3 +45,24 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+
+  # Container base images (deploy/Dockerfile, digest-pinned)
+  - package-ecosystem: "docker"
+    directory: "/deploy"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "deploy"
+
+  # Documentation tooling (package.json, PDF generation only)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docs"

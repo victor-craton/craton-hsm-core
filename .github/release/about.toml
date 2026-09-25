@@ -1,0 +1,27 @@
+# cargo-about configuration used by .github/workflows/release.yml to generate
+# THIRD-PARTY-LICENSES.txt, which ships in every release tarball (A3-12).
+# Keep `accepted` in sync with the [licenses] allow list in /deny.toml.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "OpenSSL",
+    "CC0-1.0",
+]
+# Only the targets we ship.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+workarounds = ["ring"]
