@@ -16,41 +16,15 @@ use zeroize::Zeroize;
 use crate::crypto::sign::{HashAlg, OaepHash};
 use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::constants::*;
-use crate::pkcs11_abi::types::{CK_MECHANISM_TYPE, CK_RV, CK_ULONG};
+use crate::pkcs11_abi::types::{CK_MECHANISM_TYPE, CK_ULONG};
 
-// ============================================================================
-// PKCS#11 constants that are not (yet) defined in `pkcs11_abi::constants`.
-// Values from the OASIS PKCS#11 v3.0 headers.
-// ============================================================================
-
-/// `CKG_MGF1_SHA1` mask generation function.
-pub const CKG_MGF1_SHA1: CK_ULONG = 0x0000_0001;
-/// `CKG_MGF1_SHA256` mask generation function.
-pub const CKG_MGF1_SHA256: CK_ULONG = 0x0000_0002;
-/// `CKG_MGF1_SHA384` mask generation function.
-pub const CKG_MGF1_SHA384: CK_ULONG = 0x0000_0003;
-/// `CKG_MGF1_SHA512` mask generation function.
-pub const CKG_MGF1_SHA512: CK_ULONG = 0x0000_0004;
-/// `CKG_MGF1_SHA224` mask generation function.
-pub const CKG_MGF1_SHA224: CK_ULONG = 0x0000_0005;
-/// `CKZ_DATA_SPECIFIED` OAEP encoding-parameter source.
-pub const CKZ_DATA_SPECIFIED: CK_ULONG = 0x0000_0001;
-/// `CKD_NULL` key derivation function (raw shared secret).
-pub const CKD_NULL: CK_ULONG = 0x0000_0001;
-/// `CKD_SHA1_KDF` (ANSI X9.63 with SHA-1) — not supported.
-pub const CKD_SHA1_KDF: CK_ULONG = 0x0000_0002;
-/// `CKD_SHA224_KDF` (ANSI X9.63 / SP 800-56C one-step KDF with SHA-224).
-pub const CKD_SHA224_KDF: CK_ULONG = 0x0000_0005;
-/// `CKD_SHA256_KDF` (ANSI X9.63 / SP 800-56C one-step KDF with SHA-256).
-pub const CKD_SHA256_KDF: CK_ULONG = 0x0000_0006;
-/// `CKD_SHA384_KDF` (ANSI X9.63 / SP 800-56C one-step KDF with SHA-384).
-pub const CKD_SHA384_KDF: CK_ULONG = 0x0000_0007;
-/// `CKD_SHA512_KDF` (ANSI X9.63 / SP 800-56C one-step KDF with SHA-512).
-pub const CKD_SHA512_KDF: CK_ULONG = 0x0000_0008;
-/// `CKR_DOMAIN_PARAMS_INVALID`.
-pub const CKR_DOMAIN_PARAMS_INVALID: CK_RV = 0x0000_0130;
-/// `CKR_CURVE_NOT_SUPPORTED`.
-pub const CKR_CURVE_NOT_SUPPORTED: CK_RV = 0x0000_0140;
+// PKCS#11 constants used by the parameter parsers now live in
+// `pkcs11_abi::constants`; re-exported here for existing callers.
+pub use crate::pkcs11_abi::constants::{
+    CKD_NULL, CKD_SHA1_KDF, CKD_SHA224_KDF, CKD_SHA256_KDF, CKD_SHA384_KDF, CKD_SHA512_KDF,
+    CKG_MGF1_SHA1, CKG_MGF1_SHA224, CKG_MGF1_SHA256, CKG_MGF1_SHA384, CKG_MGF1_SHA512,
+    CKR_CURVE_NOT_SUPPORTED, CKR_DOMAIN_PARAMS_INVALID, CKZ_DATA_SPECIFIED,
+};
 
 // ============================================================================
 // AES-GCM

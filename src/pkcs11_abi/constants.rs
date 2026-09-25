@@ -294,3 +294,79 @@ pub const CKF_DERIVE_FLAG: CK_ULONG = 0x00080000;
 
 pub const CK_UNAVAILABLE_INFORMATION: CK_ULONG = CK_ULONG::MAX;
 pub const CK_EFFECTIVELY_INFINITE: CK_ULONG = 0;
+
+// ============================================================================
+// Additional PKCS#11 v2.40 / v3.0 constants (moved here from `crypto::params`
+// and `error.rs`, plus the v3.0 interface / message-API constants).
+// ============================================================================
+
+// --- Return values ---
+pub const CKR_NEED_TO_CREATE_THREADS: CK_ULONG = 0x00000009;
+pub const CKR_CANT_LOCK: CK_ULONG = 0x0000000A;
+pub const CKR_ACTION_PROHIBITED: CK_ULONG = 0x0000001B;
+pub const CKR_DOMAIN_PARAMS_INVALID: CK_ULONG = 0x00000130;
+pub const CKR_CURVE_NOT_SUPPORTED: CK_ULONG = 0x00000140;
+pub const CKR_OPERATION_CANCEL_FAILED: CK_ULONG = 0x00000202;
+
+// --- RSA PKCS #1 MGF / OAEP source (CKG_MGF1_*, CKZ_*) ---
+pub const CKG_MGF1_SHA1: CK_ULONG = 0x00000001;
+pub const CKG_MGF1_SHA256: CK_ULONG = 0x00000002;
+pub const CKG_MGF1_SHA384: CK_ULONG = 0x00000003;
+pub const CKG_MGF1_SHA512: CK_ULONG = 0x00000004;
+pub const CKG_MGF1_SHA224: CK_ULONG = 0x00000005;
+pub const CKZ_DATA_SPECIFIED: CK_ULONG = 0x00000001;
+
+// --- EC key derivation functions (CK_EC_KDF_TYPE) ---
+pub const CKD_NULL: CK_ULONG = 0x00000001;
+pub const CKD_SHA1_KDF: CK_ULONG = 0x00000002;
+pub const CKD_SHA224_KDF: CK_ULONG = 0x00000005;
+pub const CKD_SHA256_KDF: CK_ULONG = 0x00000006;
+pub const CKD_SHA384_KDF: CK_ULONG = 0x00000007;
+pub const CKD_SHA512_KDF: CK_ULONG = 0x00000008;
+
+// --- Attributes ---
+pub const CKA_ALWAYS_AUTHENTICATE: CK_ULONG = 0x00000202;
+
+// --- Interfaces (v3.0 §5.1) ---
+/// `CKF_INTERFACE_FORK_SAFE` — not set: after `fork()` the child must call
+/// `C_Initialize` again.
+pub const CKF_INTERFACE_FORK_SAFE: CK_ULONG = 0x00000001;
+
+// --- Mechanism flags added in v3.0 (message-based API) ---
+pub const CKF_MESSAGE_ENCRYPT: CK_ULONG = 0x00000002;
+pub const CKF_MESSAGE_DECRYPT: CK_ULONG = 0x00000004;
+pub const CKF_MESSAGE_SIGN: CK_ULONG = 0x00000008;
+pub const CKF_MESSAGE_VERIFY: CK_ULONG = 0x00000010;
+pub const CKF_MULTI_MESSAGE: CK_ULONG = 0x00000020;
+pub const CKF_FIND_OBJECTS: CK_ULONG = 0x00000040;
+
+// --- C_SessionCancel flags (the operation flags share the mechanism
+// flag values: CKF_ENCRYPT_FLAG = CKF_ENCRYPT, ...) ---
+pub const CKF_ENCRYPT: CK_ULONG = CKF_ENCRYPT_FLAG;
+pub const CKF_DECRYPT: CK_ULONG = CKF_DECRYPT_FLAG;
+pub const CKF_DIGEST: CK_ULONG = CKF_DIGEST_FLAG;
+pub const CKF_SIGN: CK_ULONG = CKF_SIGN_FLAG;
+pub const CKF_SIGN_RECOVER: CK_ULONG = CKF_SIGN_RECOVER_FLAG;
+pub const CKF_VERIFY: CK_ULONG = CKF_VERIFY_FLAG;
+pub const CKF_VERIFY_RECOVER: CK_ULONG = CKF_VERIFY_RECOVER_FLAG;
+pub const CKF_GENERATE: CK_ULONG = CKF_GENERATE_FLAG;
+pub const CKF_GENERATE_KEY_PAIR: CK_ULONG = CKF_GENERATE_KEY_PAIR_FLAG;
+pub const CKF_WRAP: CK_ULONG = CKF_WRAP_FLAG;
+pub const CKF_UNWRAP: CK_ULONG = CKF_UNWRAP_FLAG;
+pub const CKF_DERIVE: CK_ULONG = CKF_DERIVE_FLAG;
+
+// --- Message-API flags (C_EncryptMessageNext / C_DecryptMessageNext) ---
+pub const CKF_END_OF_MESSAGE: CK_ULONG = 0x00000001;
+
+// --- IV generator functions (CK_GENERATOR_FUNCTION) ---
+pub const CKG_NO_GENERATE: CK_ULONG = 0x00000000;
+pub const CKG_GENERATE: CK_ULONG = 0x00000001;
+pub const CKG_GENERATE_COUNTER: CK_ULONG = 0x00000002;
+pub const CKG_GENERATE_RANDOM: CK_ULONG = 0x00000003;
+pub const CKG_GENERATE_COUNTER_XOR: CK_ULONG = 0x00000004;
+
+// --- Hedging for ML-DSA / SLH-DSA (CK_HEDGE_TYPE, PKCS#11 v3.2
+// CK_SIGN_ADDITIONAL_CONTEXT) ---
+pub const CKH_HEDGE_PREFERRED: CK_ULONG = 0x00000000;
+pub const CKH_HEDGE_REQUIRED: CK_ULONG = 0x00000001;
+pub const CKH_DETERMINISTIC_REQUIRED: CK_ULONG = 0x00000002;
