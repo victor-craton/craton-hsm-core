@@ -1,43 +1,122 @@
 # cargo-deny configuration for Craton HSM
 # https://embarkstudios.github.io/cargo-deny/
+#
+# This file is the SINGLE SOURCE OF TRUTH for advisory suppressions (A3-05).
+# CI runs `cargo deny --workspace --all-features check` (all four sections) on
+# every pull request, on main and before every release, and derives the
+# `cargo audit --ignore` flags from the `ignore` list below, so the two tools
+# can never disagree again.
+#
+# Rules for adding an advisory to `ignore`:
+#   * every entry MUST carry a `reason` that states (a) why the advisory is not
+#     fixed, (b) the concrete exposure in this code base (be honest — see the
+#     RUSTSEC-2023-0071 entry), (c) an owner, and (d) an expiry written exactly
+#     as `expires YYYY-MM-DD`;
+#   * the expiry is enforced by CI (.github/workflows/security-audit.yml,
+#     "Check advisory-ignore expiry"): once the date has passed the job fails
+#     and the entry must be re-reviewed (removed, or renewed with a new
+#     justification) — at most one quarter at a time;
+#   * record every review in CHANGELOG.md.
+# Last full review: 2026-09-25.
+
+[graph]
+all-features = true
 
 [advisories]
-# RUSTSEC-2023-0071: rsa crate Marvin Attack — no fixed version available.
-# We mitigate by not exposing raw RSA decryption; revisit when rsa crate ships a fix.
-ignore = ["RUSTSEC-2023-0071"]
+version = 2
+# Unmaintained / unsound crates anywhere in the graph are errors.
+unmaintained = "all"
+unsound = "all"
+# Yanked versions must not ship.
+yanked = "deny"
+ignore = [
+    # Marvin timing side channel in the `rsa` crate. No fixed `rsa` release
+    # exists. THIS IS NOT MITIGATED: RSA private-key operations of the default
+    # RustCrypto backend (C_Decrypt with CKM_RSA_PKCS_OAEP, and all RSA
+    # signing) use the affected code, so an attacker able to time many
+    # decryptions/signatures may be able to recover the private key. Residual
+    # risk is documented in docs/security-model.md and
+    # docs/fips-140-3-certification.md §11. Exit plan: route RSA private-key
+    # operations to aws-lc-rs (awslc-backend) or upgrade to a fixed `rsa`.
+    # Owner: crypto maintainers.
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side channel: no fixed release; RSA OAEP decrypt and RSA signing on the RustCrypto backend ARE exposed (not mitigated); residual risk documented in docs/security-model.md; exit = aws-lc RSA or fixed rsa; owner crypto maintainers; expires 2026-12-31" },
+    # rustls-pemfile is unmaintained (informational, no known vulnerability).
+    # It is used only by craton-hsm-daemon to parse the operator-supplied TLS
+    # certificate/key/CA PEM files at start-up. Exit plan: switch to
+    # `rustls-pki-types` PEM parsing (`PemObject`). Owner: daemon maintainers.
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained (no known vuln); daemon start-up PEM parsing only; exit = rustls-pki-types PemObject; owner daemon maintainers; expires 2026-12-31" },
+]
 
 [licenses]
-# Allow these license expressions
+version = 2
+# Allowed license expressions. Every entry must be used by at least one crate
+# in the graph; unused allowances are removed.
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
-    "BSL-1.0",
+    # Only via the optional aws-lc-fips-sys (awslc-backend feature).
     "OpenSSL",
     "CC0-1.0",
 ]
-# Confidence threshold for license detection
 confidence-threshold = 0.8
-# Allow ring's OpenSSL-derived license (used by aws-lc-rs / rustls)
-exceptions = [
-    { allow = ["ISC", "MIT", "OpenSSL"], name = "ring" },
-]
+# `ring` 0.17 is "Apache-2.0 AND ISC"; the old OpenSSL-licence exception is
+# obsolete and has been removed (A3-12).
+exceptions = []
+
+[licenses.private]
+ignore = true
 
 [bans]
-# Warn on multiple versions of the same crate
-multiple-versions = "warn"
-# Highlight specific crates that should be audited carefully
+# Duplicate versions are errors unless explicitly listed in `skip` below with
+# a reason. Introducing a new duplicate therefore requires review (A3-06, A3-07).
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
+skip = [
+    # RustCrypto stable / next-generation split: the PQC crates (ml-kem,
+    # ml-dsa, slh-dsa release candidates) pull the next-generation (mostly
+    # pre-release) trait and primitive crates while the classical stack is on
+    # the stable generation. Owner: crypto maintainers; revisit when the PQC
+    # crates reach a stable release.
+    { crate = "block-buffer", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "cipher", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "const-oid", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "cpufeatures", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "crypto-common", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "der", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "digest", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "hmac", reason = "RustCrypto generation split (slh-dsa uses hmac 0.13 pre-release)" },
+    { crate = "inout", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "keccak", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "pkcs8", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "sha2", reason = "RustCrypto generation split (slh-dsa uses sha2 0.11 pre-release, not covered by the POST KATs)" },
+    { crate = "sha3", reason = "RustCrypto generation split (PQC crates use sha3 0.11 pre-release, not covered by the POST KATs)" },
+    { crate = "signature", reason = "RustCrypto generation split (PQC release candidates)" },
+    { crate = "spki", reason = "RustCrypto generation split (PQC release candidates)" },
+    # rand_core 0.6 / 0.10 and getrandom 0.2 / 0.3 / 0.4 (see the alias TODO in Cargo.toml).
+    { crate = "rand_core", reason = "rand_core 0.6 (classical) vs 0.10 (PQC) ecosystems" },
+    { crate = "getrandom", reason = "getrandom 0.2 / 0.3 / 0.4 across rand_core generations" },
+    { crate = "r-efi", reason = "transitive via the getrandom generations" },
+    # Platform / tooling duplicates outside the cryptographic path.
+    { crate = "windows-sys", reason = "Windows platform crates pinned differently by upstream dependencies" },
+    { crate = "hashbrown", reason = "transitive version skew (indexmap / dashmap / tonic)" },
+    { crate = "itertools", reason = "transitive version skew in build tooling (prost-build / criterion)" },
+    { crate = "libloading", reason = "0.8 via bindgen/clang-sys (optional awslc-backend build) vs 0.9 direct" },
+    { crate = "untrusted", reason = "0.7 via aws-lc-rs vs 0.9 via ring / rustls-webpki" },
+]
 
 [sources]
-# Only allow crates from crates.io
+# Only allow crates from crates.io; no git dependencies.
 unknown-registry = "deny"
 unknown-git = "deny"
-# Allow specific git sources if needed
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
