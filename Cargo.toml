@@ -143,6 +143,13 @@ harness = false
 name = "pkcs11_abi_bench"
 harness = false
 
+# PBKDF2 (600,000 iterations per PIN operation), the DRBG and the PQC crates
+# are unusably slow when unoptimised, which makes the ABI test suites take
+# hours in debug builds. Optimise dependencies (not this crate, so its own
+# debug assertions and debuggability are kept) in dev/test builds.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
 lto = true
 codegen-units = 1
