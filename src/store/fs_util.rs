@@ -112,7 +112,9 @@ pub(crate) fn open_private(path: &Path, append: bool) -> HsmResult<File> {
     }
     secure_flags(&mut opts);
     let existed = path.exists();
-    let f = opts.open(path).map_err(|e| io_err("cannot open", path, e))?;
+    let f = opts
+        .open(path)
+        .map_err(|e| io_err("cannot open", path, e))?;
     #[cfg(windows)]
     if !existed {
         crate::store::encrypted_store::set_restrictive_permissions(path)?;

@@ -360,7 +360,8 @@ impl Token {
                 wrapped_dek_so: auth.wrapped_dek_so.as_ref().map(hex::encode),
                 wrapped_dek_user: auth.wrapped_dek_user.as_ref().map(hex::encode),
             };
-            let bytes = Zeroizing::new(serde_json::to_vec(&rec).map_err(|_| HsmError::GeneralError)?);
+            let bytes =
+                Zeroizing::new(serde_json::to_vec(&rec).map_err(|_| HsmError::GeneralError)?);
             store.put_meta(&Self::record_key(self.slot_id), &bytes)?;
         }
         Ok(())
@@ -842,7 +843,11 @@ impl Token {
             tracing::error!("storage key not unlocked; cannot re-wrap");
             HsmError::DeviceError
         })?;
-        Ok(Some(wrap_key(kek, dek, &self.dek_aad(role, &auth.token_id))?))
+        Ok(Some(wrap_key(
+            kek,
+            dek,
+            &self.dek_aad(role, &auth.token_id),
+        )?))
     }
 
     /// Change PIN (user changes own PIN, or SO changes SO PIN).

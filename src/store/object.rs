@@ -172,7 +172,10 @@ impl KeyUsage {
     /// Operations that only *process* existing protected data and are
     /// therefore still allowed for a deactivated key (SP 800-57).
     fn allowed_when_deactivated(self) -> bool {
-        matches!(self, KeyUsage::Verify | KeyUsage::Decrypt | KeyUsage::Unwrap)
+        matches!(
+            self,
+            KeyUsage::Verify | KeyUsage::Decrypt | KeyUsage::Unwrap
+        )
     }
 
     /// Parse the legacy string names used by older call sites.
@@ -352,8 +355,8 @@ impl StoredObject {
     pub fn check_lifecycle(&self, operation: &str) -> Result<(), crate::error::HsmError> {
         // Unknown operation names are a programming error: deny (fail closed)
         // instead of silently applying the wrong policy.
-        let usage =
-            KeyUsage::from_name(operation).ok_or(crate::error::HsmError::KeyFunctionNotPermitted)?;
+        let usage = KeyUsage::from_name(operation)
+            .ok_or(crate::error::HsmError::KeyFunctionNotPermitted)?;
         self.check_usage(usage)
     }
 

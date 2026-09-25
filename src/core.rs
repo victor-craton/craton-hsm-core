@@ -217,8 +217,8 @@ impl HsmCore {
             ));
         }
 
-        let max_per_app = usize::try_from(config.token.max_sessions_per_application)
-            .unwrap_or(usize::MAX);
+        let max_per_app =
+            usize::try_from(config.token.max_sessions_per_application).unwrap_or(usize::MAX);
 
         Ok(Self {
             slot_manager,
@@ -270,7 +270,12 @@ impl HsmCore {
     /// only then destroys the slot's objects (memory and persistent store;
     /// other slots are untouched) and resets the token. The operation is
     /// audited synchronously.
-    pub fn init_token(&self, slot_id: CK_SLOT_ID, so_pin: &[u8], label: &[u8; 32]) -> HsmResult<()> {
+    pub fn init_token(
+        &self,
+        slot_id: CK_SLOT_ID,
+        so_pin: &[u8],
+        label: &[u8; 32],
+    ) -> HsmResult<()> {
         self.check_live()?;
         let token = self.slot_manager.get_token(slot_id)?;
         let result = if self.session_manager.has_sessions(slot_id) {
@@ -407,7 +412,12 @@ impl HsmCore {
     /// the slot and, in persistent mode, loads the slot's token objects. If
     /// any step after the token login fails, the login is rolled back so
     /// token and session states never diverge (H3-21/H1-19).
-    pub fn login(&self, session: CK_SESSION_HANDLE, user_type: CK_ULONG, pin: &[u8]) -> HsmResult<()> {
+    pub fn login(
+        &self,
+        session: CK_SESSION_HANDLE,
+        user_type: CK_ULONG,
+        pin: &[u8],
+    ) -> HsmResult<()> {
         self.check_live()?;
         let slot = self.session_manager.get_session(session)?.read().slot_id;
         let token = self.slot_manager.get_token(slot)?;
@@ -453,7 +463,9 @@ impl HsmCore {
 
     /// Hex-encoded random per-token identity used to bind backups (H3-16).
     pub fn token_binding(&self, slot_id: CK_SLOT_ID) -> HsmResult<String> {
-        Ok(hex::encode(self.slot_manager.get_token(slot_id)?.token_id()))
+        Ok(hex::encode(
+            self.slot_manager.get_token(slot_id)?.token_id(),
+        ))
     }
 
     /// Export the token objects of an initialised slot for backup.

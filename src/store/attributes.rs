@@ -568,13 +568,22 @@ impl ObjectStore {
     // ------------------------------------------------------------------
 
     fn finish_removal(&self, obj_arc: &Arc<RwLock<StoredObject>>) {
+        self.finish_removal_inner(obj_arc, true)
+    }
+
+    /// `destroyed = false` is used when objects are only evicted from memory
+    /// (C_Finalize): their persisted copies live on, so per-key GCM counters
+    /// must be kept to avoid nonce reuse after a re-initialisation.
+    fn finish_removal_inner(&self, obj_arc: &Arc<RwLock<StoredObject>>, destroyed: bool) {
         let mut o = obj_arc.write();
         let size = o.approximate_size() as usize;
         let slot = o.slot_id;
         let owner = o.owner_session;
         if let Some(km) = o.key_material.as_ref() {
             // Per-key AEAD counters/IV trackers die with the key.
-            crate::crypto::encrypt::remove_gcm_counter(km.as_bytes());
+            if destroyed {
+                crate::crypto::encrypt::remove_gcm_counter(km.as_bytes());
+            }
             if o.class == CKO_PRIVATE_KEY && o.key_type == Some(CKK_RSA) {
                 // Parsed RSA keys are cached by the crypto layer (A1-10).
                 crate::crypto::sign::clear_rsa_key_cache();
@@ -688,7 +697,9 @@ impl ObjectStore {
         let handles: Vec<CK_OBJECT_HANDLE> = self.objects.iter().map(|e| *e.key()).collect();
         for h in handles {
             if let Some((_, arc)) = self.objects.remove(&h) {
-                self.finish_removal(&arc);
+                // Keep per-key GCM counters: a persisted (or re-imported) key
+                // must never restart its nonce sequence.
+                self.finish_removal_inner(&arc, false);
             }
         }
         self.handle_to_store_key.lock().clear();
@@ -829,6 +840,22 @@ impl ObjectStore {
         *guard = new;
         drop(guard);
         self.adjust_bytes(slot, old_size, new_size);
+        Ok(())
+    }
+
+    /// Mark a key compromised (SP 800-57): every further use is refused with
+    /// `CKR_KEY_FUNCTION_NOT_PERMITTED` (H3-23 / S7). The change is persisted
+    /// for token objects. Callers are responsible for authorising the request
+    /// (administrative / SO-level operation).
+    pub fn mark_compromised(&self, handle: CK_OBJECT_HANDLE, slot: CK_SLOT_ID) -> HsmResult<()> {
+        let arc = self.get_object_in_slot(handle, slot)?;
+        let mut guard = arc.write();
+        let mut new = guard.clone();
+        new.lifecycle_state = KeyLifecycleState::Compromised;
+        if new.token_object {
+            self.persist_object(&new)?;
+        }
+        *guard = new;
         Ok(())
     }
 
@@ -1203,8 +1230,7 @@ pub fn read_attribute(
         CKA_ALWAYS_SENSITIVE if secret_class => Some(bool_bytes(obj.always_sensitive)),
         CKA_NEVER_EXTRACTABLE if secret_class => Some(bool_bytes(obj.never_extractable)),
         CKA_KEY_GEN_MECHANISM if is_key => Some(ulong_bytes(
-            obj.key_gen_mechanism
-                .unwrap_or(CK_UNAVAILABLE_INFORMATION),
+            obj.key_gen_mechanism.unwrap_or(CK_UNAVAILABLE_INFORMATION),
         )),
         CKA_VALUE => {
             if secret_class && !secret_readable {
@@ -1277,10 +1303,17 @@ pub fn sanitize_restored_object(
     obj: &mut StoredObject,
     allow_non_sensitive: bool,
 ) -> HsmResult<()> {
-    validate_deserialized_object(obj).map_err(|r| {
-        tracing::warn!("restored object rejected: {}", r);
-        HsmError::TemplateInconsistent
-    })?;
+    // Handles are re-allocated on import, so the backed-up handle value is
+    // irrelevant here (only lifecycle / size invariants are checked).
+    if obj.lifecycle_state == KeyLifecycleState::Destroyed
+        || obj
+            .key_material
+            .as_ref()
+            .is_some_and(|k| k.len() > MAX_KEY_MATERIAL_LEN)
+    {
+        tracing::warn!("restored object rejected: destroyed or oversized");
+        return Err(HsmError::TemplateInconsistent);
+    }
     if is_secret_class(obj.class) && !obj.sensitive && !allow_non_sensitive {
         return Err(HsmError::TemplateInconsistent);
     }

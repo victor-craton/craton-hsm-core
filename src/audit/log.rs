@@ -311,8 +311,9 @@ impl Drop for Backend {
 /// Process-wide registry: one backend per canonical log path. A single
 /// writer per chain is required; two independent writers appending to the
 /// same file would corrupt the chain.
-static REGISTRY: parking_lot::Mutex<Option<std::collections::HashMap<PathBuf, std::sync::Weak<Backend>>>> =
-    parking_lot::Mutex::new(None);
+static REGISTRY: parking_lot::Mutex<
+    Option<std::collections::HashMap<PathBuf, std::sync::Weak<Backend>>>,
+> = parking_lot::Mutex::new(None);
 
 /// Tamper-evident audit log (see module documentation).
 pub struct AuditLog {
@@ -345,7 +346,11 @@ fn payload_bytes(event: &AuditEvent) -> HsmResult<Vec<u8>> {
 }
 
 fn event_hash(key: &[u8; 32], event: &AuditEvent) -> HsmResult<[u8; 32]> {
-    Ok(compute_chain_hash(key, &event.previous_hash, &payload_bytes(event)?))
+    Ok(compute_chain_hash(
+        key,
+        &event.previous_hash,
+        &payload_bytes(event)?,
+    ))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -393,7 +398,8 @@ fn read_anchor(log: &Path, key: &[u8; 32]) -> Result<Option<(u64, [u8; 32])>, St
     match crate::store::fs_util::read_private(&anchor_path(log)) {
         Ok(None) => Ok(None),
         Ok(Some(b)) => {
-            let a: Anchor = serde_json::from_slice(&b).map_err(|e| format!("anchor corrupt: {e}"))?;
+            let a: Anchor =
+                serde_json::from_slice(&b).map_err(|e| format!("anchor corrupt: {e}"))?;
             let h: [u8; 32] = hex::decode(&a.hash)
                 .ok()
                 .and_then(|v| v.try_into().ok())
@@ -479,6 +485,8 @@ struct Writer {
     path: PathBuf,
     file: std::io::BufWriter<std::fs::File>,
     size: u64,
+    /// Rotation threshold (bytes).
+    max_bytes: u64,
 }
 
 struct WorkerCtx {
@@ -551,6 +559,7 @@ impl WorkerCtx {
             None => return Ok(()),
         };
         let path = w.path.clone();
+        let max_bytes = w.max_bytes;
         let mut file = w.file.into_inner().map_err(|_| HsmError::DeviceError)?;
         file.flush().map_err(|_| HsmError::DeviceError)?;
         file.sync_all().map_err(|_| HsmError::DeviceError)?;
@@ -561,6 +570,7 @@ impl WorkerCtx {
             path,
             file: std::io::BufWriter::new(f),
             size: 0,
+            max_bytes,
         });
         // First event of the new generation chains to the old one.
         let prev_seq = self.next_seq.saturating_sub(1);
@@ -620,11 +630,7 @@ impl WorkerCtx {
                 "refusing to record: audit chain tamper previously detected".to_string(),
             ));
         }
-        if self
-            .writer
-            .as_ref()
-            .is_some_and(|w| w.size >= MAX_LOG_FILE_BYTES)
-        {
+        if self.writer.as_ref().is_some_and(|w| w.size >= w.max_bytes) {
             self.rotate()?;
         }
         let (event, hash, line) = self.build_event(session_handle, operation, result, key_id)?;
@@ -792,7 +798,16 @@ impl AuditLog {
             tracing::warn!("audit logging to disk is DISABLED (audit.enabled = false)");
             let mut key = Zeroizing::new([0u8; 32]);
             crate::store::encrypted_store::fill_random(key.as_mut())?;
-            return Self::start(key, None, ([0u8; 32], 0, 0), false, false, level, None, None);
+            return Self::start(
+                key,
+                None,
+                ([0u8; 32], 0, 0),
+                false,
+                false,
+                level,
+                None,
+                None,
+            );
         }
         let key_path = cfg
             .key_path
@@ -830,6 +845,16 @@ impl AuditLog {
         key_path: PathBuf,
         fail_closed: bool,
         level: AuditLevel,
+    ) -> Result<Self, HsmError> {
+        Self::open_file_exclusive_with_limit(path, key_path, fail_closed, level, MAX_LOG_FILE_BYTES)
+    }
+
+    fn open_file_exclusive_with_limit(
+        path: PathBuf,
+        key_path: PathBuf,
+        fail_closed: bool,
+        level: AuditLevel,
+        max_bytes: u64,
     ) -> Result<Self, HsmError> {
         // Cross-process single-writer lock (<log>.lock, 0600, O_NOFOLLOW).
         let lock_path = {
@@ -896,6 +921,7 @@ impl AuditLog {
                 path: path.clone(),
                 file: std::io::BufWriter::new(f),
                 size,
+                max_bytes,
             })
         };
         Self::start(
@@ -1057,9 +1083,11 @@ impl AuditLog {
             (None, Some(_)) => {
                 ChainRecoveryResult::Broken("log is empty but anchor exists (truncated)".into())
             }
-            (Some(next), Some((aseq, _))) if aseq >= next => ChainRecoveryResult::Broken(
-                format!("log truncated: anchor seq {} beyond last event {}", aseq, next - 1),
-            ),
+            (Some(next), Some((aseq, _))) if aseq >= next => ChainRecoveryResult::Broken(format!(
+                "log truncated: anchor seq {} beyond last event {}",
+                aseq,
+                next - 1
+            )),
             (Some(_), Some(_)) if !anchor_seen => {
                 ChainRecoveryResult::Broken("anchor refers to an event not in this log".into())
             }
@@ -1256,7 +1284,13 @@ impl AuditLog {
         if offset >= state.entries.len() {
             return Vec::new();
         }
-        state.entries.iter().skip(offset).take(limit).cloned().collect()
+        state
+            .entries
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Export all entries as a JSON array string.
@@ -1388,6 +1422,87 @@ impl AuditLog {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open(path: &Path, limit: u64) -> AuditLog {
+        AuditLog::open_file_exclusive_with_limit(
+            path.to_path_buf(),
+            default_key_path(path),
+            false,
+            AuditLevel::All,
+            limit,
+        )
+        .unwrap()
+    }
+
+    fn write_events(log: &AuditLog, n: usize) {
+        for i in 0..n {
+            log.record(
+                i as u64,
+                AuditOperation::Login { user_type: 1 },
+                AuditResult::Success,
+                Some(format!("key-{i}")),
+            )
+            .unwrap();
+        }
+        log.flush();
+    }
+
+    #[test]
+    fn restart_after_rotation_is_not_tamper() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("audit.jsonl");
+        {
+            let log = open(&p, 2048);
+            write_events(&log, 60);
+            assert!(!log.is_tamper_detected());
+        }
+        assert!(rotated_path(&p, 1).exists(), "rotation must have happened");
+        let log = open(&p, 2048);
+        assert!(
+            !log.is_tamper_detected(),
+            "restart after rotation must verify"
+        );
+        write_events(&log, 3);
+        assert_eq!(log.verify_chain(), Ok(3));
+    }
+
+    #[test]
+    fn edit_truncation_and_deletion_are_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("audit.jsonl");
+        {
+            let log = open(&p, u64::MAX);
+            write_events(&log, 5);
+        }
+        let original = std::fs::read_to_string(&p).unwrap();
+
+        // Edit a field (attacker without the key cannot recompute the chain).
+        std::fs::write(&p, original.replacen("key-1", "key-X", 1)).unwrap();
+        assert!(open(&p, u64::MAX).is_tamper_detected());
+
+        // Truncate the tail (anchor records the last event).
+        let lines: Vec<&str> = original.lines().collect();
+        std::fs::write(&p, lines[..3].join("\n") + "\n").unwrap();
+        assert!(open(&p, u64::MAX).is_tamper_detected());
+
+        // Delete the log entirely.
+        std::fs::remove_file(&p).unwrap();
+        assert!(open(&p, u64::MAX).is_tamper_detected());
+    }
+
+    #[test]
+    fn mandatory_level_skips_routine_crypto_events() {
+        assert!(!AuditLevel::Mandatory.records(&AuditOperation::Sign {
+            mechanism: 1,
+            fips_approved: true
+        }));
+        assert!(AuditLevel::Mandatory.records(&AuditOperation::InitToken { slot_id: 0 }));
+        assert!(AuditLevel::All.records(&AuditOperation::GenerateRandom { length: 1 }));
+    }
+}
 
 /// Build a rotated file path: `path.1`, `path.2`, etc.
 fn rotated_path(base: &Path, generation: u32) -> PathBuf {

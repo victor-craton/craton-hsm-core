@@ -107,11 +107,7 @@ impl PinVerifier {
 }
 
 /// Wrap a data-encryption key under a KEK (AES-256-GCM, `nonce || ct`).
-pub fn wrap_key(
-    kek: &[u8; KEY_LEN],
-    key: &[u8; KEY_LEN],
-    aad: &[u8],
-) -> HsmResult<Vec<u8>> {
+pub fn wrap_key(kek: &[u8; KEY_LEN], key: &[u8; KEY_LEN], aad: &[u8]) -> HsmResult<Vec<u8>> {
     let mut nonce = [0u8; NONCE_LEN];
     fill_random(&mut nonce)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(kek));

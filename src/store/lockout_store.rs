@@ -100,8 +100,8 @@ impl LockoutStore {
     /// Persist lockout data atomically. Errors are returned so callers can
     /// refuse the authentication attempt (fail closed).
     pub fn save(&self, data: &LockoutData) -> crate::error::HsmResult<()> {
-        let json = serde_json::to_vec_pretty(data)
-            .map_err(|_| crate::error::HsmError::GeneralError)?;
+        let json =
+            serde_json::to_vec_pretty(data).map_err(|_| crate::error::HsmError::GeneralError)?;
         if let Some(parent) = self.path.parent() {
             crate::store::fs_util::ensure_private_dir(parent)?;
         }

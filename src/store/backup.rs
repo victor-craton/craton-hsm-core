@@ -191,8 +191,7 @@ pub fn restore_backup(
     if version != BACKUP_VERSION || data[8] != KDF_PBKDF2_SHA256 {
         return Err(HsmError::DataInvalid);
     }
-    let iterations =
-        u32::from_le_bytes(data[9..13].try_into().map_err(|_| HsmError::DataInvalid)?);
+    let iterations = u32::from_le_bytes(data[9..13].try_into().map_err(|_| HsmError::DataInvalid)?);
     let floor = pbkdf2_iterations
         .unwrap_or(MIN_BACKUP_ITERATIONS)
         .max(MIN_BACKUP_ITERATIONS);
@@ -269,7 +268,10 @@ pub fn restore_backup(
     let mut objects = objects.into_inner();
     for obj in objects.iter_mut() {
         if let Err(e) = sanitize_restored_object(obj, false) {
-            tracing::warn!("Backup restore rejected: object failed policy check: {:?}", e);
+            tracing::warn!(
+                "Backup restore rejected: object failed policy check: {:?}",
+                e
+            );
             drop(ZeroizingObjects::new(objects));
             return Err(HsmError::DataInvalid);
         }
@@ -572,10 +574,26 @@ mod tests {
         let backup = create_backup(&[], "L0ng-P@ssphrase!", TEST_SERIAL, None).unwrap();
         let mut tampered = backup.clone();
         tampered[13] ^= 1; // salt byte
-        assert!(restore_backup(&tampered, "L0ng-P@ssphrase!", TEST_SERIAL, Some(0), None, None).is_err());
+        assert!(restore_backup(
+            &tampered,
+            "L0ng-P@ssphrase!",
+            TEST_SERIAL,
+            Some(0),
+            None,
+            None
+        )
+        .is_err());
         let mut tampered = backup;
         tampered[9..13].copy_from_slice(&200_000u32.to_le_bytes()); // iterations
-        assert!(restore_backup(&tampered, "L0ng-P@ssphrase!", TEST_SERIAL, Some(0), None, None).is_err());
+        assert!(restore_backup(
+            &tampered,
+            "L0ng-P@ssphrase!",
+            TEST_SERIAL,
+            Some(0),
+            None,
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -583,12 +601,28 @@ mod tests {
         let mut obj = make_test_object(1, "k");
         obj.sensitive = false;
         let backup = create_backup(&[obj], "L0ng-P@ssphrase!", TEST_SERIAL, None).unwrap();
-        assert!(restore_backup(&backup, "L0ng-P@ssphrase!", TEST_SERIAL, Some(0), None, None).is_err());
+        assert!(restore_backup(
+            &backup,
+            "L0ng-P@ssphrase!",
+            TEST_SERIAL,
+            Some(0),
+            None,
+            None
+        )
+        .is_err());
 
         let mut obj = make_test_object(2, "t");
         obj.trusted = true;
         let backup = create_backup(&[obj], "L0ng-P@ssphrase!", TEST_SERIAL, None).unwrap();
-        let r = restore_backup(&backup, "L0ng-P@ssphrase!", TEST_SERIAL, Some(0), None, None).unwrap();
+        let r = restore_backup(
+            &backup,
+            "L0ng-P@ssphrase!",
+            TEST_SERIAL,
+            Some(0),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!r[0].trusted);
     }
 

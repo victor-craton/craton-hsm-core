@@ -76,12 +76,29 @@ pub const DB_FILE_NAME: &str = "craton_hsm.redb";
 
 type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
+/// Process-wide DRBG for storage salts, nonces and identifiers (P5: one
+/// instantiation instead of one per nonce; the DRBG reseeds itself).
+static STORE_DRBG: Mutex<Option<HmacDrbg>> = Mutex::new(None);
+
 /// Fill `buf` with random bytes from the SP 800-90A DRBG, falling back to the
 /// OS RNG on any DRBG error. Refuses to return an all-zero buffer (H3-18).
 pub(crate) fn fill_random(buf: &mut [u8]) -> HsmResult<()> {
-    let drbg_ok = match HmacDrbg::new() {
-        Ok(mut d) => d.generate(buf).is_ok(),
-        Err(_) => false,
+    let drbg_ok = {
+        let mut guard = STORE_DRBG.lock();
+        if guard.is_none() {
+            *guard = HmacDrbg::new().ok();
+        }
+        match guard.as_mut() {
+            Some(d) => {
+                let ok = d.generate(buf).is_ok();
+                if !ok {
+                    // Drop a failed instance; a fresh one is instantiated next time.
+                    *guard = None;
+                }
+                ok
+            }
+            None => false,
+        }
     };
     if !drbg_ok {
         use rand::RngCore;
@@ -294,9 +311,7 @@ impl EncryptedStore {
 
     /// Install the unlocked data-encryption key for a slot.
     pub fn set_slot_key(&self, slot: CK_SLOT_ID, key: &Zeroizing<[u8; KEY_LEN]>) {
-        self.keyring
-            .write()
-            .insert(slot, Zeroizing::new(**key));
+        self.keyring.write().insert(slot, Zeroizing::new(**key));
     }
 
     /// Remove (and zeroize) the unlocked key of a slot.
@@ -363,10 +378,13 @@ impl EncryptedStore {
                     .map_err(db_err("read manifest"))?
                 {
                     Some(v) => {
-                        let m: Manifest = serde_json::from_slice(v.value())
-                            .map_err(|_| HsmError::DeviceError)?;
+                        let m: Manifest =
+                            serde_json::from_slice(v.value()).map_err(|_| HsmError::DeviceError)?;
                         if !m.verify(slot, dek) {
-                            tracing::error!("manifest MAC invalid for slot {} — refusing write", slot);
+                            tracing::error!(
+                                "manifest MAC invalid for slot {} — refusing write",
+                                slot
+                            );
                             return Err(HsmError::DeviceError);
                         }
                         m
@@ -431,8 +449,8 @@ impl EncryptedStore {
                     .map_err(db_err("read manifest"))?
                 {
                     Some(v) => {
-                        let m: Manifest = serde_json::from_slice(v.value())
-                            .map_err(|_| HsmError::DeviceError)?;
+                        let m: Manifest =
+                            serde_json::from_slice(v.value()).map_err(|_| HsmError::DeviceError)?;
                         if !m.verify(slot, dek) {
                             return Err(HsmError::DeviceError);
                         }
@@ -579,7 +597,8 @@ impl EncryptedStore {
                 for (k, v) in &bad {
                     q.insert(k.as_str(), v.as_slice())
                         .map_err(db_err("quarantine insert"))?;
-                    objs.remove(k.as_str()).map_err(db_err("quarantine remove"))?;
+                    objs.remove(k.as_str())
+                        .map_err(db_err("quarantine remove"))?;
                 }
             }
             txn.commit().map_err(db_err("commit"))?;
@@ -871,7 +890,7 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) -> Result<(), Str
             return Err(format!(
                 "Failed to open process token for ACL setup on '{}'",
                 path.display()
-        ));
+            ));
         }
 
         // Query token user info size
@@ -885,7 +904,10 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) -> Result<(), Str
         );
         if needed == 0 {
             CloseHandle(token_handle);
-            return Err(format!("Failed to query token user size for '{}'", path.display()));
+            return Err(format!(
+                "Failed to query token user size for '{}'",
+                path.display()
+            ));
         }
 
         let mut token_buf: Vec<u8> = vec![0u8; needed as usize];
@@ -898,7 +920,10 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) -> Result<(), Str
         ) == 0
         {
             CloseHandle(token_handle);
-            return Err(format!("Failed to get token user info for '{}'", path.display()));
+            return Err(format!(
+                "Failed to get token user info for '{}'",
+                path.display()
+            ));
         }
         CloseHandle(token_handle);
 
@@ -926,7 +951,7 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) -> Result<(), Str
                 "SetEntriesInAclW failed ({}) for '{}'",
                 result,
                 path.display()
-        ));
+            ));
         }
 
         // Apply the DACL to the file with PROTECTED flag to block inheritance
@@ -1036,7 +1061,9 @@ mod tests {
         store.set_slot_key(3, &key(8));
         assert!(store.load_slot_objects(3).is_err());
         // Locked slot cannot write.
-        assert!(store.put_object(4, &new_store_key(4).unwrap(), 1, b"x").is_err());
+        assert!(store
+            .put_object(4, &new_store_key(4).unwrap(), 1, b"x")
+            .is_err());
     }
 
     #[test]
