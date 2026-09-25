@@ -46,7 +46,7 @@ The following changes are planned for the 1.0 release:
 
 2. **rand_core unification**: The dual `rand_core` 0.6 / 0.10 dependency will be resolved. This is an internal change but may affect custom `CryptoBackend` implementations.
 
-3. **MSRV bump**: The minimum supported Rust version may increase from 1.75 to align with dependency requirements.
+3. **MSRV**: The declared MSRV was corrected from 1.75 to **1.89** (the real requirement of the locked dependencies, e.g. `redb 3.1`). It may increase again with dependency updates; the development toolchain is pinned in `rust-toolchain.toml`.
 
 ### Migration Checklist
 
