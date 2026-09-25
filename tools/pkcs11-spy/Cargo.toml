@@ -2,12 +2,26 @@
 name = "pkcs11-spy"
 version = "0.3.0"
 edition = "2021"
-description = "PKCS#11 spy/debug wrapper — logs all function calls to any PKCS#11 library"
+# 1.81+: a panic that escapes an `extern "C"` function aborts instead of being
+# undefined behaviour (backstop for the catch_unwind wrappers, H6-04).
+rust-version = "1.81"
+description = "PKCS#11 spy/debug wrapper — logs PKCS#11 v2.40/v3.0 calls made to any PKCS#11 library"
 license = "Apache-2.0"
 repository = "https://github.com/craton-co/craton-hsm-core"
+publish = false
 
 [lib]
-crate-type = ["cdylib"]
+# "rlib" only so that `cargo test` builds the cdylib before the integration
+# tests (which dlopen it); nothing links the rlib.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libloading = "0.9"
+libc = "0.2"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

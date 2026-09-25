@@ -1,128 +1,294 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
-//! Dynamic loader for the real PKCS#11 library.
-#![allow(non_camel_case_types)]
+//! Loads the real PKCS#11 module once and caches its function tables.
+//!
+//! Trust model (H6-06): the spy loads whatever `PKCS11_SPY_TARGET` names, so
+//! the real controls are (a) who sets the environment — ignored entirely in
+//! secure-execution mode (H6-02, see `config.rs`) — and (b) who can write the
+//! module file. The loader therefore requires an absolute path, and on Unix
+//! checks that the module and every ancestor directory are owned by root or
+//! the effective user and cannot be modified by other users (sticky
+//! directories such as `/tmp` excepted). There is no file-extension check: it
+//! was a heuristic, not a control.
+//!
+//! The module is `dlopen`ed by its canonical path (H6-11), not via
+//! `/proc/self/fd/N`, so `$ORIGIN` in its `DT_RUNPATH` and `dladdr()`-based
+//! self-location keep working. After loading, the path is re-`stat`ed and its
+//! `(st_dev, st_ino)` compared with the descriptor that was validated. On
+//! Windows the module's dependencies are resolved only from its own directory
+//! and System32 (`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | ..._SYSTEM32`).
+//!
+//! Errors never panic (H6-04): they are cached, reported once (log + stderr)
+//! and every PKCS#11 entry point returns `CKR_GENERAL_ERROR`.
+//!
+//! Once loaded, the module is never unloaded: if the host `dlclose`s the spy,
+//! the target stays mapped for the life of the process.
 
-use libloading::{Library, Symbol};
+use crate::ckr::ckr_name;
+use crate::config;
+use crate::logger;
+use crate::types::*;
+use libloading::Library;
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
+use std::ptr;
 use std::sync::OnceLock;
 
-/// Opaque PKCS#11 type aliases (platform-independent for the spy wrapper).
-pub type CK_ULONG = std::ffi::c_ulong;
-pub type CK_RV = CK_ULONG;
+type GetFunctionListFn = unsafe extern "C" fn(CK_FUNCTION_LIST_PTR_PTR) -> CK_RV;
+type GetInterfaceFn =
+    unsafe extern "C" fn(CK_UTF8CHAR_PTR, CK_VERSION_PTR, CK_INTERFACE_PTR_PTR, CK_FLAGS) -> CK_RV;
 
-static REAL_LIB: OnceLock<Library> = OnceLock::new();
+/// The loaded target module and its function tables (resolved once — no
+/// per-call `dlsym`).
+pub struct Target {
+    _lib: Library,
+    v2: *const CK_FUNCTION_LIST,
+    v3: *const CK_FUNCTION_LIST_3_0,
+    /// Flags of the target's "PKCS 11" v3.0 interface (0 if none).
+    pub iface_flags: CK_FLAGS,
+    pub path: PathBuf,
+}
 
-/// Load the target PKCS#11 library from `PKCS11_SPY_TARGET` env var.
-/// Returns the loaded library reference, or panics if missing/invalid.
-///
-/// SECURITY: The path is canonicalized to resolve symlinks and relative
-/// components, and validated to be a regular file before loading. This
-/// mitigates path traversal and symlink-based library injection attacks.
-///
-/// On Linux, the file is opened first, validated via fstat on the fd, then
-/// loaded via `/proc/self/fd/<N>` to eliminate the TOCTOU race between
-/// validation and dlopen. On other platforms, a double-check narrows the
-/// window but cannot fully eliminate it.
-fn load_library() -> &'static Library {
-    REAL_LIB.get_or_init(|| {
-        let raw_path = std::env::var("PKCS11_SPY_TARGET")
-            .expect("PKCS11_SPY_TARGET environment variable must be set");
+// SAFETY: the table pointers refer to immutable data inside the loaded module,
+// which is never unloaded; PKCS#11 function lists are shared between threads
+// by design.
+unsafe impl Send for Target {}
+unsafe impl Sync for Target {}
 
-        // Canonicalize the path to resolve symlinks and relative components
-        let canonical = std::fs::canonicalize(&raw_path)
-            .unwrap_or_else(|e| panic!("PKCS11_SPY_TARGET path cannot be resolved: {}", e));
+impl Target {
+    pub fn v2(&self) -> Option<&CK_FUNCTION_LIST> {
+        // SAFETY: non-NULL pointer returned by the target's C_GetFunctionList
+        // (or C_GetInterface); valid while the module is loaded (forever).
+        unsafe { self.v2.as_ref() }
+    }
 
-        // Ensure the target is a regular file (not a directory, device, etc.)
-        let metadata = std::fs::metadata(&canonical)
-            .unwrap_or_else(|e| panic!("Cannot read metadata for PKCS11_SPY_TARGET: {}", e));
-        if !metadata.is_file() {
-            panic!("PKCS11_SPY_TARGET must point to a regular file");
+    pub fn v3(&self) -> Option<&CK_FUNCTION_LIST_3_0> {
+        // SAFETY: as above; NULL when the target has no v3.0 interface.
+        unsafe { self.v3.as_ref() }
+    }
+
+    pub fn has_v3(&self) -> bool {
+        !self.v3.is_null()
+    }
+}
+
+static TARGET: OnceLock<Result<Target, String>> = OnceLock::new();
+
+thread_local! {
+    /// Set while this thread is loading the target (H6-12: a re-entrant call
+    /// from the target's constructors must not re-enter `OnceLock` init).
+    static LOADING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The loaded target, or the error code to return (`CKR_GENERAL_ERROR`).
+pub fn target() -> Result<&'static Target, CK_RV> {
+    if let Some(r) = TARGET.get() {
+        return r.as_ref().map_err(|_| CKR_GENERAL_ERROR);
+    }
+    if LOADING.try_with(Cell::get).unwrap_or(false) {
+        logger::log_event(
+            "error",
+            "re-entrant call into the spy while the target module is loading; returning CKR_GENERAL_ERROR",
+        );
+        return Err(CKR_GENERAL_ERROR);
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            let _ = LOADING.try_with(|l| l.set(false));
         }
+    }
+    let _ = LOADING.try_with(|l| l.set(true));
+    let _reset = Reset;
 
-        // Validate the file extension looks like a shared library
-        let ext = canonical.extension().and_then(|e| e.to_str()).unwrap_or("");
-        match ext {
-            "so" | "dylib" | "dll" => {}
-            _ => {
-                // Allow versioned .so files (e.g., libfoo.so.1.2.3) by checking
-                // if ".so" appears in the filename
-                let name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !name.contains(".so") {
-                    panic!(
-                        "PKCS11_SPY_TARGET does not appear to be a shared library \
-                         (expected .so, .dylib, or .dll extension)"
-                    );
+    let r = TARGET.get_or_init(|| {
+        let res = load();
+        match &res {
+            Ok(t) => logger::log_event(
+                "info",
+                &format!(
+                    "loaded target {} (v3.0 interface: {})",
+                    t.path.display(),
+                    if t.has_v3() { "yes" } else { "no" }
+                ),
+            ),
+            Err(e) => {
+                if !logger::is_stderr() {
+                    eprintln!("pkcs11-spy: {e}");
                 }
+                logger::log_event("error", e);
             }
         }
+        res
+    });
+    r.as_ref().map_err(|_| CKR_GENERAL_ERROR)
+}
 
-        // --- TOCTOU-safe loading ---
-        //
-        // On Linux: open the file, validate via fstat on the fd (not the path),
-        // then load via /proc/self/fd/<N>. This eliminates the race between
-        // validation and dlopen — the fd pins the inode so the file cannot be
-        // swapped between stat and load.
-        //
-        // On other platforms: fall back to a double-check which narrows but
-        // does not eliminate the window.
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::io::AsRawFd;
+fn load() -> Result<Target, String> {
+    let raw = config::get().target.as_ref().map_err(|e| e.to_string())?;
+    if !raw.is_absolute() {
+        return Err(format!(
+            "PKCS11_SPY_TARGET must be an absolute path (got {})",
+            raw.display()
+        ));
+    }
+    let canonical = std::fs::canonicalize(raw).map_err(|e| {
+        format!(
+            "PKCS11_SPY_TARGET {} cannot be resolved: {e}",
+            raw.display()
+        )
+    })?;
+    let lib = open_verified(&canonical)?;
 
-            let file = std::fs::File::open(&canonical)
-                .unwrap_or_else(|e| panic!("Failed to open PKCS11_SPY_TARGET: {}", e));
+    // SAFETY: the symbol types match the PKCS#11 prototypes.
+    let gfl: Option<GetFunctionListFn> =
+        unsafe { lib.get::<GetFunctionListFn>(b"C_GetFunctionList\0") }
+            .ok()
+            .map(|s| *s);
+    // SAFETY: as above.
+    let gi: Option<GetInterfaceFn> = unsafe { lib.get::<GetInterfaceFn>(b"C_GetInterface\0") }
+        .ok()
+        .map(|s| *s);
 
-            // Validate via fstat on the fd — immune to path-based TOCTOU
-            let fd_metadata = file
-                .metadata()
-                .unwrap_or_else(|e| panic!("Failed to fstat PKCS11_SPY_TARGET fd: {}", e));
-            if !fd_metadata.is_file() {
-                panic!("PKCS11_SPY_TARGET fd is not a regular file");
-            }
+    // H6-12: self-targeting — dlopen() of the spy's own file returns the
+    // spy's handle, so the resolved entry point is the spy's own.
+    let own_gfl: GetFunctionListFn = crate::C_GetFunctionList;
+    let own_gi: GetInterfaceFn = crate::C_GetInterface;
+    if gfl.map(|f| f as usize) == Some(own_gfl as usize)
+        || gi.map(|f| f as usize) == Some(own_gi as usize)
+    {
+        return Err(format!(
+            "PKCS11_SPY_TARGET {} is the spy itself; refusing to recurse",
+            canonical.display()
+        ));
+    }
 
-            // Load via /proc/self/fd/<N> — dlopen will use the already-opened fd's inode
-            let fd_path = format!("/proc/self/fd/{}", file.as_raw_fd());
-            let lib = unsafe {
-                Library::new(&fd_path)
-                    .unwrap_or_else(|e| panic!("Failed to load PKCS#11 library via fd: {}", e))
-            };
-
-            // The file handle is intentionally kept open (leaked) to prevent the
-            // fd from being closed and reused before dlopen completes its own
-            // reference. The OS will clean up on process exit.
-            std::mem::forget(file);
-
-            lib
+    let mut v2: CK_FUNCTION_LIST_PTR = ptr::null_mut();
+    if let Some(f) = gfl {
+        // SAFETY: valid out-pointer; calling the target's documented entry point.
+        let rv = unsafe { f(&mut v2) };
+        if rv != CKR_OK {
+            return Err(format!(
+                "target C_GetFunctionList failed: {}",
+                ckr_name(crate::ckr::widen(rv))
+            ));
         }
+    }
 
-        #[cfg(not(target_os = "linux"))]
-        {
-            // Re-verify the canonical path is still a regular file immediately before
-            // loading to narrow the TOCTOU window (canonicalize → metadata → load).
-            // This cannot fully eliminate the race, but makes exploitation harder.
-            if !std::fs::metadata(&canonical)
-                .map(|m| m.is_file())
-                .unwrap_or(false)
-            {
-                panic!("PKCS11_SPY_TARGET was replaced between validation and loading");
-            }
-
-            unsafe {
-                Library::new(canonical.as_os_str())
-                    .unwrap_or_else(|e| panic!("Failed to load PKCS#11 library: {}", e))
+    let (mut v3, mut iface_flags): (*const CK_FUNCTION_LIST_3_0, CK_FLAGS) = (ptr::null(), 0);
+    if let Some(f) = gi {
+        let mut iface: CK_INTERFACE_PTR = ptr::null_mut();
+        let mut ver = CK_VERSION { major: 3, minor: 0 };
+        // SAFETY: NUL-terminated name, valid version and out-pointer.
+        let rv = unsafe { f(c"PKCS 11".as_ptr() as *mut u8, &mut ver, &mut iface, 0) };
+        if rv == CKR_OK && !iface.is_null() {
+            // SAFETY: the target returned a pointer to its CK_INTERFACE.
+            let i = unsafe { ptr::read_unaligned(iface) };
+            let l = i.pFunctionList as *const CK_FUNCTION_LIST_3_0;
+            // SAFETY: non-NULL table pointer from the target; `version` is a
+            // by-value read of a Copy field.
+            if !l.is_null() && unsafe { (*l).version }.major == 3 {
+                v3 = l;
+                iface_flags = i.flags;
             }
         }
+    }
+
+    if v2.is_null() && !v3.is_null() {
+        // A CK_FUNCTION_LIST_3_0 begins with the complete v2.40 layout.
+        v2 = v3 as CK_FUNCTION_LIST_PTR;
+    }
+    if v2.is_null() {
+        return Err(format!(
+            "target {} provides neither a usable C_GetFunctionList nor C_GetInterface",
+            canonical.display()
+        ));
+    }
+
+    // H6-12: symbol interposition — if the spy was loaded RTLD_GLOBAL, the
+    // target's function-table relocations may have bound to the spy's
+    // exported C_* symbols, and forwarding would recurse forever.
+    // SAFETY: v2 is non-NULL (checked above) and valid while loaded.
+    let t = unsafe { &*v2 };
+    let spy = crate::spy_function_list();
+    macro_rules! same {
+        ($f:ident) => {
+            matches!((t.$f, spy.$f), (Some(a), Some(b)) if a as usize == b as usize)
+        };
+    }
+    if ptr::eq(v2, spy)
+        || ptr::eq(v3, crate::spy_function_list_3_0())
+        || same!(C_Initialize)
+        || same!(C_Finalize)
+        || same!(C_GetInfo)
+        || same!(C_GetFunctionList)
+        || same!(C_OpenSession)
+    {
+        return Err(format!(
+            "the function table of {} points back into the spy (self-targeting or \
+             symbol interposition); refusing to recurse",
+            canonical.display()
+        ));
+    }
+
+    Ok(Target {
+        _lib: lib,
+        v2,
+        v3,
+        iface_flags,
+        path: canonical,
     })
 }
 
-/// Resolve a function symbol from the real library.
-///
-/// # Safety
-/// The caller must ensure the function signature matches the real symbol.
-pub unsafe fn resolve<T>(name: &[u8]) -> Option<Symbol<'static, T>> {
-    let lib = load_library();
-    unsafe { lib.get(name).ok() }
+#[cfg(unix)]
+fn open_verified(canonical: &Path) -> Result<Library, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file = std::fs::File::open(canonical)
+        .map_err(|e| format!("cannot open PKCS11_SPY_TARGET {}: {e}", canonical.display()))?;
+    let m = file
+        .metadata()
+        .map_err(|e| format!("cannot fstat {}: {e}", canonical.display()))?;
+    crate::fsutil::check_trusted_file(canonical, &m)
+        .map_err(|e| format!("untrusted PKCS11_SPY_TARGET: {e}"))?;
+    crate::fsutil::check_trusted_ancestors(canonical)
+        .map_err(|e| format!("untrusted PKCS11_SPY_TARGET: {e}"))?;
+
+    // SAFETY: loading a module runs its initialisers; the file and its
+    // directories were verified above to be controlled by root / the
+    // effective user only.
+    let lib = unsafe { Library::new(canonical) }
+        .map_err(|e| format!("cannot load {}: {e}", canonical.display()))?;
+
+    let now = std::fs::metadata(canonical)
+        .map_err(|e| format!("cannot stat {}: {e}", canonical.display()))?;
+    if (now.dev(), now.ino()) != (m.dev(), m.ino()) {
+        return Err(format!(
+            "{} was replaced while it was being loaded",
+            canonical.display()
+        ));
+    }
+    Ok(lib)
 }
 
-/// Helper: call a resolved function or return CKR_FUNCTION_NOT_SUPPORTED (0x54).
-pub const CKR_FUNCTION_NOT_SUPPORTED: CK_RV = 0x54;
+#[cfg(windows)]
+fn open_verified(canonical: &Path) -> Result<Library, String> {
+    use libloading::os::windows::{
+        Library as WinLibrary, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
+    };
+    let m = std::fs::metadata(canonical)
+        .map_err(|e| format!("cannot stat PKCS11_SPY_TARGET {}: {e}", canonical.display()))?;
+    if !m.is_file() {
+        return Err(format!("{} is not a regular file", canonical.display()));
+    }
+    // SAFETY: loading a module runs its initialisers; dependencies are
+    // searched only in the module's directory and System32.
+    let lib = unsafe {
+        WinLibrary::load_with_flags(
+            canonical,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    }
+    .map_err(|e| format!("cannot load {}: {e}", canonical.display()))?;
+    Ok(lib.into())
+}

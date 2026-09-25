@@ -1822,7 +1822,10 @@ dependencies = [
 name = "pkcs11-spy"
 version = "0.3.0"
 dependencies = [
+ "libc",
  "libloading 0.9.0",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
