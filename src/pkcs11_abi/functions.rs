@@ -316,6 +316,18 @@ fn canonical_cipher_param(
                 );
                 return Ok(Vec::new());
             }
+            if mech.parameter_len as usize == GCM_IV_LEN {
+                // Compatibility form: the parameter is a bare 96-bit IV (no
+                // AAD, 128-bit tag). Honoured as a caller IV; refused for
+                // encryption in FIPS approved mode (IG C.H).
+                let iv = extract_mechanism_param(p_mechanism);
+                if encrypt && hsm.algorithm_config.fips_approved_only {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                return GcmParams::new(&iv, &[], 128, false)
+                    .map(|p| p.encode())
+                    .map_err(err_to_rv);
+            }
             // SAFETY: size checked by read_param_struct.
             let (p_iv, iv_len, p_aad, aad_len, tag_bits) =
                 if let Some(g) = unsafe { read_param_struct::<CkGcmParams>(p_mechanism) } {
