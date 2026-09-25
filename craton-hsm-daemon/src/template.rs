@@ -341,20 +341,6 @@ impl KeyTemplate {
     }
 }
 
-/// Set the provenance attributes of a key generated inside the HSM.
-pub fn set_generated_provenance(obj: &mut StoredObject, mechanism: CK_ULONG) {
-    let b = |v: bool| vec![u8::from(v)];
-    obj.extra_attributes.insert(CKA_LOCAL, b(true));
-    obj.extra_attributes
-        .insert(CKA_KEY_GEN_MECHANISM, mechanism.to_ne_bytes().to_vec());
-    if obj.class != CKO_PUBLIC_KEY {
-        obj.extra_attributes
-            .insert(CKA_ALWAYS_SENSITIVE, b(obj.sensitive));
-        obj.extra_attributes
-            .insert(CKA_NEVER_EXTRACTABLE, b(!obj.extractable));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,13 +424,42 @@ mod tests {
     }
 
     #[test]
-    fn provenance_is_set_by_hsm() {
-        let mut obj = StoredObject::new(1, CKO_SECRET_KEY);
-        set_generated_provenance(&mut obj, CKM_AES_KEY_GEN);
-        assert_eq!(obj.extra_attributes.get(&CKA_LOCAL), Some(&vec![1u8]));
+    fn provenance_is_set_by_the_store() {
+        use craton_hsm::store::attributes::{
+            read_attribute, ObjectContext, ObjectOrigin, ObjectStore,
+        };
+        let store = ObjectStore::new();
+        let mut obj = StoredObject::new(store.next_handle().unwrap(), CKO_SECRET_KEY);
+        obj.key_type = Some(CKK_AES);
+        obj.sensitive = true;
+        obj.extractable = false;
+        // A caller-forged provenance claim is refused (H1-09).
+        let mut forged = obj.clone();
+        forged.extra_attributes.insert(CKA_LOCAL, vec![1]);
+        assert!(store
+            .insert_object_in(forged, &ObjectContext::admin(0), ObjectOrigin::Created)
+            .is_err());
+        let h = store
+            .insert_object_in(
+                obj,
+                &ObjectContext::admin(0),
+                ObjectOrigin::Generated {
+                    mechanism: CKM_AES_KEY_GEN,
+                },
+            )
+            .unwrap();
+        let o = store.get_object(h).unwrap();
+        let o = o.read();
         assert_eq!(
-            obj.extra_attributes.get(&CKA_NEVER_EXTRACTABLE),
-            Some(&vec![1u8])
+            read_attribute(&o, CKA_LOCAL).unwrap().as_deref().map(|v| v.to_vec()),
+            Some(vec![1u8])
+        );
+        assert_eq!(
+            read_attribute(&o, CKA_NEVER_EXTRACTABLE)
+                .unwrap()
+                .as_deref()
+                .map(|v| v.to_vec()),
+            Some(vec![1u8])
         );
     }
 }

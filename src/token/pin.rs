@@ -74,6 +74,16 @@ fn stretch(pin: &[u8], salt: &[u8], iterations: u32) -> Zeroizing<[u8; 32]> {
 impl PinVerifier {
     /// Create a verifier for `pin`. Returns the verifier and the KEK.
     pub fn create(pin: &[u8], iterations: u32) -> HsmResult<(Self, Zeroizing<[u8; KEY_LEN]>)> {
+        // A verifier that `verify` would refuse makes the account unusable:
+        // reject weak parameters when the PIN is set, not at the next login.
+        if iterations < MIN_VERIFY_ITERATIONS {
+            tracing::error!(
+                "PBKDF2 iteration count {} below the minimum of {}",
+                iterations,
+                MIN_VERIFY_ITERATIONS
+            );
+            return Err(HsmError::ArgumentsBad);
+        }
         let mut salt = [0u8; SALT_LEN];
         fill_random(&mut salt)?;
         let master = stretch(pin, &salt, iterations);

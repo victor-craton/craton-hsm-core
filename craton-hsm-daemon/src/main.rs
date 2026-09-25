@@ -128,12 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let dcfg = full_config.daemon;
 
-    if let Err(e) = craton_hsm::crypto::self_test::run_post() {
-        tracing::error!("FIPS POST self-tests failed: {:?}", e);
-        std::process::exit(1);
-    }
-    tracing::info!("FIPS POST self-tests passed");
-
+    // Opens the persistent state and runs the pre-operational self-tests
+    // (software CASTs, integrity test, backend CASTs — A1-06).
     let hsm = core_open::open_core(&hsm_config).unwrap_or_else(|e| {
         tracing::error!("{}", e);
         std::process::exit(1);

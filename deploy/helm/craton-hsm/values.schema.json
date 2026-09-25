@@ -253,7 +253,7 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*$",
-          "description": "Relative to /data; absolute paths and '..' are rejected by the daemon."
+          "description": "Relative to the working directory /data (the PVC). The daemon also accepts absolute paths outside system directories; the chart keeps the store on the PVC."
         },
         "auditLogPath": {
           "type": "string",
@@ -272,17 +272,17 @@
         },
         "pinMinLength": {
           "type": "integer",
-          "minimum": 4,
+          "minimum": 8,
           "maximum": 256
         },
         "pinMaxLength": {
           "type": "integer",
-          "minimum": 4,
+          "minimum": 8,
           "maximum": 256
         },
         "maxFailedLogins": {
           "type": "integer",
-          "minimum": 1,
+          "minimum": 3,
           "maximum": 20
         },
         "fipsApprovedOnly": {
@@ -290,6 +290,31 @@
         },
         "enablePqc": {
           "type": "boolean"
+        },
+        "userLockoutDurationSecs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2592000,
+          "description": "0 = a locked User PIN stays locked until the SO resets it (C_InitPIN); otherwise 60..2592000 seconds (must be 0 with fipsApprovedOnly)."
+        },
+        "auditLogLevel": {
+          "type": "string",
+          "enum": [
+            "all",
+            "crypto",
+            "auth",
+            "admin"
+          ],
+          "description": "all/crypto: every event; auth/admin: authentication, token and key management only."
+        },
+        "auditFailClosed": {
+          "type": "boolean",
+          "description": "Refuse audited operations once the audit log cannot be written (always on with fipsApprovedOnly)."
+        },
+        "auditKeyPath": {
+          "type": "string",
+          "pattern": "^([A-Za-z0-9_][A-Za-z0-9._/-]*)?$",
+          "description": "Audit chain HMAC key file (default <auditLogPath>.key). Place it on a separate volume from the log if log readers must not be able to recompute the chain."
         }
       }
     },

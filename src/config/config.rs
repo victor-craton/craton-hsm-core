@@ -11,9 +11,10 @@ const MIN_PBKDF2_ITERATIONS: u32 = 100_000;
 /// Maximum acceptable PBKDF2 iteration count to prevent algorithmic DoS via
 /// config-planted extreme values.
 const MAX_PBKDF2_ITERATIONS: u32 = 10_000_000;
-/// Minimum acceptable PIN length (NIST SP 800-63B recommends >= 6; we use 4
-/// as an absolute floor so that downstream policy can tighten further).
-const MIN_PIN_LENGTH: usize = 4;
+/// Minimum acceptable `pin_min_length`: the same floor of 8 characters that
+/// every front end enforces (H5-12; the admin CLI previously applied it on
+/// its own).
+const MIN_PIN_LENGTH: usize = 8;
 /// Bounds for `max_failed_logins` to prevent DoS (too low) or brute-force
 /// (too high).
 const MIN_FAILED_LOGINS: u32 = 3;
