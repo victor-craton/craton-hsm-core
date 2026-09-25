@@ -495,19 +495,39 @@ craton-hsm-admin audit dump --last 50 --json
 
 ## Using the Spy Wrapper
 
-The spy wrapper intercepts all PKCS#11 calls for debugging. It works with any PKCS#11 library, not just Craton HSM.
+`pkcs11-spy` is a **development/debugging tool**: a PKCS#11 module that logs every call an application makes and forwards it to the real module. It works with any PKCS#11 v2.40 or v3.0 library, not just Craton HSM. Do not configure it for privileged (setuid/setgid/capability) or production processes.
 
 ```bash
 # Configure the spy
-export PKCS11_SPY_TARGET=/path/to/libcraton_hsm.so   # real library
-export PKCS11_SPY_LOG=spy.jsonl                     # log file
+export PKCS11_SPY_TARGET=/opt/craton/lib/libcraton_hsm.so   # real module — absolute path required
+export PKCS11_SPY_LOG=spy.jsonl                             # log file (relative to the current directory)
 
 # Point your application to the spy instead
 export PKCS11_MODULE_PATH=/path/to/libpkcs11_spy.so
-
-# All PKCS#11 calls are logged as JSON lines:
-# {"timestamp":"2025-01-15T10:30:01Z","function":"C_Sign","args":"mechanism=CKM_ECDSA","rv":"CKR_OK","duration_ms":2}
 ```
+
+| Variable | Meaning |
+|----------|---------|
+| `PKCS11_SPY_TARGET` | Absolute path of the real module. The file and every parent directory must be owned by root or the current user and not writable by other users (sticky directories such as `/tmp` excepted). |
+| `PKCS11_SPY_LOG` | Log file path. `-` (or `stderr`) logs to stderr; `off` disables logging. **Unset = logging disabled** (a one-line warning is printed). |
+| `PKCS11_SPY_REDUCED_TIMING` | On by default: timestamps and durations at millisecond precision. Set to `0` for microsecond precision while debugging. |
+
+How it works: `C_GetFunctionList` returns the spy's own function table, and `C_GetInterfaceList`/`C_GetInterface` return the spy's "PKCS 11" 2.40 interface plus a 3.0 interface when the target module has one. Every entry of those tables logs the call and forwards it through the target's own function table, so applications that call through the function list (p11-kit, OpenSC, OpenSSL providers, NSS, `cryptoki`, PyKCS11, ...) are fully logged. The v3.0 functions (`C_LoginUser`, `C_SessionCancel`, the `C_Message*` family) are forwarded when the target supports them and return `CKR_FUNCTION_NOT_SUPPORTED` otherwise. PKCS#11 v3.2 additions are not offered.
+
+The log is JSON lines. Every record has `ts` (seconds since the spy started), `seq` (record number), `pid`, `tid` (small per-thread number), `fn` and `event`. Each call produces a `call` record with an `args` object and a `return` record:
+
+```json
+{"ts":0.012,"seq":3,"pid":4242,"tid":1,"fn":"C_SignInit","event":"call","args":{"session":1,"mechanism":"0x00001041","key":2}}
+{"ts":0.012,"seq":4,"pid":4242,"tid":1,"fn":"C_SignInit","event":"return","rv":"CKR_OK","rv_code":"0x00000000","duration_ms":0}
+{"ts":0.013,"seq":5,"pid":4242,"tid":1,"fn":"C_Login","event":"call","args":{"session":1,"user_type":1}}
+{"ts":0.051,"seq":6,"pid":4242,"tid":1,"fn":"C_Login","event":"return","rv":"CKR_PIN_INCORRECT","rv_code":"0x000000a0","duration_ms":38}
+```
+
+With `PKCS11_SPY_REDUCED_TIMING=0`, `ts` has six decimals and return records carry `duration_us` instead of `duration_ms`. Other events: `start` (first record; spy `version`, `unix_time`, `timing` = `ms`/`us`), `info`/`error` (with a `msg`, e.g. the loaded target or why it could not be loaded) and `rejected` (a call the spy answered itself, e.g. `C_GetFunctionList(NULL)`, with `reason`, `rv`, `rv_code`). Vendor return codes are shown as `CKR_VENDOR_DEFINED+0x…`.
+
+What is logged: handles, slot IDs, flags, user type, mechanism type, attribute counts, and input lengths (so message sizes are visible). What is never logged: PINs and PIN lengths, user names, token labels, attribute values, mechanism parameters, and the contents of any data buffer.
+
+The log file is created with mode `0600`. The spy refuses (and disables logging) if the file is a symlink, FIFO or other non-regular file, is not owned by the current user, has extra hard links or group/other permissions, or if its directory can be written by other users without the sticky bit. If the target cannot be loaded (unset or relative `PKCS11_SPY_TARGET`, untrusted file, load failure, the spy pointing at itself), the reason is printed to stderr and logged, and every PKCS#11 call returns `CKR_GENERAL_ERROR`. The spy never aborts the host process.
 
 ## Troubleshooting
 
