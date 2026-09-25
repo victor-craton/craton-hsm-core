@@ -1,54 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
+//! Key generation (RustCrypto). All randomness comes from the module-wide
+//! SP 800-90A DRBG (`crypto::drbg`).
+//!
+//! Approved-mode key sizes follow SP 800-131A Rev 2 (H2-21): AES-128/192/256
+//! and RSA >= 2048 bits are all acceptable, so `fips_mode` no longer rejects
+//! AES-128 or RSA-2048 (which also removes a backend inconsistency with the
+//! AWS-LC backend).
+
 use zeroize::Zeroizing;
 
+use crate::crypto::drbg::DrbgRng;
 use crate::error::{HsmError, HsmResult};
 use crate::store::key_material::RawKeyMaterial;
 
-/// Generate cryptographic random bytes using the FIPS-approved HMAC_DRBG.
+/// Generate an AES key of 16, 24 or 32 bytes.
 ///
-/// All key generation MUST use this function (not OsRng directly) so that
-/// randomness passes through the SP 800-90A DRBG with health testing and
-/// continuous output comparison.
-///
-/// A fresh DRBG is instantiated per call, seeded from OsRng. This is
-/// intentional: each key gets independently seeded randomness, and modern
-/// OS entropy sources (getrandom/BCryptGenRandom) do not exhaust under load.
-/// Sharing a single DRBG across keys would create a correlation risk if the
-/// DRBG's internal state were ever compromised.
-fn generate_random_bytes(out: &mut [u8]) -> HsmResult<()> {
-    let mut drbg = crate::crypto::drbg::HmacDrbg::new()?;
-    drbg.generate(out)
-}
-
-use crate::crypto::drbg::DrbgRng;
-
-/// Generate an AES key of the specified length (16, 24, or 32 bytes).
-/// If `fips_mode` is true, AES-128 (16 bytes) is rejected per FIPS 140-3.
-pub fn generate_aes_key(key_len_bytes: usize, fips_mode: bool) -> HsmResult<RawKeyMaterial> {
+/// `fips_mode` is accepted for API compatibility; all three AES key sizes are
+/// approved.
+pub fn generate_aes_key(key_len_bytes: usize, _fips_mode: bool) -> HsmResult<RawKeyMaterial> {
     match key_len_bytes {
         16 | 24 | 32 => {}
         _ => return Err(HsmError::KeySizeRange),
     }
-    if fips_mode && key_len_bytes == 16 {
-        return Err(HsmError::MechanismParamInvalid);
-    }
-
-    // Use Zeroizing<Vec<u8>> to ensure the intermediate buffer is scrubbed
-    // even if RawKeyMaterial::new() triggers a reallocation. Without this,
-    // the allocator could leave copies of key bytes in freed heap memory.
     let mut key = Zeroizing::new(vec![0u8; key_len_bytes]);
-    generate_random_bytes(&mut key)?;
-    // Move out of Zeroizing into RawKeyMaterial (which handles mlock + zeroize-on-drop).
-    // The Zeroizing wrapper will zeroize its copy on drop.
+    crate::crypto::drbg::fill_random(&mut key)?;
     Ok(RawKeyMaterial::new(key.to_vec()))
 }
 
-/// Generate an RSA key pair. Returns (private_key_der, public_modulus, public_exponent).
-/// If `fips_mode` is true, RSA key sizes below 3072 are rejected per FIPS 140-3.
+/// Generate an RSA key pair (2048, 3072 or 4096 bits).
+/// Returns (private_key_pkcs8_der, public_modulus, public_exponent).
 pub fn generate_rsa_key_pair(
     modulus_bits: u32,
-    fips_mode: bool,
+    _fips_mode: bool,
 ) -> HsmResult<(RawKeyMaterial, Vec<u8>, Vec<u8>)> {
     use rsa::traits::PublicKeyParts;
     use rsa::{pkcs8::EncodePrivateKey, RsaPrivateKey};
@@ -56,9 +40,6 @@ pub fn generate_rsa_key_pair(
     match modulus_bits {
         2048 | 3072 | 4096 => {}
         _ => return Err(HsmError::KeySizeRange),
-    }
-    if fips_mode && modulus_bits < 3072 {
-        return Err(HsmError::MechanismParamInvalid);
     }
 
     let mut rng = DrbgRng::new()?;
@@ -68,60 +49,38 @@ pub fn generate_rsa_key_pair(
     let modulus = private_key.n().to_bytes_be();
     let pub_exp = private_key.e().to_bytes_be();
 
+    // `SecretDocument` zeroizes its buffer on drop.
     let der = private_key
         .to_pkcs8_der()
         .map_err(|_| HsmError::GeneralError)?;
-
-    // Move DER bytes directly into RawKeyMaterial — avoid unnecessary clone
-    // that would create an extra unzeroized copy in memory (fix #16).
-    // RawKeyMaterial handles mlock + zeroize-on-drop for the key material.
-    let result = RawKeyMaterial::new(der.as_bytes().to_vec());
-
-    Ok((result, modulus, pub_exp))
+    Ok((RawKeyMaterial::new(der.as_bytes().to_vec()), modulus, pub_exp))
 }
 
-/// Generate EC key pair for P-256. Returns (private_key_bytes, public_key_sec1_uncompressed).
+/// Generate an EC P-256 key pair. Returns (private_scalar, public_point_uncompressed).
 pub fn generate_ec_p256_key_pair() -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
     use elliptic_curve::sec1::ToEncodedPoint;
-    use p256::SecretKey;
-
     let mut rng = DrbgRng::new()?;
-    let secret_key = SecretKey::random(&mut rng);
-    let public_key = secret_key.public_key();
-    let pub_point = public_key.to_encoded_point(false);
-
-    Ok((
-        RawKeyMaterial::new(secret_key.to_bytes().to_vec()),
-        pub_point.as_bytes().to_vec(),
-    ))
+    let secret_key = p256::SecretKey::random(&mut rng);
+    let pub_point = secret_key.public_key().to_encoded_point(false);
+    let sk = Zeroizing::new(secret_key.to_bytes());
+    Ok((RawKeyMaterial::new(sk.to_vec()), pub_point.as_bytes().to_vec()))
 }
 
-/// Generate EC key pair for P-384. Returns (private_key_bytes, public_key_sec1_uncompressed).
+/// Generate an EC P-384 key pair. Returns (private_scalar, public_point_uncompressed).
 pub fn generate_ec_p384_key_pair() -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
     use elliptic_curve::sec1::ToEncodedPoint;
-    use p384::SecretKey;
-
     let mut rng = DrbgRng::new()?;
-    let secret_key = SecretKey::random(&mut rng);
-    let public_key = secret_key.public_key();
-    let pub_point = public_key.to_encoded_point(false);
-
-    Ok((
-        RawKeyMaterial::new(secret_key.to_bytes().to_vec()),
-        pub_point.as_bytes().to_vec(),
-    ))
+    let secret_key = p384::SecretKey::random(&mut rng);
+    let pub_point = secret_key.public_key().to_encoded_point(false);
+    let sk = Zeroizing::new(secret_key.to_bytes());
+    Ok((RawKeyMaterial::new(sk.to_vec()), pub_point.as_bytes().to_vec()))
 }
 
-/// Generate Ed25519 key pair. Returns (private_key_bytes, public_key_bytes).
+/// Generate an Ed25519 key pair. Returns (seed, public_key).
 pub fn generate_ed25519_key_pair() -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
-    use ed25519_dalek::SigningKey;
-
-    let mut rng = DrbgRng::new()?;
-    let signing_key = SigningKey::generate(&mut rng);
+    let mut seed = Zeroizing::new([0u8; 32]);
+    crate::crypto::drbg::fill_random(&mut *seed)?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let verifying_key = signing_key.verifying_key();
-
-    Ok((
-        RawKeyMaterial::new(signing_key.to_bytes().to_vec()),
-        verifying_key.to_bytes().to_vec(),
-    ))
+    Ok((RawKeyMaterial::new(seed.to_vec()), verifying_key.to_bytes().to_vec()))
 }
