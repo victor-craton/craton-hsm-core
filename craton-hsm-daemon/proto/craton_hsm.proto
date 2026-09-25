@@ -11,7 +11,13 @@ service HsmService {
 
   // Token management
   rpc GetTokenInfo(GetTokenInfoRequest) returns (GetTokenInfoResponse);
+  // Administrator only (client certificate listed in
+  // [daemon] admin_client_cert_sha256). Fails if any session is open on the
+  // slot. Destroys all objects on the slot, like C_InitToken.
   rpc InitToken(InitTokenRequest) returns (InitTokenResponse);
+  // Set the User PIN. Caller must be logged in as SO on the session's slot
+  // (administrator only) and re-present the SO PIN.
+  rpc InitPin(InitPinRequest) returns (InitPinResponse);
 
   // Key operations
   rpc GenerateKey(GenerateKeyRequest) returns (GenerateKeyResponse);
@@ -58,9 +64,13 @@ message CloseSessionRequest {
 
 message CloseSessionResponse {}
 
+// Login state is per client identity (mTLS certificate) and slot; it does
+// not affect other clients. It ends on Logout or when the client closes its
+// last session on the slot. CKU_SO requires an administrator certificate;
+// key operations require CKU_USER.
 message LoginRequest {
   uint64 session_handle = 1;
-  uint64 user_type = 2;  // CKU_USER=1, CKU_SO=3
+  uint64 user_type = 2;  // CKU_SO=0, CKU_USER=1 (CKU_CONTEXT_SPECIFIC unsupported)
   bytes pin = 3;          // bytes, not string — caller must zeroize after use
 }
 
@@ -85,7 +95,10 @@ message GetTokenInfoResponse {
   string label = 1;
   bool initialized = 2;
   bool user_pin_initialized = 3;
+  // The CALLER's own login state on this slot: "Public", "UserLoggedIn" or
+  // "SoLoggedIn".
   string login_state = 4;
+  // Token-wide counts for administrators; the caller's own counts otherwise.
   uint64 session_count = 5;
   uint64 max_sessions = 6;
   uint64 rw_session_count = 7;
@@ -95,10 +108,18 @@ message GetTokenInfoResponse {
 message InitTokenRequest {
   uint64 slot_id = 1;
   bytes so_pin = 2;        // bytes, not string — caller must zeroize after use
-  string label = 3;
+  string label = 3;        // at most 32 bytes of UTF-8
 }
 
 message InitTokenResponse {}
+
+message InitPinRequest {
+  uint64 session_handle = 1;
+  bytes so_pin = 2;        // SO PIN re-verification
+  bytes pin = 3;           // new User PIN
+}
+
+message InitPinResponse {}
 
 // ── Key Operations ───────────────────────────────────────────────────────────
 
@@ -144,7 +165,7 @@ message FindObjectsResponse {
 message GetAttributeValueRequest {
   uint64 session_handle = 1;
   uint64 object_handle = 2;
-  repeated uint64 attribute_types = 3;
+  repeated uint64 attribute_types = 3;  // at most 64 distinct types
 }
 
 message GetAttributeValueResponse {

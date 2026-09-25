@@ -15,7 +15,8 @@ craton-hsm = { path = ".." }
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14", features = ["tls-ring"] }
 tonic-prost = "0.14"
-tower = { version = "0.5", features = ["limit"] }
+tonic-health = "0.14"
+tower = { version = "0.5", features = ["limit", "load-shed"] }
 prost = "0.14"
 rustls = "0.23"
 tokio-rustls = "0.26"
@@ -25,7 +26,11 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 zeroize = "1"
+parking_lot = "0.12"
 async-stream = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
