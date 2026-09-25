@@ -4,6 +4,7 @@
 
 use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::types::CK_SLOT_ID;
+use crate::store::encrypted_store::EncryptedStore;
 use crate::token::token::Token;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,10 +13,16 @@ use std::sync::Arc;
 /// Each slot contains an independent token. Default: 1 slot (slot 0).
 ///
 /// This struct is immutable after construction — the slot map is built once
-/// in `new()` / `new_with_config()` and never modified. Individual tokens
-/// are accessed via `Arc<Token>` and handle their own internal synchronization.
+/// and never modified. Individual tokens are accessed via `Arc<Token>` and
+/// handle their own internal synchronization.
 pub struct SlotManager {
     tokens: HashMap<CK_SLOT_ID, Arc<Token>>,
+}
+
+impl Default for SlotManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SlotManager {
@@ -25,19 +32,28 @@ impl SlotManager {
         Self { tokens }
     }
 
+    /// Ephemeral (non-persistent) slots built from configuration.
     pub fn new_with_config(config: &crate::config::config::HsmConfig) -> Self {
+        Self::open(config, None).expect("ephemeral slot construction cannot fail")
+    }
+
+    /// Build the slots, loading persisted per-slot token state from `store`
+    /// when persistence is enabled. Each slot keeps its own token record and
+    /// lockout counters (H3-17).
+    pub fn open(
+        config: &crate::config::config::HsmConfig,
+        store: Option<Arc<EncryptedStore>>,
+    ) -> HsmResult<Self> {
         let count = config.token.slot_count.max(1);
         // Clamp to CK_SLOT_ID range to prevent silent truncation / duplicate keys.
         let max_slots = CK_SLOT_ID::MAX as usize;
         let count = count.min(max_slots);
         let mut tokens = HashMap::new();
         for i in 0..count {
-            tokens.insert(
-                i as CK_SLOT_ID,
-                Arc::new(Token::new_with_config(Some(config))),
-            );
+            let slot = i as CK_SLOT_ID;
+            tokens.insert(slot, Arc::new(Token::open(config, slot, store.clone())?));
         }
-        Self { tokens }
+        Ok(Self { tokens })
     }
 
     pub fn get_slot_ids(&self) -> Vec<CK_SLOT_ID> {
@@ -63,5 +79,10 @@ impl SlotManager {
 
     pub fn slot_count(&self) -> usize {
         self.tokens.len()
+    }
+
+    /// Iterate over all tokens.
+    pub fn tokens(&self) -> impl Iterator<Item = &Arc<Token>> {
+        self.tokens.values()
     }
 }

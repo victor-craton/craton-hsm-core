@@ -26,71 +26,58 @@ fn make_secret_key(handle: CK_ULONG, label: &str) -> StoredObject {
 // CKA_SENSITIVE / CKA_EXTRACTABLE monotonicity (PKCS#11 §10.7)
 // ============================================================================
 
-/// Verify that ObjectStore::create_object rejects CKA_SENSITIVE=false when
-/// the object defaults to sensitive=true.  This exercises the monotonicity
-/// enforcement inside apply_attribute: once sensitive is true, clearing it
-/// to false must return AttributeReadOnly.
+/// Creation-time templates may choose CKA_SENSITIVE freely (PKCS#11 default
+/// semantics, H3-24 — the old test asserted that CKA_SENSITIVE=false was
+/// rejected at creation, which was a bug). The one-way rule applies to later
+/// modifications: once TRUE, C_SetAttributeValue cannot clear it.
 #[test]
 fn test_sensitive_cannot_be_reset_to_false() {
     let store = ObjectStore::new();
 
-    // StoredObject defaults: sensitive=true.  Attempting to create an object
-    // with CKA_SENSITIVE=false in the template must be rejected because
-    // apply_attribute sees sensitive already true and refuses to clear it.
     let template = vec![
         (CKA_CLASS, CKO_SECRET_KEY.to_ne_bytes().to_vec()),
-        (CKA_SENSITIVE, vec![0u8]), // explicitly false — should be rejected
+        (CKA_SENSITIVE, vec![0u8]),
         (CKA_VALUE, vec![0x42; 32]),
     ];
-    let result = store.create_object(&template);
+    let handle = store.create_object(&template).unwrap();
+    // FALSE -> TRUE is allowed...
+    store
+        .set_attributes(handle, 0, &[(CKA_SENSITIVE, vec![1u8])], false)
+        .unwrap();
+    // ...TRUE -> FALSE is not.
     assert!(
-        result.is_err(),
-        "Creating a key with CKA_SENSITIVE=false must fail (monotonicity: default is true)"
+        store
+            .set_attributes(handle, 0, &[(CKA_SENSITIVE, vec![0u8])], false)
+            .is_err(),
+        "CKA_SENSITIVE must not be cleared once set"
     );
-
-    // Also verify the positive case: CKA_SENSITIVE=true is accepted (no-op, same as default)
-    let template_ok = vec![
-        (CKA_CLASS, CKO_SECRET_KEY.to_ne_bytes().to_vec()),
-        (CKA_SENSITIVE, vec![1u8]), // true — should be accepted
-        (CKA_VALUE, vec![0x42; 32]),
-    ];
-    let handle = store.create_object(&template_ok).unwrap();
     let obj_ref = store.get_object(handle).unwrap();
     assert!(obj_ref.read().sensitive, "CKA_SENSITIVE must remain true");
 }
 
-/// Verify that ObjectStore::create_object rejects CKA_EXTRACTABLE=true when
-/// the object defaults to extractable=false.  Once extractable is false it
-/// cannot be set back to true.
+/// Creation may set CKA_EXTRACTABLE=true (H3-24); afterwards it can only be
+/// cleared (TRUE -> FALSE), never set back to TRUE.
 #[test]
 fn test_extractable_cannot_be_set_back_to_true() {
     let store = ObjectStore::new();
 
-    // StoredObject defaults: extractable=false.  Attempting to create an
-    // object with CKA_EXTRACTABLE=true must be rejected.
     let template = vec![
         (CKA_CLASS, CKO_SECRET_KEY.to_ne_bytes().to_vec()),
-        (CKA_EXTRACTABLE, vec![1u8]), // true — should be rejected
+        (CKA_EXTRACTABLE, vec![1u8]),
         (CKA_VALUE, vec![0x42; 32]),
     ];
-    let result = store.create_object(&template);
+    let handle = store.create_object(&template).unwrap();
+    store
+        .set_attributes(handle, 0, &[(CKA_EXTRACTABLE, vec![0u8])], false)
+        .unwrap();
     assert!(
-        result.is_err(),
-        "Creating a key with CKA_EXTRACTABLE=true must fail (monotonicity: default is false)"
+        store
+            .set_attributes(handle, 0, &[(CKA_EXTRACTABLE, vec![1u8])], false)
+            .is_err(),
+        "CKA_EXTRACTABLE must not be set back to true"
     );
-
-    // Positive case: CKA_EXTRACTABLE=false is accepted (same as default)
-    let template_ok = vec![
-        (CKA_CLASS, CKO_SECRET_KEY.to_ne_bytes().to_vec()),
-        (CKA_EXTRACTABLE, vec![0u8]),
-        (CKA_VALUE, vec![0x42; 32]),
-    ];
-    let handle = store.create_object(&template_ok).unwrap();
     let obj_ref = store.get_object(handle).unwrap();
-    assert!(
-        !obj_ref.read().extractable,
-        "CKA_EXTRACTABLE must remain false"
-    );
+    assert!(!obj_ref.read().extractable);
 }
 
 // ============================================================================
@@ -391,7 +378,7 @@ fn test_non_sensitive_extractable_key_readable() {
     );
     let val = result.unwrap();
     assert!(val.is_some());
-    assert_eq!(val.unwrap(), vec![0x42; 32]);
+    assert_eq!(val.unwrap().to_vec(), vec![0x42; 32]);
 }
 
 // ============================================================================

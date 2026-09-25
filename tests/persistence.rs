@@ -22,13 +22,13 @@ fn make_db_path(dir: &std::path::Path) -> String {
 fn test_token_objects_survive_restart() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = make_db_path(dir.path());
-    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None);
+    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None).unwrap();
 
     // Phase 1: Create objects and persist them
     let handle = {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         // Create a token object (CKA_TOKEN = true)
         let template = vec![
@@ -53,7 +53,7 @@ fn test_token_objects_survive_restart() {
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let loaded = obj_store.load_from_store().unwrap();
         assert_eq!(loaded, 1, "Should have loaded 1 persisted object");
@@ -72,13 +72,13 @@ fn test_token_objects_survive_restart() {
 fn test_session_objects_not_persisted() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = make_db_path(dir.path());
-    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None);
+    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None).unwrap();
 
     // Phase 1: Create a session object (CKA_TOKEN = false)
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let template = vec![
             (CKA_CLASS, CKO_SECRET_KEY.to_ne_bytes().to_vec()),
@@ -93,7 +93,7 @@ fn test_session_objects_not_persisted() {
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let loaded = obj_store.load_from_store().unwrap();
         assert_eq!(loaded, 0, "Session objects should not be persisted");
@@ -104,13 +104,13 @@ fn test_session_objects_not_persisted() {
 fn test_clear_removes_persisted_objects() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = make_db_path(dir.path());
-    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None);
+    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None).unwrap();
 
     // Phase 1: Create token objects then clear (simulates C_InitToken)
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         for i in 0..3 {
             let template = vec![
@@ -130,7 +130,7 @@ fn test_clear_removes_persisted_objects() {
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let loaded = obj_store.load_from_store().unwrap();
         assert_eq!(loaded, 0, "Clear should have removed all persisted objects");
@@ -141,13 +141,13 @@ fn test_clear_removes_persisted_objects() {
 fn test_destroy_removes_from_persistent_store() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = make_db_path(dir.path());
-    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None);
+    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None).unwrap();
 
     // Phase 1: Create then destroy a token object
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let template = vec![
             (CKA_CLASS, CKO_SECRET_KEY.to_ne_bytes().to_vec()),
@@ -163,7 +163,7 @@ fn test_destroy_removes_from_persistent_store() {
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let loaded = obj_store.load_from_store().unwrap();
         assert_eq!(loaded, 0, "Destroyed objects should not persist");
@@ -190,14 +190,14 @@ fn test_file_lock_prevents_dual_open() {
 fn test_wrong_pin_cannot_load_objects() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = make_db_path(dir.path());
-    let (enc_key1, _) = derive_key_from_pin(b"correct-pin", None, None);
-    let (enc_key2, _) = derive_key_from_pin(b"wrong-pin", None, None);
+    let (enc_key1, _) = derive_key_from_pin(b"correct-pin", None, None).unwrap();
+    let (enc_key2, _) = derive_key_from_pin(b"wrong-pin", None, None).unwrap();
 
     // Phase 1: Create with correct PIN
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key1);
+        obj_store.set_persist_key(&enc_key1);
 
         let template = vec![
             (CKA_CLASS, CKO_SECRET_KEY.to_ne_bytes().to_vec()),
@@ -212,7 +212,7 @@ fn test_wrong_pin_cannot_load_objects() {
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key2);
+        obj_store.set_persist_key(&enc_key2);
 
         // load_from_store should fail or return 0 (decrypt fails)
         let result = obj_store.load_from_store();
@@ -228,14 +228,14 @@ fn test_wrong_pin_cannot_load_objects() {
 fn test_insert_object_persists() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = make_db_path(dir.path());
-    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None);
+    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None).unwrap();
 
     let handle;
     // Phase 1: Insert a pre-built object (keygen path)
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let h = obj_store.next_handle().unwrap();
         let mut obj = StoredObject::new(h, CKO_SECRET_KEY);
@@ -251,7 +251,7 @@ fn test_insert_object_persists() {
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let loaded = obj_store.load_from_store().unwrap();
         assert_eq!(loaded, 1);
@@ -284,13 +284,13 @@ fn test_no_persistence_by_default() {
 fn test_multiple_objects_persist() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = make_db_path(dir.path());
-    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None);
+    let (enc_key, _) = derive_key_from_pin(b"test-pin", None, None).unwrap();
 
     // Phase 1: Create multiple token objects
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         for i in 0u8..5 {
             let template = vec![
@@ -307,7 +307,7 @@ fn test_multiple_objects_persist() {
     {
         let store = EncryptedStore::new(Some(&db_path)).unwrap();
         let obj_store = ObjectStore::with_persistence(store);
-        obj_store.set_persist_key(*enc_key);
+        obj_store.set_persist_key(&enc_key);
 
         let loaded = obj_store.load_from_store().unwrap();
         assert_eq!(loaded, 5, "All 5 token objects should persist");

@@ -1069,7 +1069,7 @@ impl HsmService for HsmServiceImpl {
                 Ok(Some(value)) => {
                     attrs.push(Attribute {
                         attr_type: *attr_type,
-                        value,
+                        value: value.to_vec(),
                     });
                 }
                 Ok(None) => {
@@ -1736,6 +1736,8 @@ fn hsm_err_to_status(e: craton_hsm::error::HsmError) -> Status {
             Status::failed_precondition("Token not initialized — call InitToken first")
         }
         HsmError::TokenWriteProtected => Status::permission_denied("Token is write-protected"),
+        HsmError::DeviceError => Status::internal("Device error"),
+        HsmError::ActionProhibited => Status::permission_denied("Action prohibited"),
 
         // ── Object/attribute errors ─────────────────────────────────────────
         HsmError::ObjectHandleInvalid => Status::not_found("Object not found"),

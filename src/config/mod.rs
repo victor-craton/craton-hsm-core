@@ -4,6 +4,7 @@
 
 #[allow(clippy::module_inception)]
 pub mod config;
+pub mod defaults;
 
 // Re-export key types to avoid `config::config::HsmConfig` stutter.
 pub use config::{AlgorithmConfig, HsmConfig};

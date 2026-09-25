@@ -32,6 +32,8 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"EdgeTest");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -1700,6 +1702,8 @@ fn test_login_empty_pin() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"EmptyPIN1");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -1737,6 +1741,8 @@ fn test_login_max_length_pin() {
     let so_pin: Vec<u8> = (0..64).map(|i| b'a' + (i % 26)).collect(); // 64-byte PIN with >3 distinct bytes
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"MaxPIN01");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -1782,6 +1788,8 @@ fn test_login_overlength_pin() {
     let long_pin: Vec<u8> = (0..65).map(|i| b'x' + (i % 3)).collect();
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LongPIN1");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         long_pin.as_ptr() as *mut _,
@@ -1805,6 +1813,8 @@ fn test_set_attribute_on_ro_session() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"ROSess1");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,

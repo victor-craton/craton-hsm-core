@@ -9,8 +9,8 @@
 //! survives process restarts, preventing an attacker from resetting brute-force
 //! counters by crashing or restarting the HSM process.
 //!
-//! The file is written atomically (write-to-temp + rename) to avoid corruption
-//! from power loss mid-write.
+//! The file is written atomically (random O_EXCL temp file + fsync + rename +
+//! directory fsync) to avoid corruption from power loss mid-write.
 
 use std::path::PathBuf;
 
@@ -21,110 +21,91 @@ use serde::{Deserialize, Serialize};
 pub struct LockoutData {
     pub failed_user_logins: u32,
     pub failed_so_logins: u32,
+    #[serde(default)]
     pub failed_init_token_logins: u32,
     pub user_pin_locked: bool,
     pub so_pin_locked: bool,
 }
 
-/// File-backed persistence for lockout counters.
+impl LockoutData {
+    /// Fail-closed state used when persisted counters are missing or corrupt.
+    pub fn locked() -> Self {
+        Self {
+            user_pin_locked: true,
+            so_pin_locked: true,
+            failed_user_logins: u32::MAX,
+            failed_so_logins: u32::MAX,
+            failed_init_token_logins: u32::MAX,
+        }
+    }
+}
+
+/// Standalone file-backed persistence for lockout counters.
+///
+/// The token itself keeps lockout counters in the encrypted persistent store
+/// (per slot); this file-based store remains for tooling. It is per-slot
+/// (H3-17), written atomically with `O_NOFOLLOW`/0600 temp files and
+/// `fsync` (H3-12), and `save` errors are propagated.
 pub struct LockoutStore {
     path: PathBuf,
 }
 
 impl LockoutStore {
-    /// Create a new lockout store. The file is created on first `save()`.
+    /// Create a lockout store for slot 0 (legacy name `lockout_state.json`).
     pub fn new(storage_dir: &std::path::Path) -> Self {
         Self {
             path: storage_dir.join("lockout_state.json"),
         }
     }
 
-    /// Load persisted lockout data, returning defaults if the file doesn't exist
-    /// or is unreadable (fail-open on first boot, fail-closed on corruption).
-    pub fn load(&self) -> LockoutData {
-        match std::fs::read_to_string(&self.path) {
-            Ok(content) => match serde_json::from_str::<LockoutData>(&content) {
-                Ok(data) => {
-                    tracing::info!(
-                        "loaded lockout state: user_failures={}, so_failures={}, \
-                         user_locked={}, so_locked={}",
-                        data.failed_user_logins,
-                        data.failed_so_logins,
-                        data.user_pin_locked,
-                        data.so_pin_locked,
-                    );
-                    data
-                }
-                Err(e) => {
-                    // Corruption: log a security warning but default to locked-out
-                    // state to prevent brute-force bypass via file tampering.
-                    tracing::error!(
-                        "lockout state file is corrupted ({}), \
-                         defaulting to locked state as safety precaution",
-                        e
-                    );
-                    LockoutData {
-                        user_pin_locked: true,
-                        so_pin_locked: true,
-                        failed_user_logins: u32::MAX,
-                        failed_so_logins: u32::MAX,
-                        failed_init_token_logins: u32::MAX,
-                    }
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!("no lockout state file found, starting fresh");
-                LockoutData::default()
-            }
-            Err(e) => {
-                // Can't read the file (permission error, etc.) — fail closed.
-                tracing::error!(
-                    "cannot read lockout state file ({}), \
-                     defaulting to locked state as safety precaution",
-                    e
-                );
-                LockoutData {
-                    user_pin_locked: true,
-                    so_pin_locked: true,
-                    failed_user_logins: u32::MAX,
-                    failed_so_logins: u32::MAX,
-                    failed_init_token_logins: u32::MAX,
-                }
-            }
+    /// Create a per-slot lockout store (`lockout_slot{N}.json`).
+    pub fn for_slot(storage_dir: &std::path::Path, slot: u64) -> Self {
+        Self {
+            path: storage_dir.join(format!("lockout_slot{}.json", slot)),
         }
     }
 
-    /// Persist lockout data atomically (write-to-temp + rename).
-    pub fn save(&self, data: &LockoutData) {
-        let json = match serde_json::to_string_pretty(data) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::error!("failed to serialize lockout state: {}", e);
-                return;
-            }
-        };
-
-        // Ensure parent directory exists
-        if let Some(parent) = self.path.parent() {
-            if !parent.exists() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    tracing::error!("failed to create lockout state directory: {}", e);
-                    return;
+    /// Load persisted lockout data.
+    ///
+    /// A missing file yields fresh counters only when `expect_existing` is
+    /// false (first boot); for an initialised token a missing, unreadable or
+    /// corrupt file yields the locked state (fail closed).
+    pub fn load_checked(&self, expect_existing: bool) -> LockoutData {
+        match crate::store::fs_util::read_private(&self.path) {
+            Ok(Some(content)) => match serde_json::from_slice::<LockoutData>(&content) {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::error!(
+                        "lockout state file is corrupted ({}), defaulting to locked state",
+                        e
+                    );
+                    LockoutData::locked()
                 }
+            },
+            Ok(None) if !expect_existing => LockoutData::default(),
+            Ok(None) => {
+                tracing::error!("lockout state file missing for initialised token — locking");
+                LockoutData::locked()
             }
+            Err(_) => LockoutData::locked(),
         }
+    }
 
-        // Atomic write: write to temp file, then rename
-        let tmp_path = self.path.with_extension("json.tmp");
-        if let Err(e) = std::fs::write(&tmp_path, json.as_bytes()) {
-            tracing::error!("failed to write lockout state temp file: {}", e);
-            return;
+    /// Load persisted lockout data, returning defaults if the file doesn't
+    /// exist (first boot) and the locked state on corruption.
+    pub fn load(&self) -> LockoutData {
+        self.load_checked(false)
+    }
+
+    /// Persist lockout data atomically. Errors are returned so callers can
+    /// refuse the authentication attempt (fail closed).
+    pub fn save(&self, data: &LockoutData) -> crate::error::HsmResult<()> {
+        let json =
+            serde_json::to_vec_pretty(data).map_err(|_| crate::error::HsmError::GeneralError)?;
+        if let Some(parent) = self.path.parent() {
+            crate::store::fs_util::ensure_private_dir(parent)?;
         }
-        if let Err(e) = std::fs::rename(&tmp_path, &self.path) {
-            tracing::error!("failed to rename lockout state file: {}", e);
-            // Clean up temp file on failure
-            let _ = std::fs::remove_file(&tmp_path);
-        }
+        crate::store::fs_util::atomic_write_private(&self.path, &json)
     }
 
     /// Remove the lockout state file (called during token re-initialization).

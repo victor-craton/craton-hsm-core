@@ -9,6 +9,7 @@
 pub mod attributes;
 pub mod backup;
 pub mod encrypted_store;
+pub(crate) mod fs_util;
 pub mod key_material;
 pub mod lockout_store;
 pub mod object;
