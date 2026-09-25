@@ -1,0 +1,12 @@
+{
+  "details": {
+    "methodFqn": "craton_hsm.HsmService.InitPin"
+  },
+  "requests": [
+    {
+      "location": "InitPin-request.json"
+    }
+  ],
+  "operationType": "unary",
+  "invokerName": "grpc"
+}

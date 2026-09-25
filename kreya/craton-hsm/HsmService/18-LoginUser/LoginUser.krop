@@ -1,0 +1,12 @@
+{
+  "details": {
+    "methodFqn": "craton_hsm.HsmService.Login"
+  },
+  "requests": [
+    {
+      "location": "LoginUser-request.json"
+    }
+  ],
+  "operationType": "unary",
+  "invokerName": "grpc"
+}

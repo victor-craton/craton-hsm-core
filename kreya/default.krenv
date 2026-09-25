@@ -1,8 +1,8 @@
 {
   "values": {
-    "server_url": "http://localhost:9898",
-    "so_pin_b64": "U29QMW4hRmlwcyMyMDI0",
-    "user_pin_b64": "VXNyUDFuIUZpcHMjMjAyNA==",
+    "server_url": "https://localhost:5696",
+    "so_pin_b64": "SET_LOCALLY_BASE64_SO_PIN",
+    "user_pin_b64": "SET_LOCALLY_BASE64_USER_PIN",
     "session_handle": "0",
     "key_handle": "0"
   }

@@ -1,7 +1,7 @@
 {
   "session_handle": "{{session_handle}}",
   "mechanism": {
-    "mechanism_type": "1",
+    "mechanism_type": "64",
     "parameter": ""
   },
   "key_handle": "{{key_handle}}",

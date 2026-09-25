@@ -5,6 +5,9 @@
     "parameter": ""
   },
   "template": [
-    { "attr_type": "353", "value": "IAAAAA==" }
+    {
+      "attr_type": "353",
+      "value": "IAAAAAAAAAA="
+    }
   ]
 }

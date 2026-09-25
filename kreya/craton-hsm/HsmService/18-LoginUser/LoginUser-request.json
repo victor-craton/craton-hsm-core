@@ -1,0 +1,5 @@
+{
+  "session_handle": "{{session_handle}}",
+  "user_type": "1",
+  "pin": "{{user_pin_b64}}"
+}

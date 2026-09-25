@@ -1,0 +1,5 @@
+{
+  "session_handle": "{{session_handle}}",
+  "so_pin": "{{so_pin_b64}}",
+  "pin": "{{user_pin_b64}}"
+}

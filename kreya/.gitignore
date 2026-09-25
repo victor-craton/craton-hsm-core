@@ -1,0 +1,4 @@
+# Local Kreya environments hold endpoints and PINs: never commit them.
+*.krenv
+!default.krenv
+*.local.*

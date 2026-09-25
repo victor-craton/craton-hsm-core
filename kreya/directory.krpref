@@ -3,8 +3,7 @@
     {
       "options": {
         "grpc": {
-          "endpoint": "{{server_url}}",
-          "disableServerCertificateValidation": true
+          "endpoint": "{{server_url}}"
         }
       }
     }
