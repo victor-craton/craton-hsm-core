@@ -258,23 +258,12 @@ impl Shared {
 
     /// Destroy an object, clearing its per-key GCM/IV trackers (H4-15).
     fn destroy_object_now(&self, handle: CK_ULONG) -> Result<(), Status> {
-        let obj = self
-            .hsm
-            .object_store()
-            .get_object(handle)
-            .map_err(hsm_err_to_status)?;
+        // The store zeroizes the key material and evicts crypto caches; IV
+        // tracking is deliberately kept across destroys (H2-02).
         self.hsm
             .object_store()
             .destroy_object(handle)
             .map_err(hsm_err_to_status)?;
-        {
-            let o = obj.read();
-            if o.class == CKO_SECRET_KEY {
-                if let Some(km) = &o.key_material {
-                    craton_hsm::crypto::encrypt::remove_gcm_counter(km.as_bytes());
-                }
-            }
-        }
         self.registry.release_object(handle);
         Ok(())
     }
@@ -1915,13 +1904,19 @@ impl HsmServiceImpl {
                 };
                 match (alg, decrypt) {
                     (CipherAlg::AesGcm, false) => e::aes_256_gcm_encrypt(material()?, &input),
-                    (CipherAlg::AesGcm, true) => e::aes_256_gcm_decrypt(material()?, &input),
+                    (CipherAlg::AesGcm, true) => {
+                        e::aes_256_gcm_decrypt(material()?, &input).map(|v| v.to_vec())
+                    }
                     (CipherAlg::AesCbcPad, false) => {
                         e::aes_cbc_encrypt(material()?, &param, &input)
                     }
-                    (CipherAlg::AesCbcPad, true) => e::aes_cbc_decrypt(material()?, &param, &input),
+                    (CipherAlg::AesCbcPad, true) => {
+                        e::aes_cbc_decrypt(material()?, &param, &input).map(|v| v.to_vec())
+                    }
                     (CipherAlg::AesCtr, false) => e::aes_ctr_encrypt(material()?, &param, &input),
-                    (CipherAlg::AesCtr, true) => e::aes_ctr_decrypt(material()?, &param, &input),
+                    (CipherAlg::AesCtr, true) => {
+                        e::aes_ctr_decrypt(material()?, &param, &input).map(|v| v.to_vec())
+                    }
                     (CipherAlg::RsaOaepSha256, false) => {
                         let n = k
                             .modulus
@@ -1942,7 +1937,8 @@ impl HsmServiceImpl {
                         material()?,
                         &input,
                         craton_hsm::crypto::sign::OaepHash::Sha256,
-                    ),
+                    )
+                    .map(|v| v.to_vec()),
                 }
                 .map_err(hsm_err_to_status)
             })

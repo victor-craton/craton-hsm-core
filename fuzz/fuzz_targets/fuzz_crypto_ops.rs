@@ -7,11 +7,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use craton_hsm::crypto::encrypt;
 use craton_hsm::crypto::digest;
+use craton_hsm::crypto::encrypt;
 use craton_hsm::crypto::sign;
 use craton_hsm::pkcs11_abi::constants::*;
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {
@@ -79,8 +79,8 @@ fn fuzz_aes_ctr(data: &[u8]) {
     let iv: [u8; 16] = data[32..48].try_into().unwrap();
     let plaintext = &data[48..];
 
-    if let Ok(ciphertext) = encrypt::aes_ctr_crypt(&key, &iv, plaintext) {
-        if let Ok(decrypted) = encrypt::aes_ctr_crypt(&key, &iv, &ciphertext) {
+    if let Ok(ciphertext) = encrypt::aes_ctr_encrypt(&key, &iv, plaintext) {
+        if let Ok(decrypted) = encrypt::aes_ctr_decrypt(&key, &iv, &ciphertext) {
             assert_eq!(decrypted, plaintext);
         }
     }

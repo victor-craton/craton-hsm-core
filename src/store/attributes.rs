@@ -580,13 +580,13 @@ impl ObjectStore {
         let slot = o.slot_id;
         let owner = o.owner_session;
         if let Some(km) = o.key_material.as_ref() {
-            // Per-key AEAD counters/IV trackers die with the key.
-            if destroyed {
-                crate::crypto::encrypt::remove_gcm_counter(km.as_bytes());
-            }
+            // Per-key AEAD IV/nonce tracking is intentionally kept: other
+            // handles (copies, persisted records) may share the key bytes,
+            // and resetting it would allow nonce reuse (H2-02).
+            let _ = destroyed;
             if o.class == CKO_PRIVATE_KEY && o.key_type == Some(CKK_RSA) {
-                // Parsed RSA keys are cached by the crypto layer (A1-10).
-                crate::crypto::sign::clear_rsa_key_cache();
+                // Evict the parsed RSA key from the crypto-layer cache (A1-10).
+                crate::crypto::sign::evict_rsa_key(km.as_bytes());
             }
         }
         o.mark_destroyed();

@@ -206,7 +206,7 @@ fn test_rsa_oaep_encrypt_decrypt() {
 
     let decrypted =
         sign::rsa_oaep_decrypt(priv_der.as_bytes(), &ciphertext, sign::OaepHash::Sha256).unwrap();
-    assert_eq!(decrypted, plaintext);
+    assert_eq!(&decrypted[..], &plaintext[..]);
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn test_aes_cbc_128_roundtrip() {
     assert_ne!(ciphertext.as_slice(), plaintext.as_slice());
 
     let decrypted = encrypt::aes_cbc_decrypt(key.as_bytes(), &iv, &ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
+    assert_eq!(&decrypted[..], &plaintext[..]);
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn test_aes_cbc_192_roundtrip() {
 
     let ciphertext = encrypt::aes_cbc_encrypt(key.as_bytes(), &iv, plaintext).unwrap();
     let decrypted = encrypt::aes_cbc_decrypt(key.as_bytes(), &iv, &ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
+    assert_eq!(&decrypted[..], &plaintext[..]);
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn test_aes_cbc_256_roundtrip() {
 
     let ciphertext = encrypt::aes_cbc_encrypt(key.as_bytes(), &iv, plaintext).unwrap();
     let decrypted = encrypt::aes_cbc_decrypt(key.as_bytes(), &iv, &ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
+    assert_eq!(&decrypted[..], &plaintext[..]);
 }
 
 #[test]
@@ -320,7 +320,7 @@ fn test_aes_cbc_pkcs7_padding() {
         assert_eq!(ciphertext.len() % 16, 0);
         assert!(ciphertext.len() >= 16);
         let decrypted = encrypt::aes_cbc_decrypt(key.as_bytes(), &iv, &ciphertext).unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(&decrypted[..], &plaintext[..]);
     }
 }
 
@@ -334,12 +334,12 @@ fn test_aes_ctr_128_roundtrip() {
     let iv = [0x66u8; 16];
     let plaintext = b"AES-CTR-128 test message";
 
-    let ciphertext = encrypt::aes_ctr_crypt(key.as_bytes(), &iv, plaintext).unwrap();
+    let ciphertext = encrypt::aes_ctr_encrypt(key.as_bytes(), &iv, plaintext).unwrap();
     assert_ne!(ciphertext.as_slice(), plaintext.as_slice());
     assert_eq!(ciphertext.len(), plaintext.len()); // CTR is a stream cipher
 
-    let decrypted = encrypt::aes_ctr_crypt(key.as_bytes(), &iv, &ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
+    let decrypted = encrypt::aes_ctr_decrypt(key.as_bytes(), &iv, &ciphertext).unwrap();
+    assert_eq!(&decrypted[..], &plaintext[..]);
 }
 
 #[test]
@@ -348,23 +348,25 @@ fn test_aes_ctr_256_roundtrip() {
     let iv = [0xABu8; 16];
     let plaintext = b"AES-CTR-256 test message for roundtrip";
 
-    let ciphertext = encrypt::aes_ctr_crypt(key.as_bytes(), &iv, plaintext).unwrap();
-    let decrypted = encrypt::aes_ctr_crypt(key.as_bytes(), &iv, &ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
+    let ciphertext = encrypt::aes_ctr_encrypt(key.as_bytes(), &iv, plaintext).unwrap();
+    let decrypted = encrypt::aes_ctr_decrypt(key.as_bytes(), &iv, &ciphertext).unwrap();
+    assert_eq!(&decrypted[..], &plaintext[..]);
 }
 
 #[test]
 fn test_aes_ctr_no_padding() {
     let key = keygen::generate_aes_key(32, false).unwrap();
-    let iv = [0x77u8; 16];
-
-    // CTR mode: ciphertext length == plaintext length (no padding)
+    // CTR mode: ciphertext length == plaintext length (no padding).
+    // A distinct counter block per encryption: reusing (key, IV) is a
+    // keystream-reuse error that the module rejects.
     for len in [1, 7, 15, 16, 17, 31, 100] {
+        let mut iv = [0x77u8; 16];
+        iv[0] = len as u8;
         let plaintext = vec![0x55u8; len];
-        let ciphertext = encrypt::aes_ctr_crypt(key.as_bytes(), &iv, &plaintext).unwrap();
+        let ciphertext = encrypt::aes_ctr_encrypt(key.as_bytes(), &iv, &plaintext).unwrap();
         assert_eq!(ciphertext.len(), plaintext.len());
-        let decrypted = encrypt::aes_ctr_crypt(key.as_bytes(), &iv, &ciphertext).unwrap();
-        assert_eq!(decrypted, plaintext);
+        let decrypted = encrypt::aes_ctr_decrypt(key.as_bytes(), &iv, &ciphertext).unwrap();
+        assert_eq!(&decrypted[..], &plaintext[..]);
     }
 }
 
@@ -374,7 +376,7 @@ fn test_aes_ctr_invalid_iv_length() {
     let short_iv = [0u8; 12]; // CTR needs 16-byte IV
     let plaintext = b"test";
 
-    let result = encrypt::aes_ctr_crypt(key.as_bytes(), &short_iv, plaintext);
+    let result = encrypt::aes_ctr_encrypt(key.as_bytes(), &short_iv, plaintext);
     assert!(result.is_err(), "Short IV should be rejected for CTR mode");
 }
 
@@ -603,12 +605,11 @@ fn test_aes_key_wrap_128_roundtrip() {
     let wrapping_key = keygen::generate_aes_key(16, false).unwrap();
     let key_to_wrap = keygen::generate_aes_key(16, false).unwrap();
 
-    let wrapped =
-        wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes(), false).unwrap();
+    let wrapped = wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
     assert_eq!(wrapped.len(), 16 + 8); // key + 8-byte overhead
 
-    let unwrapped = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped, false).unwrap();
-    assert_eq!(unwrapped, key_to_wrap.as_bytes());
+    let unwrapped = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped).unwrap();
+    assert_eq!(&unwrapped[..], key_to_wrap.as_bytes());
 }
 
 #[test]
@@ -616,12 +617,11 @@ fn test_aes_key_wrap_256_roundtrip() {
     let wrapping_key = keygen::generate_aes_key(32, false).unwrap();
     let key_to_wrap = keygen::generate_aes_key(32, false).unwrap();
 
-    let wrapped =
-        wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes(), false).unwrap();
+    let wrapped = wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
     assert_eq!(wrapped.len(), 32 + 8);
 
-    let unwrapped = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped, false).unwrap();
-    assert_eq!(unwrapped, key_to_wrap.as_bytes());
+    let unwrapped = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped).unwrap();
+    assert_eq!(&unwrapped[..], key_to_wrap.as_bytes());
 }
 
 #[test]
@@ -630,9 +630,8 @@ fn test_aes_key_wrap_wrong_key() {
     let wrapping_key2 = keygen::generate_aes_key(32, false).unwrap();
     let key_to_wrap = keygen::generate_aes_key(32, false).unwrap();
 
-    let wrapped =
-        wrap::aes_key_wrap(wrapping_key1.as_bytes(), key_to_wrap.as_bytes(), false).unwrap();
-    let result = wrap::aes_key_unwrap(wrapping_key2.as_bytes(), &wrapped, false);
+    let wrapped = wrap::aes_key_wrap(wrapping_key1.as_bytes(), key_to_wrap.as_bytes()).unwrap();
+    let result = wrap::aes_key_unwrap(wrapping_key2.as_bytes(), &wrapped);
     assert!(result.is_err(), "Unwrap with wrong key should fail");
 }
 
@@ -641,11 +640,10 @@ fn test_aes_key_wrap_tamper_detection() {
     let wrapping_key = keygen::generate_aes_key(32, false).unwrap();
     let key_to_wrap = keygen::generate_aes_key(32, false).unwrap();
 
-    let mut wrapped =
-        wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes(), false).unwrap();
+    let mut wrapped = wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
     // Tamper
     wrapped[0] ^= 0xFF;
-    let result = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped, false);
+    let result = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped);
     assert!(result.is_err(), "Tampered wrapped key should fail unwrap");
 }
 
@@ -654,7 +652,7 @@ fn test_aes_key_wrap_invalid_data_length() {
     let wrapping_key = keygen::generate_aes_key(32, false).unwrap();
     // Key to wrap must be at least 16 bytes and a multiple of 8
     let too_short = [0u8; 8];
-    let result = wrap::aes_key_wrap(wrapping_key.as_bytes(), &too_short, false);
+    let result = wrap::aes_key_wrap(wrapping_key.as_bytes(), &too_short);
     assert!(result.is_err(), "Too-short key should be rejected");
 }
 

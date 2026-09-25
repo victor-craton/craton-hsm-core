@@ -142,7 +142,7 @@ pub fn is_post_failed() -> bool {
 }
 
 fn get_hsm() -> Result<Arc<HsmCore>, CK_RV> {
-    if POST_FAILED.load(Ordering::Acquire) {
+    if POST_FAILED.load(Ordering::Acquire) || crate::crypto::self_test::is_error_state() {
         return Err(CKR_GENERAL_ERROR);
     }
 
@@ -193,29 +193,256 @@ fn err_to_rv(e: HsmError) -> CK_RV {
     e.into()
 }
 
-/// Parse OAEP hash algorithm from CK_RSA_PKCS_OAEP_PARAMS mechanism parameter bytes.
-/// The first CK_ULONG in the struct is hashAlg. Returns error for unrecognized or missing hash.
-fn parse_oaep_hash(mech_param: &[u8]) -> Result<crate::crypto::sign::OaepHash, CK_RV> {
-    use crate::crypto::sign::OaepHash;
-    if mech_param.len() >= std::mem::size_of::<CK_ULONG>() {
-        let hash_mech = CK_ULONG::from_ne_bytes(
-            match mech_param[..std::mem::size_of::<CK_ULONG>()].try_into() {
-                Ok(b) => b,
-                Err(_) => return Err(CKR_MECHANISM_PARAM_INVALID),
-            },
-        );
-        match hash_mech {
-            CKM_SHA_1 => {
-                tracing::error!("RSA-OAEP with SHA-1 is rejected — use SHA-256 or stronger");
-                Err(CKR_MECHANISM_PARAM_INVALID)
-            }
-            CKM_SHA256 => Ok(OaepHash::Sha256),
-            CKM_SHA384 => Ok(OaepHash::Sha384),
-            CKM_SHA512 => Ok(OaepHash::Sha512),
-            _ => Err(CKR_MECHANISM_PARAM_INVALID),
+// ---------------------------------------------------------------------------
+// Typed mechanism-parameter parsing (H1-16 / H2-22 / A2-09 / A2-12).
+// Standard CK_*_PARAMS structures are parsed here, while their embedded
+// pointers are valid (during *Init / C_DeriveKey), into the pointer-free
+// canonical encodings of `crate::crypto::params`.
+// ---------------------------------------------------------------------------
+
+#[cfg_attr(target_os = "windows", repr(C, packed))]
+#[cfg_attr(not(target_os = "windows"), repr(C))]
+#[derive(Clone, Copy)]
+struct CkGcmParams {
+    p_iv: *mut u8,
+    ul_iv_len: CK_ULONG,
+    ul_iv_bits: CK_ULONG,
+    p_aad: *const u8,
+    ul_aad_len: CK_ULONG,
+    ul_tag_bits: CK_ULONG,
+}
+
+/// Pre-v2.40 `CK_GCM_PARAMS` layout (no `ulIvBits`), still emitted by some
+/// clients.
+#[cfg_attr(target_os = "windows", repr(C, packed))]
+#[cfg_attr(not(target_os = "windows"), repr(C))]
+#[derive(Clone, Copy)]
+struct CkGcmParamsV230 {
+    p_iv: *mut u8,
+    ul_iv_len: CK_ULONG,
+    p_aad: *const u8,
+    ul_aad_len: CK_ULONG,
+    ul_tag_bits: CK_ULONG,
+}
+
+#[cfg_attr(target_os = "windows", repr(C, packed))]
+#[cfg_attr(not(target_os = "windows"), repr(C))]
+#[derive(Clone, Copy)]
+struct CkRsaPkcsOaepParams {
+    hash_alg: CK_ULONG,
+    mgf: CK_ULONG,
+    source: CK_ULONG,
+    p_source_data: *const u8,
+    ul_source_data_len: CK_ULONG,
+}
+
+#[cfg_attr(target_os = "windows", repr(C, packed))]
+#[cfg_attr(not(target_os = "windows"), repr(C))]
+#[derive(Clone, Copy)]
+struct CkRsaPkcsPssParams {
+    hash_alg: CK_ULONG,
+    mgf: CK_ULONG,
+    s_len: CK_ULONG,
+}
+
+#[cfg_attr(target_os = "windows", repr(C, packed))]
+#[cfg_attr(not(target_os = "windows"), repr(C))]
+#[derive(Clone, Copy)]
+struct CkAesCtrParams {
+    ul_counter_bits: CK_ULONG,
+    cb: [u8; 16],
+}
+
+#[cfg_attr(target_os = "windows", repr(C, packed))]
+#[cfg_attr(not(target_os = "windows"), repr(C))]
+#[derive(Clone, Copy)]
+struct CkEcdh1DeriveParams {
+    kdf: CK_ULONG,
+    ul_shared_data_len: CK_ULONG,
+    p_shared_data: *const u8,
+    ul_public_data_len: CK_ULONG,
+    p_public_data: *const u8,
+}
+
+/// Read a parameter struct `T` if `pParameter` is non-NULL and
+/// `ulParameterLen == size_of::<T>()`.
+///
+/// SAFETY: `p_mechanism` must be a valid, non-null `CK_MECHANISM` pointer.
+unsafe fn read_param_struct<T: Copy>(p_mechanism: CK_MECHANISM_PTR) -> Option<T> {
+    // SAFETY: see function contract; the size is checked before reading.
+    unsafe {
+        let mech = &*p_mechanism;
+        if mech.p_parameter.is_null() || mech.parameter_len as usize != std::mem::size_of::<T>() {
+            return None;
         }
+        Some(std::ptr::read_unaligned(mech.p_parameter as *const T))
+    }
+}
+
+/// Copy a caller buffer referenced from inside a parameter struct.
+///
+/// SAFETY: the caller guarantees `p` points to `len` readable bytes when
+/// non-null (PKCS#11 contract for mechanism parameters).
+unsafe fn copy_param_bytes(p: *const u8, len: CK_ULONG) -> Result<Vec<u8>, CK_RV> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if p.is_null() || len as usize > MAX_SINGLE_BUFFER {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    // SAFETY: see function contract.
+    Ok(unsafe { slice::from_raw_parts(p, len as usize) }.to_vec())
+}
+
+/// Parse and canonicalize the mechanism parameter of an encrypt/decrypt
+/// operation at `C_EncryptInit` / `C_DecryptInit` time.
+fn canonical_cipher_param(
+    hsm: &HsmCore,
+    p_mechanism: CK_MECHANISM_PTR,
+    mechanism: CK_MECHANISM_TYPE,
+    encrypt: bool,
+) -> Result<Vec<u8>, CK_RV> {
+    use crate::crypto::params::{CtrParams, GcmParams, OaepParams, GCM_IV_LEN};
+    // SAFETY: p_mechanism is non-null (checked by the callers).
+    let mech = unsafe { &*p_mechanism };
+    let has_param = !mech.p_parameter.is_null() && mech.parameter_len != 0;
+    match mechanism {
+        CKM_AES_GCM => {
+            if !has_param {
+                // Deprecated vendor framing: module-generated IV per
+                // operation, output IV || ciphertext || tag, no AAD.
+                tracing::warn!(
+                    "CKM_AES_GCM without CK_GCM_PARAMS: using deprecated IV||ct||tag framing"
+                );
+                return Ok(Vec::new());
+            }
+            if mech.parameter_len as usize == GCM_IV_LEN {
+                // Compatibility form: the parameter is a bare 96-bit IV (no
+                // AAD, 128-bit tag). Honoured as a caller IV; refused for
+                // encryption in FIPS approved mode (IG C.H).
+                let iv = extract_mechanism_param(p_mechanism);
+                if encrypt && hsm.algorithm_config.fips_approved_only {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                return GcmParams::new(&iv, &[], 128, false)
+                    .map(|p| p.encode())
+                    .map_err(err_to_rv);
+            }
+            // SAFETY: size checked by read_param_struct.
+            let (p_iv, iv_len, p_aad, aad_len, tag_bits) = if let Some(g) =
+                unsafe { read_param_struct::<CkGcmParams>(p_mechanism) }
+            {
+                (g.p_iv, g.ul_iv_len, g.p_aad, g.ul_aad_len, g.ul_tag_bits)
+            } else if let Some(g) = unsafe { read_param_struct::<CkGcmParamsV230>(p_mechanism) } {
+                (g.p_iv, g.ul_iv_len, g.p_aad, g.ul_aad_len, g.ul_tag_bits)
+            } else {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            };
+            // SAFETY: pointers come from the caller's CK_GCM_PARAMS.
+            let aad = unsafe { copy_param_bytes(p_aad, aad_len) }?;
+            let params = if encrypt && hsm.algorithm_config.fips_approved_only {
+                // FIPS 140-3 IG C.H: the IV is generated inside the module by
+                // the approved DRBG and returned to the caller through pIv.
+                if p_iv.is_null() || iv_len as usize != GCM_IV_LEN {
+                    return Err(CKR_MECHANISM_PARAM_INVALID);
+                }
+                let mut iv = [0u8; GCM_IV_LEN];
+                hsm.crypto_backend
+                    .generate_random(&mut iv)
+                    .map_err(err_to_rv)?;
+                // SAFETY: pIv is non-null and ulIvLen (== 12) bytes long.
+                unsafe { std::ptr::copy_nonoverlapping(iv.as_ptr(), p_iv, GCM_IV_LEN) };
+                GcmParams::new(&iv, &aad, tag_bits, true)
+            } else {
+                // SAFETY: as above.
+                let iv = unsafe { copy_param_bytes(p_iv, iv_len) }?;
+                GcmParams::new(&iv, &aad, tag_bits, false)
+            };
+            params.map(|p| p.encode()).map_err(err_to_rv)
+        }
+        CKM_RSA_PKCS_OAEP => {
+            // SAFETY: size checked by read_param_struct.
+            let o = unsafe { read_param_struct::<CkRsaPkcsOaepParams>(p_mechanism) }
+                .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            // SAFETY: pointer comes from the caller's CK_RSA_PKCS_OAEP_PARAMS.
+            let label = unsafe { copy_param_bytes(o.p_source_data, o.ul_source_data_len) }?;
+            OaepParams::from_ck(o.hash_alg, o.mgf, o.source, &label)
+                .map(|p| p.encode())
+                .map_err(err_to_rv)
+        }
+        CKM_AES_CTR => {
+            let params = if mech.parameter_len == 16 {
+                // Legacy encoding: raw 16-byte counter block.
+                CtrParams::from_legacy_iv(&extract_mechanism_param(p_mechanism))
+            } else {
+                // SAFETY: size checked by read_param_struct.
+                let c = unsafe { read_param_struct::<CkAesCtrParams>(p_mechanism) }
+                    .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                CtrParams::new(c.ul_counter_bits, &c.cb)
+            }
+            .map_err(err_to_rv)?;
+            if params.cb.iter().all(|&b| b == 0) && encrypt {
+                tracing::error!("C_EncryptInit: all-zero counter block rejected for AES-CTR");
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            Ok(params.encode())
+        }
+        CKM_AES_CBC | CKM_AES_CBC_PAD => {
+            let iv = extract_mechanism_param(p_mechanism);
+            if iv.len() != 16 {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            if encrypt && iv.iter().all(|&b| b == 0) {
+                tracing::error!("C_EncryptInit: all-zero IV rejected for AES-CBC");
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            }
+            Ok(iv)
+        }
+        _ => Ok(extract_mechanism_param(p_mechanism)),
+    }
+}
+
+/// Decode the canonical GCM parameters stored at *Init (empty = deprecated
+/// framing).
+fn stored_gcm_params(mech_param: &[u8]) -> HsmResult<crate::crypto::params::GcmParams> {
+    use crate::crypto::params::GcmParams;
+    if mech_param.is_empty() {
+        Ok(GcmParams::legacy([0u8; crate::crypto::params::GCM_IV_LEN]))
     } else {
-        Err(CKR_MECHANISM_PARAM_INVALID)
+        GcmParams::decode(mech_param)
+    }
+}
+
+/// Validate `CK_RSA_PKCS_PSS_PARAMS` supplied with a hash-specific PSS
+/// mechanism at `C_SignInit` / `C_VerifyInit` (H2-21): if present they must
+/// match the mechanism's hash, MGF1 hash and salt length.
+fn validate_pss_init_params(
+    p_mechanism: CK_MECHANISM_PTR,
+    mechanism: CK_MECHANISM_TYPE,
+) -> Result<(), CK_RV> {
+    if !sign::is_pss_mechanism(mechanism) {
+        return Ok(());
+    }
+    // SAFETY: p_mechanism is non-null (checked by the callers).
+    let mech = unsafe { &*p_mechanism };
+    if mech.p_parameter.is_null() || mech.parameter_len == 0 {
+        return Ok(());
+    }
+    // SAFETY: size checked by read_param_struct.
+    let p = unsafe { read_param_struct::<CkRsaPkcsPssParams>(p_mechanism) }
+        .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    crate::crypto::params::PssParams::from_ck(p.hash_alg, p.mgf, p.s_len)
+        .and_then(|pp| pp.check_consistent_with(mechanism))
+        .map_err(|_| CKR_MECHANISM_PARAM_INVALID)
+}
+
+/// Resolve the curve of an EC key object from `CKA_EC_PARAMS`. Absent
+/// parameters default to P-256 (legacy objects); anything present but not
+/// exactly the P-256 / P-384 namedCurve OID is rejected (A1-25).
+fn ec_curve_of(obj: &StoredObject) -> HsmResult<sign::EcCurve> {
+    match obj.ec_params.as_deref() {
+        None | Some([]) => Ok(sign::EcCurve::P256),
+        Some(p) => sign::EcCurve::from_ec_params(p).ok_or(HsmError::KeyTypeInconsistent),
     }
 }
 
@@ -241,9 +468,6 @@ pub extern "C" fn C_Initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
             // If mutex callbacks provided without OS_LOCKING_OK, that's fine too (we ignore them)
         }
 
-        // Reset per-key GCM encryption counters so re-initialization starts fresh
-        crate::crypto::encrypt::reset_gcm_counters();
-
         // Reset POST failure flag so re-initialization after C_Finalize gets a fresh chance.
         // If POST fails again below, POST_FAILED will be set back to true.
         POST_FAILED.store(false, Ordering::Release);
@@ -268,6 +492,18 @@ pub extern "C" fn C_Initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
                 return CKR_GENERAL_ERROR;
             }
         };
+
+        // CASTs through the backend that will serve requests; in `fips`
+        // builds this also refuses a non-validated backend (H2-05 / A1-04).
+        if crate::crypto::self_test::run_backend_post(
+            core.crypto_backend.as_ref(),
+            core.algorithm_config.fips_approved_only,
+        )
+        .is_err()
+        {
+            POST_FAILED.store(true, Ordering::Release);
+            return CKR_GENERAL_ERROR;
+        }
 
         // Record the PID for fork detection
         INIT_PID.store(current_pid(), Ordering::Release);
@@ -300,6 +536,9 @@ pub extern "C" fn C_Finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
         // Zeroize keys, PIN verifiers and storage keys and close all sessions
         // (A1-10); records the Finalize audit event and flushes the log.
         hsm.finalize();
+
+        // Release cached parsed RSA private keys (A1-10 / H2-10).
+        crate::crypto::sign::clear_rsa_key_cache();
 
         // Reset state so a subsequent C_Initialize can succeed (PKCS#11 spec compliant)
         *guard = None;
@@ -1429,27 +1668,13 @@ pub extern "C" fn C_EncryptInit(
             }
         }
 
-        let mech_param = extract_mechanism_param(p_mechanism);
-
-        // Early validation: reject all-zero IV/nonce for CBC and CTR modes.
-        // An all-zero IV indicates an initialization error or IV reuse risk.
-        // Note: AES-GCM nonces are generated internally by the backend (not
-        // caller-supplied), so no zero-check is needed for GCM.
-        match mechanism {
-            CKM_AES_CBC | CKM_AES_CBC_PAD => {
-                if mech_param.len() == 16 && mech_param.iter().all(|&b| b == 0) {
-                    tracing::error!("C_EncryptInit: all-zero IV rejected for AES-CBC");
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-            }
-            CKM_AES_CTR => {
-                if mech_param.len() >= 16 && mech_param[..16].iter().all(|&b| b == 0) {
-                    tracing::error!("C_EncryptInit: all-zero IV rejected for AES-CTR");
-                    return CKR_MECHANISM_PARAM_INVALID;
-                }
-            }
-            _ => {}
-        }
+        // Parse CK_GCM_PARAMS / CK_RSA_PKCS_OAEP_PARAMS / CK_AES_CTR_PARAMS
+        // now, while their embedded pointers are valid (H1-16). Rejects
+        // all-zero CBC/CTR IVs early.
+        let mech_param = match canonical_cipher_param(&hsm, p_mechanism, mechanism, true) {
+            Ok(p) => p,
+            Err(rv) => return rv,
+        };
 
         sess.active_operation = Some(ActiveOperation::Encrypt {
             mechanism,
@@ -1547,14 +1772,18 @@ pub extern "C" fn C_Encrypt(
         // This avoids consuming AES-GCM nonces and keeps the two-call idiom sound.
         if p_encrypted_data.is_null() {
             let estimated = match mechanism {
-                CKM_AES_GCM => {
-                    // GCM output = nonce (12) + ciphertext (= plaintext len) + tag (16)
-                    data.len() + 12 + 16
-                }
-                CKM_AES_CBC | CKM_AES_CBC_PAD => {
-                    // CBC-PAD may add up to one block; plain CBC output = input len
-                    data.len() + 16
-                }
+                CKM_AES_GCM => match stored_gcm_params(&mech_param) {
+                    // ciphertext || tag (plus the IV for the deprecated framing)
+                    Ok(p) => crate::crypto::encrypt::gcm_output_len(&p, data.len()),
+                    Err(e) => {
+                        sess.active_operation = None;
+                        return err_to_rv(e);
+                    }
+                },
+                // CBC (no padding) output = input length
+                CKM_AES_CBC => data.len(),
+                // CBC-PAD always adds 1..=16 bytes of padding
+                CKM_AES_CBC_PAD => (data.len() / 16 + 1) * 16,
                 CKM_AES_CTR => data.len(),
                 CKM_RSA_PKCS_OAEP => {
                     // RSA-OAEP output = modulus size in bytes
@@ -1577,24 +1806,20 @@ pub extern "C" fn C_Encrypt(
             return CKR_OK;
         }
 
-        let result = match mechanism {
-            CKM_AES_GCM => hsm.crypto_backend.aes_256_gcm_encrypt(key_bytes, data),
-            CKM_AES_CBC | CKM_AES_CBC_PAD => {
-                if mech_param.is_empty() {
-                    Err(HsmError::MechanismParamInvalid)
-                } else {
-                    hsm.crypto_backend
-                        .aes_cbc_encrypt(key_bytes, &mech_param, data)
-                }
-            }
-            CKM_AES_CTR => {
-                if mech_param.is_empty() {
-                    Err(HsmError::MechanismParamInvalid)
-                } else {
-                    hsm.crypto_backend
-                        .aes_ctr_encrypt(key_bytes, &mech_param, data)
-                }
-            }
+        let fips_mode = hsm.algorithm_config.fips_approved_only;
+        let result: HsmResult<Vec<u8>> = match mechanism {
+            CKM_AES_GCM => stored_gcm_params(&mech_param).and_then(|p| {
+                hsm.crypto_backend
+                    .aes_gcm_encrypt(key_bytes, &p, data, fips_mode)
+            }),
+            CKM_AES_CBC | CKM_AES_CBC_PAD => hsm.crypto_backend.aes_cbc_encrypt(
+                key_bytes,
+                &mech_param,
+                data,
+                mechanism == CKM_AES_CBC_PAD,
+            ),
+            CKM_AES_CTR => crate::crypto::params::CtrParams::decode(&mech_param)
+                .and_then(|p| hsm.crypto_backend.aes_ctr_encrypt(key_bytes, &p, data)),
             CKM_RSA_PKCS_OAEP => {
                 let modulus = match &obj.modulus {
                     Some(m) => m.as_slice(),
@@ -1610,15 +1835,10 @@ pub extern "C" fn C_Encrypt(
                         return CKR_KEY_HANDLE_INVALID;
                     }
                 };
-                let oaep_hash = match parse_oaep_hash(&mech_param) {
-                    Ok(h) => h,
-                    Err(rv) => {
-                        sess.active_operation = None;
-                        return rv;
-                    }
-                };
-                hsm.crypto_backend
-                    .rsa_oaep_encrypt(modulus, pub_exp, data, oaep_hash)
+                crate::crypto::params::OaepParams::decode(&mech_param).and_then(|p| {
+                    hsm.crypto_backend
+                        .rsa_oaep_encrypt(modulus, pub_exp, data, &p)
+                })
             }
             _ => {
                 sess.active_operation = None;
@@ -1729,7 +1949,10 @@ pub extern "C" fn C_DecryptInit(
             }
         }
 
-        let mech_param = extract_mechanism_param(p_mechanism);
+        let mech_param = match canonical_cipher_param(&hsm, p_mechanism, mechanism, false) {
+            Ok(p) => p,
+            Err(rv) => return rv,
+        };
         sess.active_operation = Some(ActiveOperation::Decrypt {
             mechanism,
             key_handle: key,
@@ -1804,10 +2027,20 @@ pub extern "C" fn C_Decrypt(
         // decryption, preserving the operation state for the real call.
         if p_data.is_null() {
             let estimated = match mechanism {
-                CKM_AES_GCM => {
-                    // GCM plaintext = ciphertext - nonce (12) - tag (16)
-                    data.len().saturating_sub(28)
-                }
+                CKM_AES_GCM => match stored_gcm_params(&mech_param) {
+                    Ok(p) => data.len().saturating_sub(
+                        p.tag_len()
+                            + if p.legacy_framing {
+                                crate::crypto::params::GCM_IV_LEN
+                            } else {
+                                0
+                            },
+                    ),
+                    Err(e) => {
+                        sess.active_operation = None;
+                        return err_to_rv(e);
+                    }
+                },
                 CKM_AES_CBC | CKM_AES_CBC_PAD => data.len(),
                 CKM_AES_CTR => data.len(),
                 CKM_RSA_PKCS_OAEP => {
@@ -1825,35 +2058,19 @@ pub extern "C" fn C_Decrypt(
             return CKR_OK;
         }
 
-        let result = match mechanism {
-            CKM_AES_GCM => hsm.crypto_backend.aes_256_gcm_decrypt(key_bytes, data),
-            CKM_AES_CBC | CKM_AES_CBC_PAD => {
-                if mech_param.is_empty() {
-                    Err(HsmError::MechanismParamInvalid)
-                } else {
-                    hsm.crypto_backend
-                        .aes_cbc_decrypt(key_bytes, &mech_param, data)
-                }
-            }
-            CKM_AES_CTR => {
-                if mech_param.is_empty() {
-                    Err(HsmError::MechanismParamInvalid)
-                } else {
-                    hsm.crypto_backend
-                        .aes_ctr_decrypt(key_bytes, &mech_param, data)
-                }
-            }
-            CKM_RSA_PKCS_OAEP => {
-                let oaep_hash = match parse_oaep_hash(&mech_param) {
-                    Ok(h) => h,
-                    Err(rv) => {
-                        sess.active_operation = None;
-                        return rv;
-                    }
-                };
-                hsm.crypto_backend
-                    .rsa_oaep_decrypt(key_bytes, data, oaep_hash)
-            }
+        let result: HsmResult<Zeroizing<Vec<u8>>> = match mechanism {
+            CKM_AES_GCM => stored_gcm_params(&mech_param)
+                .and_then(|p| hsm.crypto_backend.aes_gcm_decrypt(key_bytes, &p, data)),
+            CKM_AES_CBC | CKM_AES_CBC_PAD => hsm.crypto_backend.aes_cbc_decrypt(
+                key_bytes,
+                &mech_param,
+                data,
+                mechanism == CKM_AES_CBC_PAD,
+            ),
+            CKM_AES_CTR => crate::crypto::params::CtrParams::decode(&mech_param)
+                .and_then(|p| hsm.crypto_backend.aes_ctr_decrypt(key_bytes, &p, data)),
+            CKM_RSA_PKCS_OAEP => crate::crypto::params::OaepParams::decode(&mech_param)
+                .and_then(|p| hsm.crypto_backend.rsa_oaep_decrypt(key_bytes, data, &p)),
             _ => {
                 sess.active_operation = None;
                 return CKR_MECHANISM_INVALID;
@@ -1955,6 +2172,10 @@ pub extern "C" fn C_SignInit(
         if let Err(rv) =
             mechanisms::validate_mechanism_for_policy(mechanism, &hsm.algorithm_config, true)
         {
+            return rv;
+        }
+        // Explicit CK_RSA_PKCS_PSS_PARAMS must match the mechanism (H2-21).
+        if let Err(rv) = validate_pss_init_params(p_mechanism, mechanism) {
             return rv;
         }
 
@@ -2113,13 +2334,6 @@ pub extern "C" fn C_Sign(
     .unwrap_or(CKR_GENERAL_ERROR)
 }
 
-/// Helper to check if EC params correspond to P-384
-fn is_p384_params(ec_params: &[u8]) -> bool {
-    // OID for secp384r1: 1.3.132.0.34 = 06 05 2B 81 04 00 22
-    const P384_OID: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22];
-    ec_params == P384_OID || ec_params.windows(P384_OID.len()).any(|w| w == P384_OID)
-}
-
 /// Single-shot sign: hash + sign in one step (used by C_Sign and C_SignFinal for non-hashed mechanisms)
 fn sign_single_shot(
     backend: &dyn CryptoBackend,
@@ -2135,12 +2349,10 @@ fn sign_single_shot(
         let key_type = obj.key_type.unwrap_or(0);
         match key_type {
             CKK_EC => {
-                let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-                if is_p384_params(ec_params) {
-                    backend.ecdsa_p384_sign(key_bytes, data)
-                } else {
-                    backend.ecdsa_p256_sign(key_bytes, data)
-                }
+                // Hash per mechanism; CKM_ECDSA signs the caller's hash as-is
+                // (H2-07 / A1-13). Output is raw r || s (A2-07).
+                let hash = sign::ecdsa_mechanism_to_hash(mechanism)?;
+                backend.ecdsa_sign(ec_curve_of(obj)?, key_bytes, data, hash)
             }
             _ => Err(HsmError::KeyTypeInconsistent),
         }
@@ -2153,13 +2365,8 @@ fn sign_single_shot(
         let variant = pqc::mechanism_to_slh_dsa_variant(mechanism).unwrap();
         pqc::slh_dsa_sign(key_bytes, data, variant)
     } else if pqc::is_hybrid_mechanism(mechanism) {
-        let ecdsa_key = obj
-            .extra_attributes
-            .get(&CKA_EC_POINT)
-            .or(obj.ec_point.as_ref())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        pqc::hybrid_sign(key_bytes, ecdsa_key, data)
+        // Removed (H2-19): it signed with the public CKA_EC_POINT.
+        Err(HsmError::MechanismInvalid)
     } else {
         // RSA PKCS#1 v1.5
         let hash_alg = sign::mechanism_to_hash(mechanism);
@@ -2182,14 +2389,8 @@ fn sign_prehashed(
     } else if sign::is_ecdsa_mechanism(mechanism) {
         let key_type = obj.key_type.unwrap_or(0);
         match key_type {
-            CKK_EC => {
-                let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-                if is_p384_params(ec_params) {
-                    backend.ecdsa_p384_sign_prehashed(key_bytes, digest)
-                } else {
-                    backend.ecdsa_p256_sign_prehashed(key_bytes, digest)
-                }
-            }
+            // `digest` was computed with the mechanism's hash.
+            CKK_EC => backend.ecdsa_sign_prehashed(ec_curve_of(obj)?, key_bytes, digest),
             _ => Err(HsmError::KeyTypeInconsistent),
         }
     } else {
@@ -2217,12 +2418,8 @@ fn verify_single_shot(
         backend.rsa_pss_verify(modulus, pub_exp, data, signature, hash)
     } else if sign::is_ecdsa_mechanism(mechanism) {
         let ec_point = obj.ec_point.as_deref().ok_or(HsmError::KeyHandleInvalid)?;
-        let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-        if is_p384_params(ec_params) {
-            backend.ecdsa_p384_verify(ec_point, data, signature)
-        } else {
-            backend.ecdsa_p256_verify(ec_point, data, signature)
-        }
+        let hash = sign::ecdsa_mechanism_to_hash(mechanism)?;
+        backend.ecdsa_verify(ec_curve_of(obj)?, ec_point, data, signature, hash)
     } else if sign::is_eddsa_mechanism(mechanism) {
         let pub_key = obj
             .public_key_data
@@ -2245,17 +2442,7 @@ fn verify_single_shot(
         let variant = pqc::mechanism_to_slh_dsa_variant(mechanism).unwrap();
         pqc::slh_dsa_verify(pub_key, data, signature, variant)
     } else if pqc::is_hybrid_mechanism(mechanism) {
-        let ml_dsa_vk = obj
-            .public_key_data
-            .as_deref()
-            .ok_or(HsmError::KeyHandleInvalid)?;
-        let ecdsa_pk = obj
-            .extra_attributes
-            .get(&CKA_EC_POINT)
-            .or(obj.ec_point.as_ref())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        pqc::hybrid_verify(ml_dsa_vk, ecdsa_pk, data, signature)
+        Err(HsmError::MechanismInvalid)
     } else {
         // RSA PKCS#1 v1.5
         let modulus = obj.modulus.as_deref().ok_or(HsmError::KeyHandleInvalid)?;
@@ -2287,12 +2474,7 @@ fn verify_prehashed(
         backend.rsa_pss_verify_prehashed(modulus, pub_exp, digest, signature, hash)
     } else if sign::is_ecdsa_mechanism(mechanism) {
         let ec_point = obj.ec_point.as_deref().ok_or(HsmError::KeyHandleInvalid)?;
-        let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-        if is_p384_params(ec_params) {
-            backend.ecdsa_p384_verify_prehashed(ec_point, digest, signature)
-        } else {
-            backend.ecdsa_p256_verify_prehashed(ec_point, digest, signature)
-        }
+        backend.ecdsa_verify_prehashed(ec_curve_of(obj)?, ec_point, digest, signature)
     } else {
         // RSA PKCS#1 v1.5 prehashed
         let modulus = obj.modulus.as_deref().ok_or(HsmError::KeyHandleInvalid)?;
@@ -2338,6 +2520,9 @@ pub extern "C" fn C_VerifyInit(
         if let Err(rv) =
             mechanisms::validate_mechanism_for_policy(mechanism, &hsm.algorithm_config, false)
         {
+            return rv;
+        }
+        if let Err(rv) = validate_pss_init_params(p_mechanism, mechanism) {
             return rv;
         }
 
@@ -2851,7 +3036,15 @@ fn generate_ec_keypair(
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
 
-    let is_p384 = is_p384_params(&ec_params);
+    // Strict curve selection (A1-25): absent parameters default to P-256,
+    // anything other than the P-256 / P-384 namedCurve OID is rejected.
+    let curve = if ec_params.is_empty() {
+        sign::EcCurve::P256
+    } else {
+        sign::EcCurve::from_ec_params(&ec_params)
+            .ok_or(crate::crypto::params::CKR_CURVE_NOT_SUPPORTED)?
+    };
+    let is_p384 = curve == sign::EcCurve::P384;
     let (private_key, public_key, key_bits) = if is_p384 {
         let (priv_key, pub_key) = hsm
             .crypto_backend
@@ -3282,8 +3475,24 @@ pub extern "C" fn C_SeedRandom(
             Ok(s) => s,
             Err(e) => return err_to_rv(e),
         };
-        // We use OsRng — seeding is not supported/needed
-        CKR_RANDOM_SEED_NOT_SUPPORTED
+        // Mix the caller's seed into the SP 800-90A DRBG as additional input
+        // (it never replaces the entropy input). A2-16.
+        if _p_seed.is_null() && _seed_len != 0 {
+            return CKR_ARGUMENTS_BAD;
+        }
+        if (_seed_len as usize) > MAX_SINGLE_BUFFER {
+            return CKR_ARGUMENTS_BAD;
+        }
+        let seed: &[u8] = if _seed_len == 0 {
+            &[]
+        } else {
+            // SAFETY: non-null with length bound checked above.
+            unsafe { slice::from_raw_parts(_p_seed, _seed_len as usize) }
+        };
+        match hsm.crypto_backend.seed_random(seed) {
+            Ok(()) => CKR_OK,
+            Err(e) => err_to_rv(e),
+        }
     })
     .unwrap_or(CKR_GENERAL_ERROR)
 }
@@ -3310,11 +3519,13 @@ pub extern "C" fn C_GenerateRandom(
             Err(e) => return err_to_rv(e),
         };
 
-        use rand::rngs::OsRng;
-        use rand::RngCore;
-
+        // SP 800-90A DRBG with health tests (A1-01 / A2-16); the AWS-LC
+        // backend uses its own validated DRBG.
         let data = unsafe { slice::from_raw_parts_mut(p_random_data, random_len as usize) };
-        OsRng.fill_bytes(data);
+        if let Err(e) = hsm.crypto_backend.generate_random(data) {
+            data.fill(0);
+            return err_to_rv(e);
+        }
 
         let _ = hsm.audit_log.record(
             session as u64,
@@ -3812,12 +4023,8 @@ fn estimated_signature_len(mechanism: CK_MECHANISM_TYPE, obj: &StoredObject) -> 
         // Fallback: derive from private key DER (conservative)
         obj.key_material.as_ref().map(|km| km.as_bytes().len())
     } else if sign::is_ecdsa_mechanism(mechanism) {
-        let ec_params = obj.ec_params.as_deref().unwrap_or(&[]);
-        if is_p384_params(ec_params) {
-            Some(104) // DER-encoded P-384 ECDSA: up to ~104 bytes
-        } else {
-            Some(72) // DER-encoded P-256 ECDSA: up to ~72 bytes
-        }
+        // PKCS#11 raw r || s: 64 bytes (P-256) / 96 bytes (P-384).
+        ec_curve_of(obj).ok().map(|c| c.signature_len())
     } else if sign::is_eddsa_mechanism(mechanism) {
         Some(64) // Ed25519
     } else if pqc::is_ml_dsa_mechanism(mechanism) {
@@ -3825,8 +4032,6 @@ fn estimated_signature_len(mechanism: CK_MECHANISM_TYPE, obj: &StoredObject) -> 
         Some(4672) // ML-DSA-87 max
     } else if pqc::is_slh_dsa_mechanism(mechanism) {
         Some(49_856) // SLH-DSA-SHA2-256f max
-    } else if pqc::is_hybrid_mechanism(mechanism) {
-        Some(49_856 + 104) // hybrid: PQC + ECDSA
     } else {
         None
     }
@@ -3996,23 +4201,15 @@ pub extern "C" fn C_EncryptFinal(
             }
         };
 
-        let result = match mechanism {
-            CKM_AES_CBC | CKM_AES_CBC_PAD => {
-                if mech_param.is_empty() {
-                    Err(HsmError::MechanismParamInvalid)
-                } else {
-                    hsm.crypto_backend
-                        .aes_cbc_encrypt(key_bytes, &mech_param, &data)
-                }
-            }
-            CKM_AES_CTR => {
-                if mech_param.is_empty() {
-                    Err(HsmError::MechanismParamInvalid)
-                } else {
-                    hsm.crypto_backend
-                        .aes_ctr_encrypt(key_bytes, &mech_param, &data)
-                }
-            }
+        let result: HsmResult<Vec<u8>> = match mechanism {
+            CKM_AES_CBC | CKM_AES_CBC_PAD => hsm.crypto_backend.aes_cbc_encrypt(
+                key_bytes,
+                &mech_param,
+                &data,
+                mechanism == CKM_AES_CBC_PAD,
+            ),
+            CKM_AES_CTR => crate::crypto::params::CtrParams::decode(&mech_param)
+                .and_then(|p| hsm.crypto_backend.aes_ctr_encrypt(key_bytes, &p, &data)),
             _ => {
                 sess.active_operation = None;
                 return CKR_MECHANISM_INVALID;
@@ -4212,23 +4409,15 @@ pub extern "C" fn C_DecryptFinal(
             }
         };
 
-        let result = match mechanism {
-            CKM_AES_CBC | CKM_AES_CBC_PAD => {
-                if mech_param.is_empty() {
-                    Err(HsmError::MechanismParamInvalid)
-                } else {
-                    hsm.crypto_backend
-                        .aes_cbc_decrypt(key_bytes, &mech_param, &data)
-                }
-            }
-            CKM_AES_CTR => {
-                if mech_param.is_empty() {
-                    Err(HsmError::MechanismParamInvalid)
-                } else {
-                    hsm.crypto_backend
-                        .aes_ctr_decrypt(key_bytes, &mech_param, &data)
-                }
-            }
+        let result: HsmResult<Zeroizing<Vec<u8>>> = match mechanism {
+            CKM_AES_CBC | CKM_AES_CBC_PAD => hsm.crypto_backend.aes_cbc_decrypt(
+                key_bytes,
+                &mech_param,
+                &data,
+                mechanism == CKM_AES_CBC_PAD,
+            ),
+            CKM_AES_CTR => crate::crypto::params::CtrParams::decode(&mech_param)
+                .and_then(|p| hsm.crypto_backend.aes_ctr_decrypt(key_bytes, &p, &data)),
             _ => {
                 sess.active_operation = None;
                 return CKR_MECHANISM_INVALID;
@@ -5100,7 +5289,7 @@ pub extern "C" fn C_WrapKey(
         // CKA_TRUSTED is a typed, SO-controlled field (H1-09).
         let wk_is_trusted = wk_obj.trusted;
         let wk_bytes = match &wk_obj.key_material {
-            Some(km) => km.as_bytes().to_vec(),
+            Some(km) => Zeroizing::new(km.as_bytes().to_vec()),
             None => return CKR_KEY_HANDLE_INVALID,
         };
         drop(wk_obj);
@@ -5123,15 +5312,30 @@ pub extern "C" fn C_WrapKey(
             return CKR_KEY_FUNCTION_NOT_PERMITTED;
         }
         let key_bytes = match &key_obj.key_material {
-            Some(km) => km.as_bytes().to_vec(),
+            Some(km) => Zeroizing::new(km.as_bytes().to_vec()),
             None => return CKR_KEY_HANDLE_INVALID,
         };
+        // SP 800-57: the KEK must be at least as strong as the wrapped key
+        // (enforced in approved mode, logged otherwise). H2-14.
+        let target_strength = crate::crypto::wrap::key_security_strength(
+            key_obj.key_type.unwrap_or(CKK_VENDOR_DEFINED),
+            key_bytes.len(),
+            key_obj.modulus_bits,
+            key_obj.ec_params.as_deref(),
+        );
         drop(key_obj);
+        if let Err(e) = crate::crypto::wrap::check_wrap_strength(
+            wk_bytes.len(),
+            target_strength,
+            hsm.algorithm_config.fips_approved_only,
+        ) {
+            return err_to_rv(e);
+        }
 
         let wrapped = match hsm.crypto_backend.aes_key_wrap(
             &wk_bytes,
             &key_bytes,
-            hsm.algorithm_config.fips_approved_only,
+            mechanism == CKM_AES_KEY_WRAP_KWP,
         ) {
             Ok(w) => w,
             Err(e) => {
@@ -5245,7 +5449,7 @@ pub extern "C" fn C_UnwrapKey(
             return CKR_KEY_FUNCTION_NOT_PERMITTED;
         }
         let uk_bytes = match &uk_obj.key_material {
-            Some(km) => km.as_bytes().to_vec(),
+            Some(km) => Zeroizing::new(km.as_bytes().to_vec()),
             None => return CKR_KEY_HANDLE_INVALID,
         };
         let uk_sensitive = uk_obj.sensitive;
@@ -5261,7 +5465,7 @@ pub extern "C" fn C_UnwrapKey(
         let unwrapped = match hsm.crypto_backend.aes_key_unwrap(
             &uk_bytes,
             wrapped_data,
-            hsm.algorithm_config.fips_approved_only,
+            mechanism == CKM_AES_KEY_WRAP_KWP,
         ) {
             Ok(u) => u,
             Err(e) => return err_to_rv(e),
@@ -5282,7 +5486,7 @@ pub extern "C" fn C_UnwrapKey(
         };
         let mut obj = StoredObject::new(handle, CKO_SECRET_KEY);
         obj.key_type = Some(CKK_AES);
-        obj.key_material = Some(RawKeyMaterial::new(unwrapped.clone()));
+        obj.key_material = Some(RawKeyMaterial::new(unwrapped.to_vec()));
         obj.value_len = Some(unwrapped.len() as CK_ULONG);
         obj.sensitive = true;
         obj.extractable = false; // secure default: unwrapped keys are non-extractable
@@ -5416,10 +5620,17 @@ pub extern "C" fn C_DeriveKey(
             return CKR_KEY_FUNCTION_NOT_PERMITTED;
         }
         let bk_bytes = match &bk_obj.key_material {
-            Some(km) => km.as_bytes().to_vec(),
+            Some(km) => Zeroizing::new(km.as_bytes().to_vec()),
             None => return CKR_KEY_HANDLE_INVALID,
         };
-        let ec_params = bk_obj.ec_params.as_deref().unwrap_or(&[]).to_vec();
+        let ec_curve = if pqc::is_ml_kem_mechanism(mechanism) {
+            None
+        } else {
+            match ec_curve_of(&bk_obj) {
+                Ok(c) => Some(c),
+                Err(_) => return crate::crypto::params::CKR_CURVE_NOT_SUPPORTED,
+            }
+        };
         let bk_sensitive = bk_obj.sensitive;
         let bk_origin = ObjectOrigin::Derived {
             base_always_sensitive: bk_obj.always_sensitive,
@@ -5427,11 +5638,41 @@ pub extern "C" fn C_DeriveKey(
         };
         drop(bk_obj);
 
-        // The mechanism parameter contains the peer public key (ECDH) or ciphertext (KEM)
-        let mech_param = extract_mechanism_param(p_mechanism);
-        if mech_param.is_empty() {
-            return CKR_MECHANISM_PARAM_INVALID;
-        }
+        // ML-KEM: the parameter is the ciphertext. ECDH: CK_ECDH1_DERIVE_PARAMS
+        // (kdf, pSharedData, pPublicData) — or, for backward compatibility,
+        // the raw peer point (X9.63 SHA-256 KDF, no shared data). H2-06/A2-12.
+        let (kem_ciphertext, ecdh_params) = if pqc::is_ml_kem_mechanism(mechanism) {
+            let ct = extract_mechanism_param(p_mechanism);
+            if ct.is_empty() {
+                return CKR_MECHANISM_PARAM_INVALID;
+            }
+            (ct, None)
+        } else {
+            // SAFETY: size checked by read_param_struct.
+            let parsed =
+                if let Some(p) = unsafe { read_param_struct::<CkEcdh1DeriveParams>(p_mechanism) } {
+                    // SAFETY: pointers come from the caller's CK_ECDH1_DERIVE_PARAMS.
+                    let shared =
+                        match unsafe { copy_param_bytes(p.p_shared_data, p.ul_shared_data_len) } {
+                            Ok(v) => v,
+                            Err(rv) => return rv,
+                        };
+                    let public =
+                        match unsafe { copy_param_bytes(p.p_public_data, p.ul_public_data_len) } {
+                            Ok(v) => v,
+                            Err(rv) => return rv,
+                        };
+                    crate::crypto::params::EcdhParams::from_ck(p.kdf, &shared, &public)
+                } else {
+                    crate::crypto::params::EcdhParams::from_legacy_point(&extract_mechanism_param(
+                        p_mechanism,
+                    ))
+                };
+            match parsed {
+                Ok(p) => (Vec::new(), Some(p)),
+                Err(e) => return err_to_rv(e),
+            }
+        };
 
         let template = if p_template.is_null() {
             vec![]
@@ -5455,23 +5696,21 @@ pub extern "C" fn C_DeriveKey(
 
         let shared_secret = if let Some(variant) = pqc::mechanism_to_ml_kem_variant(mechanism) {
             // ML-KEM decapsulation: base key is dk seed, param is ciphertext
-            match pqc::ml_kem_decapsulate(&bk_bytes, &mech_param, variant) {
-                Ok(ss) => RawKeyMaterial::new(ss),
-                Err(e) => return err_to_rv(e),
-            }
-        } else if is_p384_params(&ec_params) {
-            match hsm
-                .crypto_backend
-                .ecdh_p384(&bk_bytes, &mech_param, requested_len)
-            {
-                Ok(s) => s,
+            match pqc::ml_kem_decapsulate(&bk_bytes, &kem_ciphertext, variant) {
+                Ok(ss) => RawKeyMaterial::new(ss.to_vec()),
                 Err(e) => return err_to_rv(e),
             }
         } else {
-            match hsm
-                .crypto_backend
-                .ecdh_p256(&bk_bytes, &mech_param, requested_len)
-            {
+            let (Some(curve), Some(params)) = (ec_curve, ecdh_params.as_ref()) else {
+                return CKR_MECHANISM_PARAM_INVALID;
+            };
+            match hsm.crypto_backend.ecdh_derive(
+                curve,
+                &bk_bytes,
+                params,
+                requested_len.unwrap_or(32),
+                hsm.algorithm_config.fips_approved_only,
+            ) {
                 Ok(s) => s,
                 Err(e) => return err_to_rv(e),
             }

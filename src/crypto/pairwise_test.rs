@@ -7,7 +7,7 @@
 //! Failure triggers error state (POST_FAILED).
 
 use crate::crypto::backend::CryptoBackend;
-use crate::crypto::sign::HashAlg;
+use crate::crypto::sign::{EcCurve, HashAlg};
 use crate::error::{HsmError, HsmResult};
 use crate::store::key_material::RawKeyMaterial;
 
@@ -63,14 +63,25 @@ pub fn ecdsa_p256_pairwise_test(
     public_key: &[u8],
 ) -> HsmResult<()> {
     let signature = backend
-        .ecdsa_p256_sign(private_key.as_bytes(), PAIRWISE_TEST_DATA)
+        .ecdsa_sign(
+            EcCurve::P256,
+            private_key.as_bytes(),
+            PAIRWISE_TEST_DATA,
+            Some(HashAlg::Sha256),
+        )
         .map_err(|_| {
             tracing::error!("ECDSA P-256 pairwise test: signing failed");
             HsmError::GeneralError
         })?;
 
     let valid = backend
-        .ecdsa_p256_verify(public_key, PAIRWISE_TEST_DATA, &signature)
+        .ecdsa_verify(
+            EcCurve::P256,
+            public_key,
+            PAIRWISE_TEST_DATA,
+            &signature,
+            Some(HashAlg::Sha256),
+        )
         .map_err(|_| {
             tracing::error!("ECDSA P-256 pairwise test: verification call failed");
             HsmError::GeneralError
@@ -92,14 +103,25 @@ pub fn ecdsa_p384_pairwise_test(
     public_key: &[u8],
 ) -> HsmResult<()> {
     let signature = backend
-        .ecdsa_p384_sign(private_key.as_bytes(), PAIRWISE_TEST_DATA)
+        .ecdsa_sign(
+            EcCurve::P384,
+            private_key.as_bytes(),
+            PAIRWISE_TEST_DATA,
+            Some(HashAlg::Sha384),
+        )
         .map_err(|_| {
             tracing::error!("ECDSA P-384 pairwise test: signing failed");
             HsmError::GeneralError
         })?;
 
     let valid = backend
-        .ecdsa_p384_verify(public_key, PAIRWISE_TEST_DATA, &signature)
+        .ecdsa_verify(
+            EcCurve::P384,
+            public_key,
+            PAIRWISE_TEST_DATA,
+            &signature,
+            Some(HashAlg::Sha384),
+        )
         .map_err(|_| {
             tracing::error!("ECDSA P-384 pairwise test: verification call failed");
             HsmError::GeneralError
@@ -256,7 +278,7 @@ pub fn ml_kem_pairwise_test(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rustcrypto-backend"))]
 mod tests {
     use super::*;
 

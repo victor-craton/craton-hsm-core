@@ -5,12 +5,6 @@ use crate::pkcs11_abi::constants::*;
 use crate::pkcs11_abi::types::CK_MECHANISM_TYPE;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
-/// Size of the scratch buffer used for zeroizing hasher state on drop.
-/// Must be >= the largest internal state of any supported hash function.
-/// SHA-512/SHA3-512 have the largest state at ~200-210 bytes; 256 is safe.
-#[allow(dead_code)]
-const HASHER_ZEROIZE_BUF_SIZE: usize = 256;
-
 /// Compute a digest of the given data using the specified mechanism.
 ///
 /// **SHA-1 deprecation:** SHA-1 is cryptographically broken for collision
@@ -126,6 +120,17 @@ impl<D: Digest + Send + Sync + 'static> DigestAccumulator for GenericHasher<D> {
     }
 }
 
+/// Compile-time guard: hashers zeroized by raw-byte overwrite must be small,
+/// inline (stack-only) types.
+struct AssertStackHasher<D>(std::marker::PhantomData<D>);
+
+impl<D> AssertStackHasher<D> {
+    const OK: () = assert!(
+        std::mem::size_of::<D>() <= 512,
+        "hasher type exceeds 512 bytes — review for heap allocations before zeroizing"
+    );
+}
+
 /// Zeroize the hasher's internal state on drop to prevent residual
 /// digest input data from remaining in memory (FIPS 140-3 §7.7).
 ///
@@ -150,11 +155,10 @@ impl<D: Digest + Send + Sync> Drop for GenericHasher<D> {
             // hashers (SHA-1 through SHA3-512) store their full state
             // inline and are under 512 bytes. This assertion catches new
             // hasher types that need review before zeroization.
-            debug_assert!(
-                std::mem::size_of::<D>() <= 512,
-                "Hasher type {} exceeds 512 bytes — review for heap allocations before zeroizing",
-                std::any::type_name::<D>()
-            );
+            // Compile-time (post-monomorphization) size guard (was a
+            // `debug_assert!`, which is a no-op in release builds).
+            #[allow(clippy::let_unit_value)]
+            let () = AssertStackHasher::<D>::OK;
             // Wrap in ManuallyDrop to suppress D::drop(), which would read
             // the zeroed bytes and potentially cause UB.
             let mut hasher = std::mem::ManuallyDrop::new(hasher);

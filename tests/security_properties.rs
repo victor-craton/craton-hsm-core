@@ -227,19 +227,37 @@ fn test_backup_wrong_passphrase_rejected() {
 }
 
 // ============================================================================
-// RSA: unprefixed signing must be rejected
+// RSA: raw CKM_RSA_PKCS signing (A2-13) — caller supplies the DigestInfo;
+// oversized input is rejected and verification is a strict full-block match.
 // ============================================================================
 
 #[test]
-fn test_unprefixed_rsa_signing_rejected() {
-    let (priv_der, _modulus, _pub_exp) = keygen::generate_rsa_key_pair(2048, false).unwrap();
-    let message = b"Test message";
+fn test_raw_rsa_pkcs1_signing() {
+    use sha2::Digest;
+    let (priv_der, modulus, pub_exp) = keygen::generate_rsa_key_pair(2048, false).unwrap();
 
-    // Sign without hash algorithm (None) should fail
-    let result = sign::rsa_pkcs1v15_sign(priv_der.as_bytes(), message, None);
+    // SHA-256 DigestInfo prefix (RFC 8017 §9.2 note 1)
+    let mut digest_info = vec![
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ];
+    digest_info.extend_from_slice(&sha2::Sha256::digest(b"Test message"));
+    let sig = sign::rsa_pkcs1v15_sign(priv_der.as_bytes(), &digest_info, None).unwrap();
+    // Identical to CKM_SHA256_RSA_PKCS over the message.
+    assert!(sign::rsa_pkcs1v15_verify(
+        &modulus,
+        &pub_exp,
+        b"Test message",
+        &sig,
+        Some(sign::HashAlg::Sha256)
+    )
+    .unwrap());
+
+    // Input longer than k - 11 bytes must be rejected.
+    let too_long = vec![0x41u8; 256 - 10];
     assert!(
-        result.is_err(),
-        "Unprefixed RSA PKCS#1 v1.5 signing must be rejected"
+        sign::rsa_pkcs1v15_sign(priv_der.as_bytes(), &too_long, None).is_err(),
+        "Oversized raw PKCS#1 v1.5 input must be rejected"
     );
 }
 
@@ -289,11 +307,23 @@ fn test_aes_keygen_valid_sizes_accepted() {
 
 #[test]
 fn test_aes_gcm_wrong_key_size_rejected() {
-    let result = encrypt::aes_256_gcm_encrypt(&[0u8; 16], b"test");
-    assert!(
-        result.is_err(),
-        "AES-GCM with 16-byte key must be rejected (requires 32)"
-    );
+    // AES-128/192/256 are all valid GCM key sizes (H2-01); other sizes are not.
+    for bad in [0usize, 8, 15, 20, 31, 33, 64] {
+        let result = encrypt::aes_256_gcm_encrypt(&vec![0x11u8; bad], b"test");
+        assert!(
+            result.is_err(),
+            "AES-GCM with {}-byte key must be rejected",
+            bad
+        );
+    }
+    for good in [16usize, 24, 32] {
+        let key = vec![0x22u8; good];
+        let ct = encrypt::aes_256_gcm_encrypt(&key, b"test").unwrap();
+        assert_eq!(
+            &encrypt::aes_256_gcm_decrypt(&key, &ct).unwrap()[..],
+            b"test"
+        );
+    }
 }
 
 // ============================================================================
