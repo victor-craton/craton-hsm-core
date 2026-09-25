@@ -20,6 +20,9 @@ const MIN_FAILED_LOGINS: u32 = 3;
 const MAX_FAILED_LOGINS: u32 = 100;
 /// Maximum PIN length to prevent memory-exhaustion via PBKDF2 on huge PINs.
 const MAX_PIN_LENGTH: usize = 256;
+/// Bounds for a time-based user PIN lockout (`0` = permanent).
+const MIN_LOCKOUT_DURATION_SECS: u64 = 60;
+const MAX_LOCKOUT_DURATION_SECS: u64 = 30 * 24 * 3600;
 /// Maximum sessions to prevent resource exhaustion.
 const MAX_SESSIONS: u64 = 10_000;
 /// Maximum slots to prevent OOM on initialization.
@@ -49,7 +52,11 @@ pub const SYSTEM_CONFIG_PATH: &str = "/etc/craton-hsm/craton_hsm.toml";
 #[cfg(not(unix))]
 pub const SYSTEM_CONFIG_PATH: &str = "C:\\ProgramData\\craton-hsm\\craton_hsm.toml";
 
-#[derive(Debug, Deserialize, Clone)]
+/// Top-level configuration. Unknown sections and unknown keys inside the
+/// core sections are rejected (H4-17): a typo such as `max_failed_login`
+/// must not silently fall back to a default security parameter.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct HsmConfig {
     #[serde(default)]
     pub token: TokenConfig,
@@ -59,9 +66,14 @@ pub struct HsmConfig {
     pub audit: AuditConfig,
     #[serde(default)]
     pub algorithms: AlgorithmConfig,
+    /// `[daemon]` section of a shared configuration file. Opaque to the core
+    /// library; parsed and strictly validated by `craton-hsm-daemon`.
+    #[serde(default)]
+    pub daemon: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct TokenConfig {
     #[serde(default = "default_label")]
     pub label: String,
@@ -96,6 +108,7 @@ pub struct TokenConfig {
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     #[serde(default = "default_pin_min")]
     pub pin_min_length: usize,
@@ -105,6 +118,14 @@ pub struct SecurityConfig {
     pub max_failed_logins: u32,
     #[serde(default = "default_pbkdf2_iterations")]
     pub pbkdf2_iterations: u32,
+    /// Lockout policy hook (H4-11): number of seconds after which a **User**
+    /// PIN that was locked by `max_failed_logins` failures unlocks again
+    /// (the failure counter restarts; exponential back-off still applies).
+    /// `0` (default) = the lock is permanent until the SO resets the user
+    /// PIN (`C_InitPIN`). The SO PIN lock is always permanent (out-of-band
+    /// recovery), and a time-based unlock is refused in FIPS approved mode.
+    #[serde(default)]
+    pub user_lockout_duration_secs: u64,
 }
 
 // Custom Debug to avoid leaking security parameters in logs/panics.
@@ -115,11 +136,13 @@ impl fmt::Debug for SecurityConfig {
             .field("pin_max_length", &"[REDACTED]")
             .field("max_failed_logins", &"[REDACTED]")
             .field("pbkdf2_iterations", &"[REDACTED]")
+            .field("user_lockout_duration_secs", &"[REDACTED]")
             .finish()
     }
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct AuditConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -146,6 +169,7 @@ pub struct AuditConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct AlgorithmConfig {
     #[serde(default)]
     pub allow_weak_rsa: bool,
@@ -162,16 +186,21 @@ pub struct AlgorithmConfig {
     /// PQC mechanisms are also blocked (not yet FIPS-approved).
     #[serde(default)]
     pub fips_approved_only: bool,
+    /// Gate for RSA PKCS#1 v1.5 **decryption** (`CKM_RSA_PKCS` with
+    /// `C_Decrypt` / `C_UnwrapKey`), which is exposed to Bleichenbacher /
+    /// Marvin padding-oracle attacks (H2-03, A1-26). Default: false. Must be
+    /// false in FIPS approved mode (SP 800-131A Rev. 2 disallows PKCS#1 v1.5
+    /// key transport). Every PKCS#1 v1.5 decryption path must check
+    /// [`AlgorithmConfig::rsa_pkcs1v15_decrypt_allowed`].
+    #[serde(default)]
+    pub allow_rsa_pkcs1v15_decrypt: bool,
 }
 
-impl Default for HsmConfig {
-    fn default() -> Self {
-        Self {
-            token: TokenConfig::default(),
-            security: SecurityConfig::default(),
-            audit: AuditConfig::default(),
-            algorithms: AlgorithmConfig::default(),
-        }
+impl AlgorithmConfig {
+    /// Whether RSA PKCS#1 v1.5 decryption may be offered (H2-03). Always
+    /// false in FIPS approved mode.
+    pub fn rsa_pkcs1v15_decrypt_allowed(&self) -> bool {
+        self.allow_rsa_pkcs1v15_decrypt && !self.fips_approved_only
     }
 }
 
@@ -197,6 +226,7 @@ impl Default for SecurityConfig {
             pin_max_length: default_pin_max(),
             max_failed_logins: default_max_failed(),
             pbkdf2_iterations: default_pbkdf2_iterations(),
+            user_lockout_duration_secs: 0,
         }
     }
 }
@@ -223,6 +253,7 @@ impl Default for AlgorithmConfig {
             enable_pqc: true,
             crypto_backend: default_crypto_backend(),
             fips_approved_only: false,
+            allow_rsa_pkcs1v15_decrypt: false,
         }
     }
 }
@@ -260,9 +291,20 @@ fn default_audit_path() -> PathBuf {
 fn default_log_level() -> String {
     "all".to_string()
 }
+/// Default crypto backend. `fips` builds must use the FIPS-validated
+/// AWS-LC module: the RustCrypto backend is refused by the backend POST in
+/// those builds (H2-05/A1-03), so defaulting to it would leave every `fips`
+/// build in the error state.
 fn default_crypto_backend() -> String {
-    "rustcrypto".to_string()
+    if cfg!(feature = "fips") {
+        "awslc".to_string()
+    } else {
+        "rustcrypto".to_string()
+    }
 }
+
+#[cfg(all(feature = "fips", not(feature = "awslc-backend")))]
+compile_error!("the `fips` feature requires the `awslc-backend` feature (FIPS-validated AWS-LC)");
 fn default_slot_count() -> usize {
     1
 }
@@ -339,9 +381,15 @@ impl HsmConfig {
         }
     }
 
-    /// FIPS-hardened defaults: audit enabled, no weak algorithms, approved-only.
-    fn fips_defaults() -> Self {
+    /// FIPS-hardened defaults: audit enabled, no weak algorithms, approved-only,
+    /// and the FIPS-validated AWS-LC backend whenever it is compiled in (a
+    /// `fips` build refuses the RustCrypto backend at POST, ci.md blocker).
+    pub fn fips_defaults() -> Self {
         let mut config = Self::default();
+        if cfg!(feature = "awslc-backend") {
+            config.algorithms.crypto_backend = "awslc".to_string();
+        }
+        config.algorithms.allow_rsa_pkcs1v15_decrypt = false;
         config.algorithms.fips_approved_only = true;
         config.algorithms.allow_weak_rsa = false;
         config.algorithms.allow_sha1_signing = false;
@@ -855,6 +903,41 @@ impl HsmConfig {
             if !self.audit.enabled {
                 errors.push("audit must be enabled when fips_approved_only is active".to_string());
             }
+            if self.algorithms.allow_rsa_pkcs1v15_decrypt {
+                errors.push(
+                    "allow_rsa_pkcs1v15_decrypt cannot be true when fips_approved_only is enabled"
+                        .to_string(),
+                );
+            }
+            if self.security.user_lockout_duration_secs != 0 {
+                errors.push(
+                    "user_lockout_duration_secs must be 0 (permanent lockout) when \
+                     fips_approved_only is enabled"
+                        .to_string(),
+                );
+            }
+        }
+        // `fips` builds: only the FIPS-validated AWS-LC backend passes the
+        // backend POST (H2-05); reject any other selection up front.
+        if cfg!(feature = "fips") && self.algorithms.crypto_backend != "awslc" {
+            errors.push(format!(
+                "crypto_backend '{}' is not permitted in a `fips` build (use \"awslc\")",
+                self.algorithms.crypto_backend
+            ));
+        }
+        if self.security.user_lockout_duration_secs > MAX_LOCKOUT_DURATION_SECS {
+            errors.push(format!(
+                "user_lockout_duration_secs ({}) exceeds the maximum of {}",
+                self.security.user_lockout_duration_secs, MAX_LOCKOUT_DURATION_SECS
+            ));
+        }
+        if self.security.user_lockout_duration_secs != 0
+            && self.security.user_lockout_duration_secs < MIN_LOCKOUT_DURATION_SECS
+        {
+            errors.push(format!(
+                "user_lockout_duration_secs ({}) is below the minimum of {} (0 = permanent)",
+                self.security.user_lockout_duration_secs, MIN_LOCKOUT_DURATION_SECS
+            ));
         }
 
         if errors.is_empty() {

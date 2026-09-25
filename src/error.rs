@@ -3,9 +3,8 @@
 use crate::pkcs11_abi::constants::*;
 use crate::pkcs11_abi::types::CK_RV;
 
-// NOTE: HsmError intentionally does NOT derive Copy. All variants are currently
-// unit variants (zero-sized), but omitting Copy avoids a semver-breaking change
-// if a variant with heap-allocated data is added in the future.
+// NOTE: HsmError intentionally does NOT derive Copy (some variants carry
+// heap-allocated data).
 #[derive(Debug, Clone, thiserror::Error)]
 #[must_use]
 pub enum HsmError {
@@ -123,6 +122,46 @@ pub enum HsmError {
     ConfigError(String),
     #[error("audit chain integrity broken: {0}")]
     AuditChainBroken(String),
+    /// A backup was rejected for a reason other than a wrong passphrase
+    /// (distinct reasons for operators, H5-04). Maps to `CKR_DATA_INVALID`.
+    #[error("backup rejected: {0}")]
+    BackupRejected(BackupRejection),
+}
+
+/// Why a backup restore was rejected (H5-04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupRejection {
+    /// Not a backup file, truncated, or unparseable payload.
+    Malformed,
+    /// Unsupported format version or KDF.
+    UnsupportedFormat,
+    /// KDF parameters outside the accepted bounds.
+    KdfParameters,
+    /// The backup belongs to a different token (binding mismatch).
+    BindingMismatch,
+    /// This backup was already restored (replay).
+    Replayed,
+    /// The backup is older than the permitted maximum age.
+    TooOld,
+    /// The backup timestamp lies in the future.
+    FromFuture,
+    /// An object in the backup violates the object creation policy.
+    PolicyViolation,
+}
+
+impl std::fmt::Display for BackupRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BackupRejection::Malformed => "malformed or truncated backup",
+            BackupRejection::UnsupportedFormat => "unsupported backup format or KDF",
+            BackupRejection::KdfParameters => "KDF parameters out of bounds",
+            BackupRejection::BindingMismatch => "backup belongs to a different token",
+            BackupRejection::Replayed => "backup was already restored (replay)",
+            BackupRejection::TooOld => "backup is too old",
+            BackupRejection::FromFuture => "backup timestamp is in the future",
+            BackupRejection::PolicyViolation => "backup contains an object that violates policy",
+        })
+    }
 }
 
 impl From<HsmError> for CK_RV {
@@ -185,6 +224,7 @@ impl From<HsmError> for CK_RV {
             HsmError::RandomSeedNotSupported => CKR_RANDOM_SEED_NOT_SUPPORTED,
             HsmError::ConfigError(_) => CKR_GENERAL_ERROR,
             HsmError::AuditChainBroken(_) => CKR_GENERAL_ERROR,
+            HsmError::BackupRejected(_) => CKR_DATA_INVALID,
         }
     }
 }

@@ -2,13 +2,13 @@
 // Copyright 2026 Craton Software Company
 //! Core HSM state — the central struct shared by C ABI, daemon, and admin CLI.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::audit::log::{AuditLog, AuditOperation, AuditResult};
 use crate::config::{AlgorithmConfig, HsmConfig};
 use crate::crypto::backend::CryptoBackend;
-use crate::crypto::drbg::HmacDrbg;
 #[cfg(feature = "rustcrypto-backend")]
 use crate::crypto::rustcrypto_backend::RustCryptoBackend;
 use crate::error::{HsmError, HsmResult};
@@ -29,8 +29,6 @@ pub struct HsmCore {
     pub(crate) object_store: ObjectStore,
     pub(crate) audit_log: AuditLog,
     pub(crate) crypto_backend: Arc<dyn CryptoBackend>,
-    /// SP 800-90A HMAC_DRBG instance for FIPS-compliant random number generation.
-    pub(crate) drbg: parking_lot::Mutex<HmacDrbg>,
     /// Algorithm policy configuration (FIPS approved mode, PQC enable, weak RSA, etc.).
     /// Stored at runtime so crypto operations can enforce policy checks.
     pub(crate) algorithm_config: AlgorithmConfig,
@@ -46,6 +44,11 @@ pub struct HsmCore {
     pub(crate) persistent_store: Option<Arc<EncryptedStore>>,
     /// Set by [`HsmCore::finalize`]; the core must not be used afterwards.
     finalized: AtomicBool,
+    /// Consumed backup IDs per slot for an **ephemeral** core (persistent
+    /// cores keep them authenticated in the store, H5-06).
+    ephemeral_backup_ids: parking_lot::Mutex<HashMap<CK_SLOT_ID, HashSet<String>>>,
+    /// Minimum PBKDF2 iteration count accepted from a backup header.
+    pbkdf2_iterations: u32,
 }
 
 impl HsmCore {
@@ -182,8 +185,6 @@ impl HsmCore {
     }
 
     fn build(config: &HsmConfig, backend: Arc<dyn CryptoBackend>) -> Result<Self, HsmError> {
-        let drbg = HmacDrbg::new().map_err(|_| HsmError::GeneralError)?;
-
         let persistent_store = if config.token.persist_objects {
             let store = EncryptedStore::open_in_dir(&config.token.storage_path)?;
             tracing::info!(
@@ -226,12 +227,13 @@ impl HsmCore {
             object_store,
             audit_log,
             crypto_backend: backend,
-            drbg: parking_lot::Mutex::new(drbg),
             algorithm_config: config.algorithms.clone(),
             serial_number: Self::make_serial(config),
             state_hmac_key: Self::generate_state_hmac_key()?,
             persistent_store,
             finalized: AtomicBool::new(false),
+            ephemeral_backup_ids: parking_lot::Mutex::new(HashMap::new()),
+            pbkdf2_iterations: config.security.pbkdf2_iterations,
         })
     }
 
@@ -249,11 +251,22 @@ impl HsmCore {
     // ========================================================================
 
     fn audit(&self, session: u64, op: AuditOperation, result: &HsmResult<()>) -> HsmResult<()> {
+        self.audit_as(session, op, result, None)
+    }
+
+    fn audit_as(
+        &self,
+        session: u64,
+        op: AuditOperation,
+        result: &HsmResult<()>,
+        actor: Option<&str>,
+    ) -> HsmResult<()> {
         let res = match result {
             Ok(()) => AuditResult::Success,
             Err(e) => AuditResult::Failure(CK_RV::from(e.clone()) as u64),
         };
-        self.audit_log.record_sync(session, op, res, None)
+        self.audit_log
+            .record_sync(session, op, res, actor.map(str::to_string))
     }
 
     fn check_live(&self) -> HsmResult<()> {
@@ -278,6 +291,19 @@ impl HsmCore {
         so_pin: &[u8],
         label: &[u8; 32],
     ) -> HsmResult<()> {
+        self.init_token_by(slot_id, so_pin, label, None)
+    }
+
+    /// [`init_token`](Self::init_token) with an actor description recorded
+    /// in the audit event (front ends that authenticate their callers: the
+    /// daemon's client identity, the admin CLI's OS user).
+    pub fn init_token_by(
+        &self,
+        slot_id: CK_SLOT_ID,
+        so_pin: &[u8],
+        label: &[u8; 32],
+        actor: Option<&str>,
+    ) -> HsmResult<()> {
         self.check_live()?;
         let token = self.slot_manager.get_token(slot_id)?;
         let result = if self.session_manager.has_sessions(slot_id) {
@@ -290,12 +316,56 @@ impl HsmCore {
                 Ok(())
             })
         };
-        let audit = self.audit(
+        let audit = self.audit_as(
             0,
             AuditOperation::InitToken {
                 slot_id: slot_id as u64,
             },
             &result,
+            actor,
+        );
+        result?;
+        audit
+    }
+
+    /// Verify a PIN without logging the token in (per-client login models,
+    /// H4-01): lockout, rate limiting and PBKDF2-outside-the-lock as for
+    /// `C_Login`; in persistent mode the slot storage key is unlocked and the
+    /// slot's token objects are loaded. **Not audited** — the caller records
+    /// the login with its own client attribution.
+    pub fn verify_pin(
+        &self,
+        slot_id: CK_SLOT_ID,
+        user_type: CK_ULONG,
+        pin: &[u8],
+    ) -> HsmResult<()> {
+        self.check_live()?;
+        let token = self.slot_manager.get_token(slot_id)?;
+        token.verify_pin(user_type, pin)?;
+        self.object_store.load_slot(slot_id).map(|_| ())
+    }
+
+    /// `C_InitPIN` for front ends that authenticate the SO per request
+    /// (H4-01): verifies the SO PIN under the SO lockout policy and sets the
+    /// user PIN atomically, without changing the token's login state. Audited
+    /// as [`AuditOperation::InitPin`] with `actor` attribution.
+    pub fn init_pin_with_so_pin(
+        &self,
+        slot_id: CK_SLOT_ID,
+        so_pin: &[u8],
+        new_pin: &[u8],
+        actor: Option<&str>,
+    ) -> HsmResult<()> {
+        self.check_live()?;
+        let token = self.slot_manager.get_token(slot_id)?;
+        let result = token.init_pin_with_so_pin(so_pin, new_pin);
+        let audit = self.audit_as(
+            0,
+            AuditOperation::InitPin {
+                slot_id: slot_id as u64,
+            },
+            &result,
+            actor,
         );
         result?;
         audit
@@ -509,24 +579,201 @@ impl HsmCore {
 
     /// Import restored objects into a slot as token objects with freshly
     /// allocated handles (H3-16). Returns the new handles.
+    ///
+    /// All-or-nothing: the objects are persisted in one store transaction
+    /// (P8) and only then made visible; on any error nothing was imported
+    /// (H5-02/H5-04). In persistent mode the slot must have been unlocked by
+    /// a login (or [`verify_pin`](Self::verify_pin)).
     pub fn import_objects(
         &self,
         slot_id: CK_SLOT_ID,
         objects: Vec<StoredObject>,
     ) -> HsmResult<Vec<CK_OBJECT_HANDLE>> {
         self.check_live()?;
-        self.slot_manager.get_token(slot_id)?;
+        let token = self.slot_manager.get_token(slot_id)?;
+        if !token.is_initialized() {
+            return Err(HsmError::TokenNotInitialized);
+        }
         let ctx = ObjectContext::admin(slot_id);
-        let mut handles = Vec::with_capacity(objects.len());
-        for mut obj in objects {
+        let mut objs = ZeroizingObjects::new(objects).into_inner();
+        for obj in objs.iter_mut() {
             obj.handle = self.object_store.next_handle()?;
             obj.token_object = true;
-            handles.push(
-                self.object_store
-                    .insert_object_in(obj, &ctx, ObjectOrigin::Restored)?,
-            );
         }
-        Ok(handles)
+        self.object_store
+            .insert_objects_in(objs, &ctx, ObjectOrigin::Restored)
+    }
+
+    /// Create an encrypted backup of the token objects of `slot` (admin CLI /
+    /// daemon backup service). The backup is bound to the per-token random
+    /// identity ([`token_binding`](Self::token_binding), H3-16), encrypted
+    /// under `passphrase` (PBKDF2 with the configured iteration count) and
+    /// excludes non-extractable keys unless `include_non_extractable`
+    /// (A1-17). Audited synchronously as [`AuditOperation::BackupExport`].
+    ///
+    /// The **caller must have authenticated the SO** (or the user, by
+    /// policy) for this slot; in persistent mode the slot must be unlocked.
+    /// Returns the backup blob and the number of exported objects.
+    pub fn export_backup(
+        &self,
+        slot_id: CK_SLOT_ID,
+        passphrase: &str,
+        include_non_extractable: bool,
+        actor: Option<&str>,
+    ) -> HsmResult<(Vec<u8>, usize)> {
+        let result = (|| {
+            self.require_unlocked(slot_id)?;
+            let objects = self.export_token_objects(slot_id, include_non_extractable)?;
+            let binding = self.token_binding(slot_id)?;
+            let blob = crate::store::backup::create_backup(
+                &objects,
+                passphrase,
+                &binding,
+                Some(self.pbkdf2_iterations),
+            )?;
+            Ok((blob, objects.len()))
+        })();
+        let count = result.as_ref().map(|(_, n)| *n as u64).unwrap_or(0);
+        self.audit_as(
+            0,
+            AuditOperation::BackupExport {
+                slot_id: slot_id as u64,
+                object_count: count,
+            },
+            &result.as_ref().map(|_| ()).map_err(Clone::clone),
+            actor,
+        )?;
+        result
+    }
+
+    /// Decrypt and validate a backup for `slot` without importing or
+    /// consuming it (`restore --verify-only`). Returns the object count.
+    pub fn verify_backup(
+        &self,
+        slot_id: CK_SLOT_ID,
+        data: &[u8],
+        passphrase: &str,
+        max_age_secs: Option<u64>,
+    ) -> HsmResult<usize> {
+        self.check_live()?;
+        let binding = self.token_binding(slot_id)?;
+        let mut ids = self.consumed_backup_ids(slot_id)?;
+        let objects = crate::store::backup::restore_backup(
+            data,
+            passphrase,
+            &binding,
+            max_age_secs,
+            Some(self.pbkdf2_iterations),
+            Some(&mut ids),
+        )?;
+        Ok(ZeroizingObjects::new(objects).len())
+    }
+
+    /// Restore a backup into `slot` (H3-16, H5-04, H5-05, H5-06):
+    ///
+    /// * the backup must be bound to this token, fresh, not yet consumed,
+    ///   and every object passes the creation policy
+    ///   ([`crate::store::backup::restore_backup`]);
+    /// * objects get fresh handles and are imported **atomically** together
+    ///   with the consumed backup ID (one store transaction in persistent
+    ///   mode; the replay guard lives authenticated inside the database);
+    /// * audited synchronously as [`AuditOperation::BackupRestore`].
+    ///
+    /// The **caller must have authenticated the SO** for this slot.
+    pub fn restore_backup(
+        &self,
+        slot_id: CK_SLOT_ID,
+        data: &[u8],
+        passphrase: &str,
+        max_age_secs: Option<u64>,
+        actor: Option<&str>,
+    ) -> HsmResult<Vec<CK_OBJECT_HANDLE>> {
+        let result = (|| {
+            self.require_unlocked(slot_id)?;
+            let token = self.slot_manager.get_token(slot_id)?;
+            if !token.is_initialized() {
+                return Err(HsmError::TokenNotInitialized);
+            }
+            let binding = self.token_binding(slot_id)?;
+            let before = self.consumed_backup_ids(slot_id)?;
+            let mut ids = before.clone();
+            let objects = crate::store::backup::restore_backup(
+                data,
+                passphrase,
+                &binding,
+                max_age_secs,
+                Some(self.pbkdf2_iterations),
+                Some(&mut ids),
+            )?;
+            let new_id = ids
+                .difference(&before)
+                .next()
+                .cloned()
+                .ok_or(HsmError::GeneralError)?;
+            let mut objs = ZeroizingObjects::new(objects).into_inner();
+            for obj in objs.iter_mut() {
+                obj.handle = self.object_store.next_handle()?;
+                obj.token_object = true;
+            }
+            let ctx = ObjectContext::admin(slot_id);
+            if self.persistent_store.is_some() {
+                self.object_store.insert_objects_recording(
+                    objs,
+                    &ctx,
+                    ObjectOrigin::Restored,
+                    Some(&new_id),
+                )
+            } else {
+                let mut guard = self.ephemeral_backup_ids.lock();
+                let set = guard.entry(slot_id).or_default();
+                if set.contains(&new_id) {
+                    return Err(HsmError::BackupRejected(
+                        crate::error::BackupRejection::Replayed,
+                    ));
+                }
+                let handles =
+                    self.object_store
+                        .insert_objects_in(objs, &ctx, ObjectOrigin::Restored)?;
+                set.insert(new_id);
+                Ok(handles)
+            }
+        })();
+        let count = result.as_ref().map(|h| h.len() as u64).unwrap_or(0);
+        self.audit_as(
+            0,
+            AuditOperation::BackupRestore {
+                slot_id: slot_id as u64,
+                object_count: count,
+            },
+            &result.as_ref().map(|_| ()).map_err(Clone::clone),
+            actor,
+        )?;
+        result
+    }
+
+    fn consumed_backup_ids(&self, slot_id: CK_SLOT_ID) -> HsmResult<HashSet<String>> {
+        match &self.persistent_store {
+            Some(store) => store.consumed_backup_ids(slot_id),
+            None => Ok(self
+                .ephemeral_backup_ids
+                .lock()
+                .get(&slot_id)
+                .cloned()
+                .unwrap_or_default()),
+        }
+    }
+
+    /// In persistent mode the slot's storage key must have been unlocked by
+    /// an authentication since start.
+    fn require_unlocked(&self, slot_id: CK_SLOT_ID) -> HsmResult<()> {
+        self.check_live()?;
+        self.slot_manager.get_token(slot_id)?;
+        if let Some(store) = &self.persistent_store {
+            if !store.has_slot_key(slot_id) {
+                return Err(HsmError::UserNotLoggedIn);
+            }
+        }
+        Ok(())
     }
 
     /// Zeroize all key material, PIN verifiers and storage keys and close
@@ -602,9 +849,26 @@ impl HsmCore {
         &self.algorithm_config
     }
 
-    /// Returns a reference to the HMAC_DRBG instance (SP 800-90A).
-    pub fn drbg(&self) -> &parking_lot::Mutex<HmacDrbg> {
-        &self.drbg
+    /// Fill `out` from the module-wide approved SP 800-90A DRBG
+    /// (`crypto::drbg::fill_random`: fork-aware, health-tested, latches the
+    /// module error state on failure). Replaces the former per-core DRBG
+    /// mutex, which was a global bottleneck (H4-12 perf).
+    pub fn generate_random(&self, out: &mut [u8]) -> HsmResult<()> {
+        if crate::crypto::self_test::is_error_state() {
+            return Err(HsmError::GeneralError);
+        }
+        crate::crypto::drbg::fill_random(out)
+    }
+
+    /// Run the pre-operational self-tests (software CASTs, integrity test and
+    /// the CASTs of the selected backend) for front ends that embed the core
+    /// directly — the gRPC daemon and the admin CLI (A1-06). The C ABI runs
+    /// them in `C_Initialize`. A failure latches the module error state.
+    pub fn run_self_tests(&self) -> HsmResult<()> {
+        crate::crypto::self_test::run_post_with_backend(
+            self.crypto_backend.as_ref(),
+            self.algorithm_config.fips_approved_only,
+        )
     }
 }
 

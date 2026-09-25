@@ -61,7 +61,13 @@ fn hmac_label(key: &[u8], label: &[u8]) -> Zeroizing<[u8; 32]> {
 
 fn stretch(pin: &[u8], salt: &[u8], iterations: u32) -> Zeroizing<[u8; 32]> {
     let mut master = Zeroizing::new([0u8; 32]);
-    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(pin, salt, iterations, master.as_mut());
+    // Iterations are validated (>= MIN_VERIFY_ITERATIONS / config bounds)
+    // before we get here, so the only error (0 iterations) cannot occur.
+    if crate::store::encrypted_store::pbkdf2_hmac_sha256(pin, salt, iterations.max(1), master.as_mut())
+        .is_err()
+    {
+        master.iter_mut().for_each(|b| *b = 0);
+    }
     master
 }
 

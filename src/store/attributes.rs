@@ -12,7 +12,8 @@ use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::constants::*;
 use crate::pkcs11_abi::types::*;
 use crate::session::handle::ObjectHandleAllocator;
-use crate::store::encrypted_store::{new_store_key, EncryptedStore};
+use crate::crypto::encrypt::{KeyStateSink, PersistedKeyUsage};
+use crate::store::encrypted_store::{new_store_key, EncryptedStore, RecordInput};
 use crate::store::key_material::RawKeyMaterial;
 use crate::store::object::{
     is_secret_class, is_valid_ck_date, KeyLifecycleState, StoredObject,
@@ -167,6 +168,62 @@ pub struct ObjectStore {
     /// Slots whose persisted objects have been loaded into memory.
     loaded_slots: Mutex<HashSet<CK_SLOT_ID>>,
     usage: Mutex<Usage>,
+    /// Per-slot handle index (P11): slot-scoped searches visit only the
+    /// slot's objects instead of every object of every slot.
+    slot_index: RwLock<HashMap<CK_SLOT_ID, HashSet<CK_OBJECT_HANDLE>>>,
+}
+
+/// Persists the usage state (GCM invocation lease, CTR ranges) of the AES key
+/// held by one token object (H2-02/A1-15). Holds only a weak reference to the
+/// store, so a finalized core never keeps the database (and its process lock)
+/// alive through the crypto layer's global tracker.
+struct ObjectKeyUsageSink {
+    store: std::sync::Weak<EncryptedStore>,
+    slot: CK_SLOT_ID,
+    store_key: String,
+    state: Mutex<PersistedKeyUsage>,
+}
+
+impl ObjectKeyUsageSink {
+    fn write(&self, usage: &PersistedKeyUsage) -> HsmResult<()> {
+        match self.store.upgrade() {
+            Some(store) => store.put_key_usage(self.slot, &self.store_key, usage),
+            // The store is gone (core finalized): nothing left to protect.
+            None => Ok(()),
+        }
+    }
+}
+
+impl KeyStateSink for ObjectKeyUsageSink {
+    fn sink_id(&self) -> &str {
+        &self.store_key
+    }
+
+    fn persist_gcm_lease(&self, reserved: u64) -> HsmResult<()> {
+        let mut st = self.state.lock();
+        let mut next = st.clone();
+        next.gcm_reserved = next.gcm_reserved.max(reserved);
+        self.write(&next)?;
+        *st = next;
+        Ok(())
+    }
+
+    fn persist_ctr_ranges(&self, ranges: &[(u128, u128)]) -> HsmResult<()> {
+        let mut st = self.state.lock();
+        let mut next = st.clone();
+        next.ctr_ranges = ranges.to_vec();
+        self.write(&next)?;
+        *st = next;
+        Ok(())
+    }
+}
+
+/// Objects whose key usage must be tracked durably (AES token keys).
+fn tracks_key_usage(obj: &StoredObject) -> bool {
+    obj.token_object
+        && obj.class == CKO_SECRET_KEY
+        && obj.key_type == Some(CKK_AES)
+        && obj.key_material.is_some()
 }
 
 impl Default for ObjectStore {
@@ -185,6 +242,49 @@ impl ObjectStore {
             handle_to_store_key: Mutex::new(HashMap::new()),
             loaded_slots: Mutex::new(HashSet::new()),
             usage: Mutex::new(Usage::default()),
+            slot_index: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn index_add(&self, slot: CK_SLOT_ID, handle: CK_OBJECT_HANDLE) {
+        self.slot_index
+            .write()
+            .entry(slot)
+            .or_default()
+            .insert(handle);
+    }
+
+    fn index_remove(&self, slot: CK_SLOT_ID, handle: CK_OBJECT_HANDLE) {
+        let mut idx = self.slot_index.write();
+        if let Some(set) = idx.get_mut(&slot) {
+            set.remove(&handle);
+            if set.is_empty() {
+                idx.remove(&slot);
+            }
+        }
+    }
+
+    /// Attach the durable usage-state sink of a token AES key and restore
+    /// its persisted state into the crypto layer's tracker.
+    fn register_key_usage(&self, obj: &StoredObject, store_key: &str, persisted: PersistedKeyUsage) {
+        let (store, km) = match (&self.persist_store, obj.key_material.as_ref()) {
+            (Some(store), Some(km)) if tracks_key_usage(obj) => (store, km),
+            _ => return,
+        };
+        let sink = std::sync::Arc::new(ObjectKeyUsageSink {
+            store: Arc::downgrade(store),
+            slot: obj.slot_id,
+            store_key: store_key.to_string(),
+            state: Mutex::new(persisted.clone()),
+        });
+        crate::crypto::encrypt::register_persistent_key(km.as_bytes(), &persisted, sink);
+    }
+
+    fn unregister_key_usage(&self, obj: &StoredObject, store_key: Option<&str>) {
+        if let (Some(km), Some(k)) = (obj.key_material.as_ref(), store_key) {
+            if tracks_key_usage(obj) {
+                crate::crypto::encrypt::unregister_persistent_key(km.as_bytes(), k);
+            }
         }
     }
 
@@ -288,14 +388,36 @@ impl ObjectStore {
                 );
                 continue;
             }
+            // Restore the durable key usage state (GCM lease, CTR ranges)
+            // before the key becomes usable (H2-02/A1-15). A record that
+            // fails authentication keeps the key out of service.
+            let usage = if tracks_key_usage(&obj) {
+                match store.get_key_usage(slot, &rec.store_key) {
+                    Ok(u) => Some(u.unwrap_or_default()),
+                    Err(e) => {
+                        tracing::error!(
+                            "key usage state of '{}' unreadable ({:?}) — key not loaded",
+                            rec.store_key,
+                            e
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let size = obj.approximate_size() as usize;
             if self.reserve(slot, None, size).is_err() {
                 tracing::error!("object quota exhausted while loading slot {}", slot);
                 break;
             }
+            if let Some(u) = usage {
+                self.register_key_usage(&obj, &rec.store_key, u);
+            }
             self.handle_to_store_key
                 .lock()
                 .insert(obj.handle, rec.store_key.clone());
+            self.index_add(slot, obj.handle);
             self.objects.insert(obj.handle, Arc::new(RwLock::new(obj)));
             loaded += 1;
         }
@@ -424,6 +546,7 @@ impl ObjectStore {
         let key = self.handle_to_store_key.lock().get(&obj.handle).cloned();
         if let Some(key) = key {
             store.delete_object(obj.slot_id, &key)?;
+            self.unregister_key_usage(obj, Some(&key));
             self.handle_to_store_key.lock().remove(&obj.handle);
         }
         Ok(())
@@ -549,12 +672,150 @@ impl ObjectStore {
             }
             Entry::Vacant(v) => {
                 if let Some(k) = store_key {
+                    self.register_key_usage(
+                        &obj,
+                        &k,
+                        obj.key_material
+                            .as_ref()
+                            .map(|km| crate::crypto::encrypt::persisted_key_usage(km.as_bytes()))
+                            .unwrap_or_default(),
+                    );
                     self.handle_to_store_key.lock().insert(handle, k);
                 }
+                self.index_add(slot, handle);
                 v.insert(Arc::new(RwLock::new(obj)));
                 Ok(handle)
             }
         }
+    }
+
+    /// Insert several pre-built objects into one slot **atomically** (bulk
+    /// import / backup restore). Token objects are persisted in a single
+    /// store transaction (P8); if anything fails, nothing is inserted and
+    /// the error is returned (H5-02/H5-04: "committed" means durable).
+    /// Each object must carry a fresh handle from [`next_handle`](Self::next_handle).
+    pub fn insert_objects_in(
+        &self,
+        objects: Vec<StoredObject>,
+        ctx: &ObjectContext,
+        origin: ObjectOrigin,
+    ) -> HsmResult<Vec<CK_OBJECT_HANDLE>> {
+        self.insert_objects_recording(objects, ctx, origin, None)
+    }
+
+    /// [`insert_objects_in`](Self::insert_objects_in) that also records a
+    /// consumed backup ID in the persistent replay guard in the same store
+    /// transaction (restore, H5-04/H5-06). Without persistence the ID is not
+    /// recorded here (the caller keeps it).
+    pub fn insert_objects_recording(
+        &self,
+        objects: Vec<StoredObject>,
+        ctx: &ObjectContext,
+        origin: ObjectOrigin,
+        backup_id: Option<&str>,
+    ) -> HsmResult<Vec<CK_OBJECT_HANDLE>> {
+        let mut prepared = Vec::with_capacity(objects.len());
+        let mut seen = HashSet::with_capacity(objects.len());
+        for mut obj in objects {
+            if obj.handle == 0 || !seen.insert(obj.handle) || self.objects.contains_key(&obj.handle)
+            {
+                return Err(HsmError::GeneralError);
+            }
+            if obj.lifecycle_state == KeyLifecycleState::Destroyed {
+                return Err(HsmError::TemplateInconsistent);
+            }
+            obj.slot_id = ctx.slot_id;
+            obj.owner_session = if obj.token_object || ctx.session == 0 {
+                None
+            } else {
+                Some(ctx.session)
+            };
+            sanitize_extra_attributes(&mut obj, ctx.is_so)?;
+            normalise_provenance(&mut obj, origin);
+            prepared.push(obj);
+        }
+        let prepared = ZeroizingObjects::new(prepared);
+        if prepared.iter().any(|o| o.token_object) {
+            self.ensure_slot_loaded(ctx.slot_id);
+        }
+
+        // Quotas (rolled back on any failure).
+        let mut reserved: Vec<(CK_SLOT_ID, Option<CK_SESSION_HANDLE>, usize)> = Vec::new();
+        let rollback_quota = |reserved: &[(CK_SLOT_ID, Option<CK_SESSION_HANDLE>, usize)]| {
+            for (slot, owner, size) in reserved {
+                self.release(*slot, *owner, *size);
+            }
+        };
+        for obj in prepared.iter() {
+            let size = obj.approximate_size() as usize;
+            if let Err(e) = self.reserve(obj.slot_id, obj.owner_session, size) {
+                rollback_quota(&reserved);
+                return Err(e);
+            }
+            reserved.push((obj.slot_id, obj.owner_session, size));
+        }
+
+        // Persist every token object in one transaction.
+        let mut store_keys: Vec<Option<String>> = vec![None; prepared.len()];
+        if let Some(store) = &self.persist_store {
+            let mut bufs: Vec<(usize, String, Zeroizing<Vec<u8>>)> = Vec::new();
+            for (i, obj) in prepared.iter().enumerate() {
+                if !obj.token_object {
+                    continue;
+                }
+                let key = match new_store_key(obj.slot_id) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        rollback_quota(&reserved);
+                        return Err(e);
+                    }
+                };
+                let cap = (obj.approximate_size() as usize).saturating_mul(4) + 4096;
+                let mut buf = Zeroizing::new(Vec::with_capacity(cap));
+                if serde_json::to_writer(&mut *buf, obj).is_err() {
+                    rollback_quota(&reserved);
+                    return Err(HsmError::GeneralError);
+                }
+                bufs.push((i, key, buf));
+            }
+            let records: Vec<RecordInput<'_>> = bufs
+                .iter()
+                .map(|(i, k, b)| RecordInput {
+                    store_key: k,
+                    handle: prepared[*i].handle,
+                    plaintext: b,
+                })
+                .collect();
+            if let Err(e) = store.put_objects_recording(ctx.slot_id, &records, backup_id) {
+                rollback_quota(&reserved);
+                return Err(e);
+            }
+            drop(records);
+            for (i, k, _) in bufs {
+                store_keys[i] = Some(k);
+            }
+        }
+
+        // Make them visible.
+        let mut handles = Vec::with_capacity(prepared.len());
+        for (obj, key) in prepared.into_inner().into_iter().zip(store_keys) {
+            let handle = obj.handle;
+            if let Some(k) = key {
+                self.register_key_usage(
+                    &obj,
+                    &k,
+                    obj.key_material
+                        .as_ref()
+                        .map(|km| crate::crypto::encrypt::persisted_key_usage(km.as_bytes()))
+                        .unwrap_or_default(),
+                );
+                self.handle_to_store_key.lock().insert(handle, k);
+            }
+            self.index_add(obj.slot_id, handle);
+            self.objects.insert(handle, Arc::new(RwLock::new(obj)));
+            handles.push(handle);
+        }
+        Ok(handles)
     }
 
     /// Allocate a new, unpredictable, currently-unused object handle.
@@ -579,6 +840,9 @@ impl ObjectStore {
         let size = o.approximate_size() as usize;
         let slot = o.slot_id;
         let owner = o.owner_session;
+        self.index_remove(slot, o.handle);
+        let store_key = self.handle_to_store_key.lock().get(&o.handle).cloned();
+        self.unregister_key_usage(&o, store_key.as_deref());
         if let Some(km) = o.key_material.as_ref() {
             // Per-key AEAD IV/nonce tracking is intentionally kept: other
             // handles (copies, persisted records) may share the key bytes,
@@ -682,8 +946,8 @@ impl ObjectStore {
         let mut n = 0;
         for h in handles {
             if let Some((_, arc)) = self.objects.remove(&h) {
-                self.handle_to_store_key.lock().remove(&h);
                 self.finish_removal(&arc);
+                self.handle_to_store_key.lock().remove(&h);
                 n += 1;
             }
         }
@@ -774,24 +1038,41 @@ impl ObjectStore {
         is_logged_in: bool,
         slot_id: Option<CK_ULONG>,
     ) -> Vec<CK_OBJECT_HANDLE> {
-        if let Some(slot) = slot_id {
-            self.ensure_slot_loaded(slot);
-        }
-        let mut results = Vec::new();
-        for entry in self.objects.iter() {
-            let obj = entry.value().read();
-            if let Some(sid) = slot_id {
-                if obj.slot_id != sid {
-                    continue;
-                }
-            }
+        let check = |obj: &StoredObject| {
             if obj.lifecycle_state == KeyLifecycleState::Destroyed {
-                continue;
+                return false;
             }
             let matches = obj.matches_template(template);
             let visible = !obj.private || is_logged_in;
-            if matches && visible {
-                results.push(*entry.key());
+            matches && visible
+        };
+        let mut results = Vec::new();
+        match slot_id {
+            Some(slot) => {
+                self.ensure_slot_loaded(slot);
+                // Per-slot index (P11); handles snapshotted so no index lock
+                // is held while object locks are taken.
+                let handles: Vec<CK_OBJECT_HANDLE> = self
+                    .slot_index
+                    .read()
+                    .get(&slot)
+                    .map(|set| set.iter().copied().collect())
+                    .unwrap_or_default();
+                for h in handles {
+                    if let Some(entry) = self.objects.get(&h) {
+                        let obj = entry.value().read();
+                        if obj.slot_id == slot && check(&obj) {
+                            results.push(h);
+                        }
+                    }
+                }
+            }
+            None => {
+                for entry in self.objects.iter() {
+                    if check(&entry.value().read()) {
+                        results.push(*entry.key());
+                    }
+                }
             }
         }
         results
@@ -888,6 +1169,17 @@ impl ObjectStore {
     }
 }
 
+/// Maximum `CKA_LABEL` / `CKA_ID` length (defence in depth against memory
+/// and persistence amplification, H4-06).
+pub const MAX_LABEL_ID_LEN: usize = 1024;
+
+fn bounded_label_or_id(value: &[u8]) -> HsmResult<Vec<u8>> {
+    if value.len() > MAX_LABEL_ID_LEN {
+        return Err(HsmError::AttributeValueInvalid);
+    }
+    Ok(value.to_vec())
+}
+
 /// Parse a strict `CK_BBOOL` (exactly one byte).
 fn read_bool(value: &[u8]) -> HsmResult<bool> {
     if value.len() != 1 {
@@ -944,8 +1236,8 @@ pub fn apply_attribute_ctx(
             }
         }
         CKA_KEY_TYPE => obj.key_type = Some(read_ulong_strict(value)?),
-        CKA_LABEL => obj.label = value.to_vec(),
-        CKA_ID => obj.id = value.to_vec(),
+        CKA_LABEL => obj.label = bounded_label_or_id(value)?,
+        CKA_ID => obj.id = bounded_label_or_id(value)?,
         CKA_TOKEN => obj.token_object = read_bool(value)?,
         CKA_PRIVATE => obj.private = read_bool(value)?,
         CKA_SENSITIVE => obj.sensitive = read_bool(value)?,
@@ -1025,8 +1317,8 @@ fn modify_attribute(
     is_so: bool,
 ) -> HsmResult<()> {
     match attr_type {
-        CKA_LABEL => obj.label = value.to_vec(),
-        CKA_ID => obj.id = value.to_vec(),
+        CKA_LABEL => obj.label = bounded_label_or_id(value)?,
+        CKA_ID => obj.id = bounded_label_or_id(value)?,
         CKA_START_DATE => obj.start_date = parse_date(value)?,
         CKA_END_DATE => obj.end_date = parse_date(value)?,
         CKA_SUBJECT | CKA_APPLICATION => {
@@ -1316,6 +1608,9 @@ pub fn sanitize_restored_object(
     }
     if is_secret_class(obj.class) && !obj.sensitive && !allow_non_sensitive {
         return Err(HsmError::TemplateInconsistent);
+    }
+    if obj.label.len() > MAX_LABEL_ID_LEN || obj.id.len() > MAX_LABEL_ID_LEN {
+        return Err(HsmError::AttributeValueInvalid);
     }
     obj.trusted = false;
     obj.extra_attributes.remove(&CKA_TRUSTED);

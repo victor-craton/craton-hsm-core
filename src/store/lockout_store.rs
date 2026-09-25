@@ -25,6 +25,10 @@ pub struct LockoutData {
     pub failed_init_token_logins: u32,
     pub user_pin_locked: bool,
     pub so_pin_locked: bool,
+    /// UNIX time (seconds) at which the user PIN was locked (time-based
+    /// lockout, `security.user_lockout_duration_secs`).
+    #[serde(default)]
+    pub user_locked_at: Option<u64>,
 }
 
 impl LockoutData {
@@ -36,6 +40,7 @@ impl LockoutData {
             failed_user_logins: u32::MAX,
             failed_so_logins: u32::MAX,
             failed_init_token_logins: u32::MAX,
+            user_locked_at: None,
         }
     }
 }

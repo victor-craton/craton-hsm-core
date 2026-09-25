@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::config::defaults::{DEFAULT_PBKDF2_ITERATIONS, NONCE_LEN, SALT_LEN};
-use crate::error::{HsmError, HsmResult};
+use crate::error::{BackupRejection, HsmError, HsmResult};
 use crate::store::attributes::{sanitize_restored_object, ZeroizingObjects};
 use crate::store::encrypted_store::{derive_key_from_pin, fill_random};
 use crate::store::object::StoredObject;
@@ -171,8 +171,10 @@ pub fn create_backup(
 /// Every returned object has passed [`sanitize_restored_object`]. Callers
 /// must allocate fresh handles when inserting them.
 ///
-/// Returns `HsmError::DataInvalid` for format/replay/policy errors and
-/// `HsmError::PinIncorrect` for a wrong passphrase.
+/// Returns `HsmError::BackupRejected(reason)` (`CKR_DATA_INVALID`) for
+/// format, binding, replay, age and policy errors — with a distinct reason
+/// each (H5-04) — and `HsmError::PinIncorrect` for a wrong passphrase or a
+/// corrupted ciphertext.
 pub fn restore_backup(
     data: &[u8],
     passphrase: &str,
@@ -181,22 +183,31 @@ pub fn restore_backup(
     pbkdf2_iterations: Option<u32>,
     consumed_ids: Option<&mut HashSet<String>>,
 ) -> HsmResult<Vec<StoredObject>> {
+    let reject = |r: BackupRejection| HsmError::BackupRejected(r);
     if data.len() < HEADER_LEN {
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::Malformed));
     }
     if &data[0..4] != BACKUP_MAGIC {
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::Malformed));
     }
-    let version = u32::from_le_bytes(data[4..8].try_into().map_err(|_| HsmError::DataInvalid)?);
+    let version = u32::from_le_bytes(
+        data[4..8]
+            .try_into()
+            .map_err(|_| reject(BackupRejection::Malformed))?,
+    );
     if version != BACKUP_VERSION || data[8] != KDF_PBKDF2_SHA256 {
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::UnsupportedFormat));
     }
-    let iterations = u32::from_le_bytes(data[9..13].try_into().map_err(|_| HsmError::DataInvalid)?);
+    let iterations = u32::from_le_bytes(
+        data[9..13]
+            .try_into()
+            .map_err(|_| reject(BackupRejection::Malformed))?,
+    );
     let floor = pbkdf2_iterations
         .unwrap_or(MIN_BACKUP_ITERATIONS)
         .max(MIN_BACKUP_ITERATIONS);
     if iterations < floor || iterations > MAX_BACKUP_ITERATIONS {
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::KdfParameters));
     }
     let salt = &data[13..13 + SALT_LEN];
     let nonce_bytes = &data[13 + SALT_LEN..HEADER_LEN];
@@ -216,18 +227,18 @@ pub fn restore_backup(
     );
 
     let payload: BackupPayload =
-        serde_json::from_slice(&plaintext).map_err(|_| HsmError::DataInvalid)?;
+        serde_json::from_slice(&plaintext).map_err(|_| reject(BackupRejection::Malformed))?;
     drop(plaintext);
     // From here on every exit path zeroizes the restored objects.
     let objects = ZeroizingObjects::new(payload.objects);
 
     if payload.version != BACKUP_VERSION || payload.object_count != objects.len() {
         tracing::warn!("Backup restore rejected: payload/header mismatch");
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::Malformed));
     }
     if payload.token_serial != expected_serial {
         tracing::warn!("Backup restore rejected: token binding mismatch");
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::BindingMismatch));
     }
     match &consumed_ids {
         Some(ids) if ids.contains(&payload.backup_id) => {
@@ -235,7 +246,7 @@ pub fn restore_backup(
                 "Backup restore rejected: backup_id {} has already been consumed (replay attack?)",
                 payload.backup_id
             );
-            return Err(HsmError::DataInvalid);
+            return Err(reject(BackupRejection::Replayed));
         }
         Some(_) => {}
         None => tracing::warn!(
@@ -256,11 +267,11 @@ pub fn restore_backup(
             .as_secs();
         if payload.created_epoch > now + 300 {
             tracing::warn!("Backup restore rejected: timestamp is in the future");
-            return Err(HsmError::DataInvalid);
+            return Err(reject(BackupRejection::FromFuture));
         }
         if now.saturating_sub(payload.created_epoch) > max {
             tracing::warn!("Backup restore rejected: backup is too old");
-            return Err(HsmError::DataInvalid);
+            return Err(reject(BackupRejection::TooOld));
         }
     }
 
@@ -273,7 +284,7 @@ pub fn restore_backup(
                 e
             );
             drop(ZeroizingObjects::new(objects));
-            return Err(HsmError::DataInvalid);
+            return Err(reject(BackupRejection::PolicyViolation));
         }
     }
 

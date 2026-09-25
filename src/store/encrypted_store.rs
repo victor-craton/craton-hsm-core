@@ -35,7 +35,7 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use parking_lot::{Mutex, RwLock};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -45,7 +45,6 @@ use crate::config::defaults::{
     DEFAULT_PBKDF2_ITERATIONS, KEY_LEN as DEFAULT_KEY_LEN, NONCE_LEN as DEFAULT_NONCE_LEN,
     SALT_LEN as DEFAULT_SALT_LEN,
 };
-use crate::crypto::drbg::HmacDrbg;
 use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::types::{CK_OBJECT_HANDLE, CK_SLOT_ID};
 
@@ -76,37 +75,16 @@ pub const DB_FILE_NAME: &str = "craton_hsm.redb";
 
 type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
-/// Process-wide DRBG for storage salts, nonces and identifiers (P5: one
-/// instantiation instead of one per nonce; the DRBG reseeds itself).
-static STORE_DRBG: Mutex<Option<HmacDrbg>> = Mutex::new(None);
-
-/// Fill `buf` with random bytes from the SP 800-90A DRBG, falling back to the
-/// OS RNG on any DRBG error. Refuses to return an all-zero buffer (H3-18).
+/// Fill `buf` with random bytes from the module-wide approved SP 800-90A
+/// DRBG (`crypto::drbg::fill_random`, fork-aware). DRBG failures are
+/// propagated — there is no fallback to a non-approved RNG (crypto handoff
+/// #13; a failed health test latches the module error state). Refuses to
+/// return an all-zero buffer (H3-18).
 pub(crate) fn fill_random(buf: &mut [u8]) -> HsmResult<()> {
-    let drbg_ok = {
-        let mut guard = STORE_DRBG.lock();
-        if guard.is_none() {
-            *guard = HmacDrbg::new().ok();
-        }
-        match guard.as_mut() {
-            Some(d) => {
-                let ok = d.generate(buf).is_ok();
-                if !ok {
-                    // Drop a failed instance; a fresh one is instantiated next time.
-                    *guard = None;
-                }
-                ok
-            }
-            None => false,
-        }
-    };
-    if !drbg_ok {
-        use rand::RngCore;
-        tracing::warn!("DRBG unavailable for salt/nonce generation; using OS RNG");
-        rand::rngs::OsRng
-            .try_fill_bytes(buf)
-            .map_err(|_| HsmError::GeneralError)?;
-    }
+    crate::crypto::drbg::fill_random(buf).map_err(|e| {
+        tracing::error!("DRBG failure while generating storage randomness: {:?}", e);
+        e
+    })?;
     if buf.len() >= 8 && buf.iter().all(|&b| b == 0) {
         tracing::error!("RNG produced an all-zero buffer — refusing to use it");
         return Err(HsmError::GeneralError);
@@ -186,6 +164,101 @@ fn manifest_key(slot: CK_SLOT_ID) -> String {
     format!("manifest/{}", slot as u64)
 }
 
+/// Meta key of the persisted usage state (GCM lease, CTR ranges) of an
+/// object record. Shares the slot prefix of the store key, so a slot's
+/// usage records can be removed with one range delete.
+fn key_usage_key(store_key: &str) -> String {
+    format!("{}{}", KEY_USAGE_PREFIX, store_key)
+}
+
+const KEY_USAGE_PREFIX: &str = "keyusage/";
+const BACKUP_IDS_AAD_LABEL: &[u8] = b"craton-hsm/backup-ids/v1";
+
+/// Meta key of a slot's authenticated set of consumed backup IDs (replay
+/// guard kept inside the single-writer database, H5-06).
+fn backup_ids_key(slot: CK_SLOT_ID) -> String {
+    format!("backupids/{}", slot as u64)
+}
+
+fn backup_ids_aad(slot: CK_SLOT_ID) -> Vec<u8> {
+    let mut aad = BACKUP_IDS_AAD_LABEL.to_vec();
+    aad.extend_from_slice(&(slot as u64).to_le_bytes());
+    aad
+}
+
+fn open_backup_ids(
+    cipher: &Aes256Gcm,
+    slot: CK_SLOT_ID,
+    value: &[u8],
+) -> HsmResult<std::collections::BTreeSet<String>> {
+    if value.len() < NONCE_LEN + 16 {
+        return Err(HsmError::DeviceError);
+    }
+    let aad = backup_ids_aad(slot);
+    let pt = cipher
+        .decrypt(
+            Nonce::from_slice(&value[..NONCE_LEN]),
+            Payload {
+                msg: &value[NONCE_LEN..],
+                aad: &aad,
+            },
+        )
+        .map_err(|_| {
+            tracing::error!("backup replay guard of slot {} failed authentication", slot);
+            HsmError::DeviceError
+        })?;
+    serde_json::from_slice(&pt).map_err(|_| HsmError::DeviceError)
+}
+
+fn seal_backup_ids(
+    cipher: &Aes256Gcm,
+    slot: CK_SLOT_ID,
+    ids: &std::collections::BTreeSet<String>,
+) -> HsmResult<Vec<u8>> {
+    let pt = serde_json::to_vec(ids).map_err(|_| HsmError::GeneralError)?;
+    let mut nonce = [0u8; NONCE_LEN];
+    fill_random(&mut nonce)?;
+    let ct = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &pt,
+                aad: &backup_ids_aad(slot),
+            },
+        )
+        .map_err(|_| HsmError::GeneralError)?;
+    let mut out = nonce.to_vec();
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+const KEY_USAGE_AAD_LABEL: &[u8] = b"craton-hsm/key-usage/v1";
+
+/// An unlocked slot key: the DEK plus its cached AES-256-GCM key schedule
+/// (P6 — no key expansion per record). Both are zeroized on drop.
+struct SlotKey {
+    dek: Zeroizing<[u8; KEY_LEN]>,
+    cipher: Aes256Gcm,
+}
+
+impl SlotKey {
+    fn new(dek: &[u8; KEY_LEN]) -> Self {
+        Self {
+            dek: Zeroizing::new(*dek),
+            cipher: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek)),
+        }
+    }
+}
+
+/// Plaintext of one object record for [`EncryptedStore::put_objects`].
+pub struct RecordInput<'a> {
+    /// Opaque store key (must belong to the slot).
+    pub store_key: &'a str,
+    /// Object handle bound into the record's AAD.
+    pub handle: CK_OBJECT_HANDLE,
+    /// Serialized object.
+    pub plaintext: &'a [u8],
+}
+
 fn object_aad(store_key: &str, header: &[u8]) -> Vec<u8> {
     let mut aad = Vec::with_capacity(OBJECT_AAD_LABEL.len() + store_key.len() + 32);
     aad.extend_from_slice(OBJECT_AAD_LABEL);
@@ -216,7 +289,7 @@ pub struct EncryptedStore {
     /// The exclusive lock is released when this file handle is dropped.
     _lock_file: Option<File>,
     /// Unlocked per-slot data-encryption keys (zeroized on drop/clear).
-    keyring: RwLock<HashMap<CK_SLOT_ID, Zeroizing<[u8; KEY_LEN]>>>,
+    keyring: RwLock<HashMap<CK_SLOT_ID, SlotKey>>,
     /// Serializes read-modify-write of manifests.
     write_lock: Mutex<()>,
 }
@@ -311,7 +384,7 @@ impl EncryptedStore {
 
     /// Install the unlocked data-encryption key for a slot.
     pub fn set_slot_key(&self, slot: CK_SLOT_ID, key: &Zeroizing<[u8; KEY_LEN]>) {
-        self.keyring.write().insert(slot, Zeroizing::new(**key));
+        self.keyring.write().insert(slot, SlotKey::new(key));
     }
 
     /// Remove (and zeroize) the unlocked key of a slot.
@@ -337,7 +410,7 @@ impl EncryptedStore {
     fn with_slot_key<T>(
         &self,
         slot: CK_SLOT_ID,
-        f: impl FnOnce(&[u8; KEY_LEN]) -> HsmResult<T>,
+        f: impl FnOnce(&[u8; KEY_LEN], &Aes256Gcm) -> HsmResult<T>,
     ) -> HsmResult<T> {
         let ring = self.keyring.read();
         let key = ring.get(&slot).ok_or_else(|| {
@@ -347,7 +420,235 @@ impl EncryptedStore {
             );
             HsmError::UserNotLoggedIn
         })?;
-        f(key)
+        f(&key.dek, &key.cipher)
+    }
+
+    /// Read and authenticate the slot manifest inside a write transaction.
+    fn read_manifest_rw(
+        meta: &redb::Table<'_, &str, &[u8]>,
+        slot: CK_SLOT_ID,
+        dek: &[u8; KEY_LEN],
+    ) -> HsmResult<Manifest> {
+        match meta
+            .get(manifest_key(slot).as_str())
+            .map_err(db_err("read manifest"))?
+        {
+            Some(v) => {
+                let m: Manifest =
+                    serde_json::from_slice(v.value()).map_err(|_| HsmError::DeviceError)?;
+                if !m.verify(slot, dek) {
+                    tracing::error!("manifest MAC invalid for slot {} — refusing write", slot);
+                    return Err(HsmError::DeviceError);
+                }
+                Ok(m)
+            }
+            None => Ok(Manifest::default()),
+        }
+    }
+
+    /// Encrypt one record (header || ciphertext) under the next generation.
+    fn seal_record(
+        cipher: &Aes256Gcm,
+        slot: CK_SLOT_ID,
+        store_key: &str,
+        handle: CK_OBJECT_HANDLE,
+        generation: u64,
+        plaintext: &[u8],
+    ) -> HsmResult<Vec<u8>> {
+        let mut record = Vec::with_capacity(RECORD_HEADER_LEN + plaintext.len() + 16);
+        record.extend_from_slice(RECORD_MAGIC);
+        record.extend_from_slice(&(slot as u64).to_le_bytes());
+        record.extend_from_slice(&(handle as u64).to_le_bytes());
+        record.extend_from_slice(&generation.to_le_bytes());
+        let mut nonce = [0u8; NONCE_LEN];
+        fill_random(&mut nonce)?;
+        record.extend_from_slice(&nonce);
+        let aad = object_aad(store_key, &record);
+        let ct = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| HsmError::GeneralError)?;
+        record.extend_from_slice(&ct);
+        Ok(record)
+    }
+
+    /// Encrypt and store several object records of one slot in a **single**
+    /// transaction (P8: one commit/fsync for a bulk import or restore). Either
+    /// every record is committed or none is.
+    pub fn put_objects(&self, slot: CK_SLOT_ID, records: &[RecordInput<'_>]) -> HsmResult<()> {
+        self.put_objects_recording(slot, records, None)
+    }
+
+    /// [`put_objects`](Self::put_objects) that also records `backup_id` in
+    /// the slot's authenticated replay guard **in the same transaction**, so
+    /// restored objects and the consumed backup ID commit atomically (H5-04,
+    /// H5-06). Fails with `BackupRejected(Replayed)` if the ID was consumed.
+    pub fn put_objects_recording(
+        &self,
+        slot: CK_SLOT_ID,
+        records: &[RecordInput<'_>],
+        backup_id: Option<&str>,
+    ) -> HsmResult<()> {
+        let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
+        if records
+            .iter()
+            .any(|r| slot_of_store_key(r.store_key) != Some(slot))
+        {
+            return Err(HsmError::GeneralError);
+        }
+        if records.is_empty() && backup_id.is_none() {
+            return Ok(());
+        }
+        self.with_slot_key(slot, |dek, cipher| {
+            let _w = self.write_lock.lock();
+            let db = db.read();
+            let txn = db.begin_write().map_err(db_err("begin write"))?;
+            {
+                let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
+                if let Some(id) = backup_id {
+                    let mut ids = match meta
+                        .get(backup_ids_key(slot).as_str())
+                        .map_err(db_err("read backup ids"))?
+                    {
+                        Some(v) => open_backup_ids(cipher, slot, v.value())?,
+                        None => Default::default(),
+                    };
+                    if !ids.insert(id.to_string()) {
+                        return Err(HsmError::BackupRejected(
+                            crate::error::BackupRejection::Replayed,
+                        ));
+                    }
+                    let sealed = seal_backup_ids(cipher, slot, &ids)?;
+                    meta.insert(backup_ids_key(slot).as_str(), sealed.as_slice())
+                        .map_err(db_err("write backup ids"))?;
+                }
+                let mut manifest = Self::read_manifest_rw(&meta, slot, dek)?;
+                let mut objs = txn
+                    .open_table(OBJECTS_TABLE)
+                    .map_err(db_err("open objects"))?;
+                for r in records {
+                    manifest.counter = manifest
+                        .counter
+                        .checked_add(1)
+                        .ok_or(HsmError::DeviceError)?;
+                    let generation = manifest.counter;
+                    let record =
+                        Self::seal_record(cipher, slot, r.store_key, r.handle, generation, r.plaintext)?;
+                    objs.insert(r.store_key, record.as_slice())
+                        .map_err(db_err("insert object"))?;
+                    manifest.entries.insert(r.store_key.to_string(), generation);
+                }
+                manifest.seal(slot, dek);
+                let mbytes = serde_json::to_vec(&manifest).map_err(|_| HsmError::GeneralError)?;
+                meta.insert(manifest_key(slot).as_str(), mbytes.as_slice())
+                    .map_err(db_err("write manifest"))?;
+            }
+            txn.commit().map_err(db_err("commit"))?;
+            Ok(())
+        })
+    }
+
+    /// Consumed backup IDs of a slot (authenticated under the slot DEK).
+    pub fn consumed_backup_ids(&self, slot: CK_SLOT_ID) -> HsmResult<HashSet<String>> {
+        let value = match self.get_meta(&backup_ids_key(slot))? {
+            Some(v) => v,
+            None => return Ok(HashSet::new()),
+        };
+        self.with_slot_key(slot, |_, cipher| {
+            Ok(open_backup_ids(cipher, slot, &value)?.into_iter().collect())
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // Key usage state (GCM invocation leases, CTR ranges; H2-02/A1-15)
+    // ------------------------------------------------------------------
+
+    fn key_usage_aad(slot: CK_SLOT_ID, store_key: &str) -> Vec<u8> {
+        let mut aad = KEY_USAGE_AAD_LABEL.to_vec();
+        aad.extend_from_slice(&(slot as u64).to_le_bytes());
+        aad.extend_from_slice(store_key.as_bytes());
+        aad
+    }
+
+    /// Durably store the usage state of the key held in object record
+    /// `store_key` (AES-256-GCM under the slot DEK, bound to slot and record).
+    pub fn put_key_usage(
+        &self,
+        slot: CK_SLOT_ID,
+        store_key: &str,
+        usage: &crate::crypto::encrypt::PersistedKeyUsage,
+    ) -> HsmResult<()> {
+        let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
+        if slot_of_store_key(store_key) != Some(slot) {
+            return Err(HsmError::GeneralError);
+        }
+        let plaintext = serde_json::to_vec(usage).map_err(|_| HsmError::GeneralError)?;
+        self.with_slot_key(slot, |_, cipher| {
+            let mut nonce = [0u8; NONCE_LEN];
+            fill_random(&mut nonce)?;
+            let aad = Self::key_usage_aad(slot, store_key);
+            let ct = cipher
+                .encrypt(
+                    Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &plaintext,
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| HsmError::GeneralError)?;
+            let mut value = nonce.to_vec();
+            value.extend_from_slice(&ct);
+            let _w = self.write_lock.lock();
+            let db = db.read();
+            let txn = db.begin_write().map_err(db_err("begin write"))?;
+            {
+                let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
+                meta.insert(key_usage_key(store_key).as_str(), value.as_slice())
+                    .map_err(db_err("write key usage"))?;
+            }
+            txn.commit().map_err(db_err("commit"))?;
+            Ok(())
+        })
+    }
+
+    /// Load the persisted usage state of a key. A record that fails
+    /// authentication is reported as `DeviceError` (fail closed: the key must
+    /// not be used with a possibly rewound counter).
+    pub fn get_key_usage(
+        &self,
+        slot: CK_SLOT_ID,
+        store_key: &str,
+    ) -> HsmResult<Option<crate::crypto::encrypt::PersistedKeyUsage>> {
+        let value = match self.get_meta(&key_usage_key(store_key))? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        self.with_slot_key(slot, |_, cipher| {
+            if value.len() < NONCE_LEN + 16 {
+                return Err(HsmError::DeviceError);
+            }
+            let aad = Self::key_usage_aad(slot, store_key);
+            let pt = cipher
+                .decrypt(
+                    Nonce::from_slice(&value[..NONCE_LEN]),
+                    Payload {
+                        msg: &value[NONCE_LEN..],
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| {
+                    tracing::error!("key usage record '{}' failed authentication", store_key);
+                    HsmError::DeviceError
+                })?;
+            serde_json::from_slice(&pt)
+                .map(Some)
+                .map_err(|_| HsmError::DeviceError)
+        })
     }
 
     // ------------------------------------------------------------------
@@ -363,105 +664,32 @@ impl EncryptedStore {
         handle: CK_OBJECT_HANDLE,
         plaintext: &[u8],
     ) -> HsmResult<()> {
-        let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
-        if slot_of_store_key(store_key) != Some(slot) {
-            return Err(HsmError::GeneralError);
-        }
-        self.with_slot_key(slot, |dek| {
-            let _w = self.write_lock.lock();
-            let db = db.read();
-            let txn = db.begin_write().map_err(db_err("begin write"))?;
-            {
-                let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
-                let mut manifest = match meta
-                    .get(manifest_key(slot).as_str())
-                    .map_err(db_err("read manifest"))?
-                {
-                    Some(v) => {
-                        let m: Manifest =
-                            serde_json::from_slice(v.value()).map_err(|_| HsmError::DeviceError)?;
-                        if !m.verify(slot, dek) {
-                            tracing::error!(
-                                "manifest MAC invalid for slot {} — refusing write",
-                                slot
-                            );
-                            return Err(HsmError::DeviceError);
-                        }
-                        m
-                    }
-                    None => Manifest::default(),
-                };
-                manifest.counter = manifest
-                    .counter
-                    .checked_add(1)
-                    .ok_or(HsmError::DeviceError)?;
-                let generation = manifest.counter;
-
-                let mut record = Vec::with_capacity(RECORD_HEADER_LEN + plaintext.len() + 16);
-                record.extend_from_slice(RECORD_MAGIC);
-                record.extend_from_slice(&(slot as u64).to_le_bytes());
-                record.extend_from_slice(&(handle as u64).to_le_bytes());
-                record.extend_from_slice(&generation.to_le_bytes());
-                let mut nonce = [0u8; NONCE_LEN];
-                fill_random(&mut nonce)?;
-                record.extend_from_slice(&nonce);
-                let aad = object_aad(store_key, &record);
-                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek));
-                let ct = cipher
-                    .encrypt(
-                        Nonce::from_slice(&nonce),
-                        Payload {
-                            msg: plaintext,
-                            aad: &aad,
-                        },
-                    )
-                    .map_err(|_| HsmError::GeneralError)?;
-                record.extend_from_slice(&ct);
-
-                let mut objs = txn
-                    .open_table(OBJECTS_TABLE)
-                    .map_err(db_err("open objects"))?;
-                objs.insert(store_key, record.as_slice())
-                    .map_err(db_err("insert object"))?;
-
-                manifest.entries.insert(store_key.to_string(), generation);
-                manifest.seal(slot, dek);
-                let mbytes = serde_json::to_vec(&manifest).map_err(|_| HsmError::GeneralError)?;
-                meta.insert(manifest_key(slot).as_str(), mbytes.as_slice())
-                    .map_err(db_err("write manifest"))?;
-            }
-            txn.commit().map_err(db_err("commit"))?;
-            Ok(())
-        })
+        self.put_objects(
+            slot,
+            &[RecordInput {
+                store_key,
+                handle,
+                plaintext,
+            }],
+        )
     }
 
     /// Delete an object record and remove it from the manifest.
     pub fn delete_object(&self, slot: CK_SLOT_ID, store_key: &str) -> HsmResult<()> {
         let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
-        self.with_slot_key(slot, |dek| {
+        self.with_slot_key(slot, |dek, _| {
             let _w = self.write_lock.lock();
             let db = db.read();
             let txn = db.begin_write().map_err(db_err("begin write"))?;
             {
                 let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
-                let mut manifest = match meta
-                    .get(manifest_key(slot).as_str())
-                    .map_err(db_err("read manifest"))?
-                {
-                    Some(v) => {
-                        let m: Manifest =
-                            serde_json::from_slice(v.value()).map_err(|_| HsmError::DeviceError)?;
-                        if !m.verify(slot, dek) {
-                            return Err(HsmError::DeviceError);
-                        }
-                        m
-                    }
-                    None => Manifest::default(),
-                };
+                let mut manifest = Self::read_manifest_rw(&meta, slot, dek)?;
                 let mut objs = txn
                     .open_table(OBJECTS_TABLE)
                     .map_err(db_err("open objects"))?;
                 objs.remove(store_key).map_err(db_err("remove object"))?;
+                meta.remove(key_usage_key(store_key).as_str())
+                    .map_err(db_err("remove key usage"))?;
                 manifest.entries.remove(store_key);
                 manifest.counter = manifest
                     .counter
@@ -483,7 +711,7 @@ impl EncryptedStore {
     /// (H3-15). An invalid manifest MAC fails closed with `DeviceError`.
     pub fn load_slot_objects(&self, slot: CK_SLOT_ID) -> HsmResult<Vec<LoadedRecord>> {
         let db_lock = self.db.as_ref().ok_or(HsmError::GeneralError)?;
-        let (loaded, bad) = self.with_slot_key(slot, |dek| {
+        let (loaded, bad) = self.with_slot_key(slot, |dek, cipher| {
             let db = db_lock.read();
             let txn = db.begin_read().map_err(db_err("begin read"))?;
             let manifest = match txn.open_table(META_TABLE) {
@@ -523,7 +751,6 @@ impl EncryptedStore {
                 let range = objs
                     .range(prefix.as_str()..end.as_str())
                     .map_err(db_err("iterate objects"))?;
-                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek));
                 for entry in range {
                     let (k, v) = entry.map_err(db_err("read object"))?;
                     let store_key = k.value().to_string();
@@ -630,6 +857,12 @@ impl EncryptedStore {
                 let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
                 meta.remove(manifest_key(slot).as_str())
                     .map_err(db_err("remove manifest"))?;
+                let ku_start = format!("{}{}", KEY_USAGE_PREFIX, prefix);
+                let ku_end = format!("{}{}", KEY_USAGE_PREFIX, end);
+                meta.retain_in(ku_start.as_str()..ku_end.as_str(), |_, _| false)
+                    .map_err(db_err("clear key usage"))?;
+                meta.remove(backup_ids_key(slot).as_str())
+                    .map_err(db_err("remove backup ids"))?;
             }
             txn.commit().map_err(db_err("commit"))?;
         }
@@ -1004,9 +1237,34 @@ pub fn derive_key_from_pin(
 
     let iters = iterations.unwrap_or(PBKDF2_ITERATIONS);
     let mut derived_key = Zeroizing::new([0u8; KEY_LEN]);
-    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(pin, &salt_bytes, iters, derived_key.as_mut());
+    pbkdf2_hmac_sha256(pin, &salt_bytes, iters, derived_key.as_mut())?;
 
     Ok((derived_key, salt_bytes))
+}
+
+/// PBKDF2-HMAC-SHA256 used for PIN verifiers, storage KEKs and backup
+/// passphrases. In `fips` builds the FIPS-validated AWS-LC implementation is
+/// used (A1-03; its PBKDF2 CAST is part of the POST), otherwise RustCrypto.
+pub(crate) fn pbkdf2_hmac_sha256(
+    secret: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    out: &mut [u8],
+) -> HsmResult<()> {
+    if iterations == 0 {
+        return Err(HsmError::ArgumentsBad);
+    }
+    #[cfg(feature = "fips")]
+    {
+        let iters = std::num::NonZeroU32::new(iterations).ok_or(HsmError::ArgumentsBad)?;
+        aws_lc_rs::pbkdf2::derive(aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA256, iters, salt, secret, out);
+        Ok(())
+    }
+    #[cfg(not(feature = "fips"))]
+    {
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(secret, salt, iterations, out);
+        Ok(())
+    }
 }
 
 /// Verify a PIN against a stored PBKDF2 hash.

@@ -32,8 +32,15 @@
 //! `C_Initialize` or `C_DestroyObject` (only `C_InitToken`, which destroys all
 //! keys, clears it) and is bounded by a least-recently-used eviction instead
 //! of a global hard cap that any session could exhaust (cross-tenant DoS).
-//! Residual limits (documented in the handoff): the state is per process, so
-//! caller-chosen CTR/CBC IVs are not tracked across processes or restarts.
+//! **Persistence (H2-02/A1-15):** for token keys the object store registers
+//! a [`KeyStateSink`] ([`register_persistent_key`]). The GCM invocation count
+//! is then persisted as a *lease* (an upper bound reserved in blocks of
+//! [`GCM_PERSIST_LEASE`] invocations, written before any invocation beyond
+//! the previous lease is performed), and every new CTR keystream range is
+//! persisted before the keystream is used. Both are restored when the key is
+//! loaded again, so the 2^32 GCM limit and CTR range-overlap detection
+//! survive restarts. Caller-chosen CBC IVs and the recent-GCM-IV set remain
+//! per process.
 
 use aes_gcm::aead::consts::{U12, U13, U14, U15, U16};
 use aes_gcm::aead::generic_array::GenericArray;
@@ -65,6 +72,36 @@ const CBC_RECENT_IVS_PER_KEY: usize = 100_000;
 const CTR_MAX_RANGES_PER_KEY: usize = 65_536;
 /// Maximum number of keys with tracking state (LRU eviction beyond this).
 const MAX_TRACKED_KEYS: usize = 65_536;
+/// GCM invocations reserved per persisted lease (one durable write per
+/// lease, not per encryption).
+pub const GCM_PERSIST_LEASE: u64 = 1 << 16;
+/// Maximum disjoint CTR ranges tracked for a **persistent** key (each change
+/// rewrites the persisted range list, so it is kept small; sequential use
+/// merges into a single range).
+pub const CTR_MAX_PERSISTED_RANGES: usize = 1024;
+
+/// Durable storage for the usage state of a persistent (token) key.
+///
+/// Implemented by the object store. Called while the tracker lock is held;
+/// an error makes the triggering encryption fail (fail closed).
+pub trait KeyStateSink: Send + Sync {
+    /// Stable identity of the sink (e.g. the object's store key); a key held
+    /// by several token objects (copies) has one sink per object.
+    fn sink_id(&self) -> &str;
+    /// Persist the reserved GCM invocation upper bound.
+    fn persist_gcm_lease(&self, reserved: u64) -> HsmResult<()>;
+    /// Persist the complete list of used CTR keystream ranges.
+    fn persist_ctr_ranges(&self, ranges: &[(u128, u128)]) -> HsmResult<()>;
+}
+
+/// Persisted usage state of a key (see [`KeyStateSink`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedKeyUsage {
+    /// Reserved GCM invocation upper bound (restored as the invocation count).
+    pub gcm_reserved: u64,
+    /// Used CTR keystream ranges `[start, end)` in 128-bit blocks.
+    pub ctr_ranges: Vec<(u128, u128)>,
+}
 
 // ============================================================================
 // Per-key tracking state
@@ -109,6 +146,11 @@ struct KeyState {
     /// Used CTR keystream ranges: start block -> end block (exclusive).
     ctr_ranges: BTreeMap<u128, u128>,
     last_used: u64,
+    /// Durable sinks for persistent (token) keys (one per token object
+    /// holding this key).
+    sinks: Vec<std::sync::Arc<dyn KeyStateSink>>,
+    /// Persisted GCM invocation upper bound (lease).
+    gcm_reserved: u64,
 }
 
 impl KeyState {
@@ -119,6 +161,8 @@ impl KeyState {
             cbc_ivs: RecentSet::new(CBC_RECENT_IVS_PER_KEY),
             ctr_ranges: BTreeMap::new(),
             last_used: 0,
+            sinks: Vec::new(),
+            gcm_reserved: 0,
         }
     }
 }
@@ -143,8 +187,16 @@ fn with_key_state<R>(
     let map = guard.get_or_insert_with(HashMap::new);
     if !map.contains_key(kid) && map.len() >= MAX_TRACKED_KEYS {
         // Evict the least-recently-used key instead of refusing service to
-        // every new key (which let one session DoS all others).
-        if let Some(victim) = map.iter().min_by_key(|(_, s)| s.last_used).map(|(k, _)| *k) {
+        // every new key (which let one session DoS all others). Persistent
+        // keys are evicted last: their state could not be rebuilt without
+        // re-registration.
+        let victim = map
+            .iter()
+            .filter(|(_, s)| s.sinks.is_empty())
+            .min_by_key(|(_, s)| s.last_used)
+            .or_else(|| map.iter().min_by_key(|(_, s)| s.last_used))
+            .map(|(k, _)| *k);
+        if let Some(victim) = victim {
             tracing::warn!(
                 "Symmetric IV tracker full ({} keys) — evicting least recently used key state",
                 MAX_TRACKED_KEYS
@@ -188,6 +240,69 @@ pub fn gcm_restore_invocation_count(key: &[u8], count: u64) {
         st.gcm_invocations = st.gcm_invocations.max(count);
         Ok(())
     });
+}
+
+/// Register a persistent (token) key: restore its persisted usage state
+/// (never lowering the in-process state) and attach `sink` so further GCM
+/// leases and CTR ranges are persisted before use (H2-02/A1-15).
+pub fn register_persistent_key(
+    key: &[u8],
+    persisted: &PersistedKeyUsage,
+    sink: std::sync::Arc<dyn KeyStateSink>,
+) {
+    let kid = key_id(key);
+    let _ = with_key_state(&kid, |st| {
+        st.gcm_invocations = st.gcm_invocations.max(persisted.gcm_reserved);
+        st.gcm_reserved = st.gcm_reserved.max(persisted.gcm_reserved);
+        for &(a, b) in &persisted.ctr_ranges {
+            if a < b {
+                // Overlaps with in-process ranges are merged conservatively.
+                let mut start = a;
+                let mut end = b;
+                let overlapping: Vec<(u128, u128)> = st
+                    .ctr_ranges
+                    .range(..end)
+                    .filter(|(_, &e)| e >= start)
+                    .map(|(&s, &e)| (s, e))
+                    .collect();
+                for (s, e) in overlapping {
+                    st.ctr_ranges.remove(&s);
+                    start = start.min(s);
+                    end = end.max(e);
+                }
+                st.ctr_ranges.insert(start, end);
+            }
+        }
+        st.sinks.retain(|s| s.sink_id() != sink.sink_id());
+        st.sinks.push(sink);
+        Ok(())
+    });
+}
+
+/// Detach the persistence sink `sink_id` of a key (its token object was
+/// destroyed or evicted from memory). The in-process usage state is kept.
+pub fn unregister_persistent_key(key: &[u8], sink_id: &str) {
+    let kid = key_id(key);
+    if let Some(map) = KEY_STATE.lock().as_mut() {
+        if let Some(st) = map.get_mut(&kid) {
+            st.sinks.retain(|s| s.sink_id() != sink_id);
+        }
+    }
+}
+
+/// Current usage state of a key in the form it is persisted.
+pub fn persisted_key_usage(key: &[u8]) -> PersistedKeyUsage {
+    let kid = key_id(key);
+    KEY_STATE
+        .lock()
+        .as_ref()
+        .and_then(|m| {
+            m.get(&kid).map(|s| PersistedKeyUsage {
+                gcm_reserved: s.gcm_reserved.max(s.gcm_invocations),
+                ctr_ranges: s.ctr_ranges.iter().map(|(&a, &b)| (a, b)).collect(),
+            })
+        })
+        .unwrap_or_default()
 }
 
 // ============================================================================
@@ -244,10 +359,27 @@ pub fn gcm_encrypt_with(
             tracing::error!("AES-GCM per-key invocation limit (2^32) reached — rotate the key");
             return Err(HsmError::KeyFunctionNotPermitted);
         }
-        if !st.gcm_ivs.insert(iv) {
+        if st.gcm_ivs.set.contains(&iv) {
             tracing::error!("AES-GCM: IV reuse with the same key rejected");
             return Err(HsmError::MechanismParamInvalid);
         }
+        // Persistent key: reserve (durably) a new block of invocations before
+        // exceeding the previous lease, so a restart can never rewind the
+        // count (H2-02/A1-15).
+        if st.gcm_invocations >= st.gcm_reserved && !st.sinks.is_empty() {
+            let lease = st
+                .gcm_invocations
+                .saturating_add(GCM_PERSIST_LEASE)
+                .min(GCM_MAX_INVOCATIONS_PER_KEY);
+            for sink in &st.sinks {
+                sink.persist_gcm_lease(lease).map_err(|e| {
+                    tracing::error!("AES-GCM: cannot persist invocation lease: {:?}", e);
+                    HsmError::DeviceError
+                })?;
+            }
+            st.gcm_reserved = lease;
+        }
+        st.gcm_ivs.insert(iv);
         st.gcm_invocations += 1;
         Ok(st.gcm_invocations)
     })?;
@@ -427,12 +559,37 @@ pub fn ctr_encrypt_with(
     let (start, end) = ctr_validate(key, params, plaintext.len())?;
     let kid = key_id(key);
     with_key_state(&kid, |st| {
-        ctr_record_range(&mut st.ctr_ranges, start, end).map_err(|e| {
+        let log = |e: HsmError| {
             if matches!(e, HsmError::MechanismParamInvalid) {
                 tracing::error!("AES-CTR: keystream reuse (overlapping counter range) rejected");
             }
             e
-        })
+        };
+        if st.sinks.is_empty() {
+            ctr_record_range(&mut st.ctr_ranges, start, end).map_err(log)
+        } else {
+            // Persistent key: persist the new range list before the
+            // keystream is used.
+            let mut ranges = st.ctr_ranges.clone();
+            ctr_record_range(&mut ranges, start, end).map_err(log)?;
+            if ranges.len() > CTR_MAX_PERSISTED_RANGES {
+                tracing::error!(
+                    "AES-CTR: too many disjoint counter ranges for this token key — rotate it"
+                );
+                return Err(HsmError::KeyFunctionNotPermitted);
+            }
+            if ranges != st.ctr_ranges {
+                let list: Vec<(u128, u128)> = ranges.iter().map(|(&a, &b)| (a, b)).collect();
+                for sink in &st.sinks {
+                    sink.persist_ctr_ranges(&list).map_err(|e| {
+                        tracing::error!("AES-CTR: cannot persist keystream range: {:?}", e);
+                        HsmError::DeviceError
+                    })?;
+                }
+            }
+            st.ctr_ranges = ranges;
+            Ok(())
+        }
     })?;
     raw(key, &params.cb, plaintext)
 }

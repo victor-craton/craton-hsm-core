@@ -171,6 +171,19 @@ pub enum AuditOperation {
     LogRotated {
         previous_generation_last_seq: u64,
     },
+    /// Encrypted backup of a slot's token objects was exported (H5-20).
+    BackupExport {
+        slot_id: u64,
+        object_count: u64,
+    },
+    /// Objects were restored from an encrypted backup (H5-20).
+    BackupRestore {
+        slot_id: u64,
+        object_count: u64,
+    },
+    /// Audit trail contents were read or exported by an administrator
+    /// (H5-20).
+    AuditExport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +263,66 @@ const AUDIT_QUEUE_CAPACITY: usize = 10_000;
 const GROUP_COMMIT_MAX: usize = 256;
 
 const ANCHOR_LABEL: &[u8] = b"craton-hsm/audit-anchor/v1";
+
+/// Maximum length of one NDJSON line accepted by offline verification.
+const MAX_AUDIT_LINE_BYTES: usize = 64 * 1024;
+
+/// Successful offline verification ([`AuditLog::verify_files`]).
+#[derive(Debug, Clone)]
+pub struct AuditFileSummary {
+    /// Number of verified events.
+    pub entries: u64,
+    /// Files verified, oldest generation first.
+    pub files: Vec<PathBuf>,
+    /// `false` when the oldest available generation starts with a rotation
+    /// header (older generations were rotated away), so the start of the
+    /// chain cannot be anchored at the genesis value.
+    pub anchored_at_genesis: bool,
+    /// Whether a MAC-protected tail anchor was present and matched.
+    pub anchor_present: bool,
+    /// Sequence number of the last event, if any.
+    pub last_seq: Option<u64>,
+}
+
+/// Why offline verification failed ([`AuditLog::verify_files`]).
+#[derive(Debug, Clone)]
+pub enum AuditVerifyError {
+    /// Neither the log nor any rotated generation exists.
+    Missing(PathBuf),
+    /// The chain key could not be read.
+    KeyUnavailable(PathBuf, String),
+    /// Chain broken, file corrupted, truncated or reordered.
+    Tampered {
+        /// File in which the problem was found.
+        file: PathBuf,
+        /// 1-based line number (0 = file-level problem).
+        line: usize,
+        /// Description (never contains event contents).
+        reason: String,
+    },
+    /// I/O error while reading.
+    Io(PathBuf, String),
+    /// The visitor callback failed (e.g. writing to stdout).
+    Visitor(String),
+}
+
+impl std::fmt::Display for AuditVerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuditVerifyError::Missing(p) => write!(f, "audit log '{}' does not exist", p.display()),
+            AuditVerifyError::KeyUnavailable(p, r) => {
+                write!(f, "audit key '{}' unavailable: {r}", p.display())
+            }
+            AuditVerifyError::Tampered { file, line, reason } => write!(
+                f,
+                "audit chain BROKEN in '{}' at line {line}: {reason}",
+                file.display()
+            ),
+            AuditVerifyError::Io(p, e) => write!(f, "cannot read '{}': {e}", p.display()),
+            AuditVerifyError::Visitor(e) => write!(f, "output error: {e}"),
+        }
+    }
+}
 
 /// Result of attempting to recover the hash chain from an existing log file.
 enum ChainRecoveryResult {
@@ -962,8 +1035,206 @@ impl AuditLog {
         self.shared.io_failed.load(Ordering::Acquire)
     }
 
+    /// Verify the persisted log **and all its rotated generations** offline
+    /// (oldest first: `<log>.5` … `<log>.1`, `<log>`), recomputing the keyed
+    /// chain across generation boundaries, checking sequence numbers, the
+    /// `LogRotated` links and the MAC-protected anchor, and hand every
+    /// verified event to `visit` in order (H5-03). Stops at the first broken
+    /// link; events are only visited after their link verified.
+    ///
+    /// This is the API for offline readers (admin CLI `audit verify-chain`,
+    /// `dump`, `export-*`): it needs read access to the key file but never
+    /// writes and takes no lock.
+    pub fn verify_files(
+        log_path: &Path,
+        key_path: &Path,
+        mut visit: impl FnMut(&AuditEvent) -> Result<(), String>,
+    ) -> Result<AuditFileSummary, AuditVerifyError> {
+        let mut files: Vec<PathBuf> = (1..=MAX_ROTATED_FILES)
+            .rev()
+            .map(|g| rotated_path(log_path, g))
+            .filter(|p| std::fs::symlink_metadata(p).is_ok())
+            .collect();
+        if std::fs::symlink_metadata(log_path).is_ok() {
+            files.push(log_path.to_path_buf());
+        }
+        let key = match crate::store::fs_util::read_private(key_path) {
+            Ok(Some(k)) if k.len() == 32 => {
+                let mut arr = Zeroizing::new([0u8; 32]);
+                arr.copy_from_slice(&k);
+                let mut k = k;
+                k.iter_mut().for_each(|b| *b = 0);
+                arr
+            }
+            Ok(Some(_)) => {
+                return Err(AuditVerifyError::KeyUnavailable(
+                    key_path.to_path_buf(),
+                    "malformed key file".to_string(),
+                ))
+            }
+            Ok(None) => {
+                return Err(AuditVerifyError::KeyUnavailable(
+                    key_path.to_path_buf(),
+                    "key file missing".to_string(),
+                ))
+            }
+            Err(e) => {
+                return Err(AuditVerifyError::KeyUnavailable(
+                    key_path.to_path_buf(),
+                    format!("{e:?}"),
+                ))
+            }
+        };
+        let anchor = read_anchor(log_path, &key).map_err(|reason| AuditVerifyError::Tampered {
+            file: anchor_path(log_path),
+            line: 0,
+            reason,
+        })?;
+        if files.is_empty() {
+            return match anchor {
+                None => Err(AuditVerifyError::Missing(log_path.to_path_buf())),
+                Some((seq, _)) => Err(AuditVerifyError::Tampered {
+                    file: log_path.to_path_buf(),
+                    line: 0,
+                    reason: format!("log missing but anchor records {} event(s)", seq + 1),
+                }),
+            };
+        }
+
+        let mut running: Option<[u8; 32]> = None;
+        let mut next_seq: Option<u64> = None;
+        let mut anchored_at_genesis = true;
+        let mut anchor_seen = false;
+        let mut entries = 0u64;
+        let mut buf = Vec::new();
+        for path in &files {
+            let is_current = path.as_path() == log_path;
+            let file = match crate::store::fs_util::open_existing_readonly(path) {
+                Ok(Some(f)) => f,
+                Ok(None) => return Err(AuditVerifyError::Missing(path.clone())),
+                Err(e) => return Err(AuditVerifyError::Io(path.clone(), format!("{e:?}"))),
+            };
+            let mut reader = std::io::BufReader::new(file);
+            let mut line_no = 0usize;
+            let mut first_in_file = true;
+            loop {
+                let tampered = |line: usize, reason: String| AuditVerifyError::Tampered {
+                    file: path.clone(),
+                    line,
+                    reason,
+                };
+                buf.clear();
+                let n = std::io::Read::take(&mut reader, MAX_AUDIT_LINE_BYTES as u64 + 1)
+                    .read_until(b'\n', &mut buf)
+                    .map_err(|e| AuditVerifyError::Io(path.clone(), e.to_string()))?;
+                if n == 0 {
+                    break;
+                }
+                line_no += 1;
+                if buf.len() > MAX_AUDIT_LINE_BYTES {
+                    return Err(tampered(line_no, "line exceeds maximum length".into()));
+                }
+                let text = String::from_utf8_lossy(&buf);
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let ev: AuditEvent = serde_json::from_str(text)
+                    .map_err(|e| tampered(line_no, format!("unparseable entry: {e}")))?;
+                match (running, next_seq) {
+                    (Some(h), Some(seq)) => {
+                        if ev.seq != seq {
+                            return Err(tampered(
+                                line_no,
+                                format!("sequence gap: expected {seq}, found {}", ev.seq),
+                            ));
+                        }
+                        if ev.previous_hash != h {
+                            return Err(tampered(line_no, "chain mismatch".into()));
+                        }
+                        if first_in_file {
+                            // A new generation must start with its rotation
+                            // header linking to the previous generation.
+                            match ev.operation {
+                                AuditOperation::LogRotated {
+                                    previous_generation_last_seq,
+                                } if previous_generation_last_seq + 1 == seq => {}
+                                _ => {
+                                    return Err(tampered(
+                                        line_no,
+                                        "generation does not start with a matching rotation header"
+                                            .into(),
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Oldest available event.
+                        if ev.seq == 0 {
+                            if ev.previous_hash != [0u8; 32] {
+                                return Err(tampered(
+                                    line_no,
+                                    "first event does not start the chain".into(),
+                                ));
+                            }
+                        } else if matches!(ev.operation, AuditOperation::LogRotated { .. }) {
+                            // Older generations were rotated away.
+                            anchored_at_genesis = false;
+                        } else {
+                            return Err(tampered(
+                                line_no,
+                                format!("log starts at seq {} without a rotation header", ev.seq),
+                            ));
+                        }
+                    }
+                }
+                let h = event_hash(&key, &ev)
+                    .map_err(|_| tampered(line_no, "serialization failed".into()))?;
+                if is_current {
+                    if let Some((aseq, ahash)) = anchor {
+                        if aseq == ev.seq {
+                            if ahash != h {
+                                return Err(tampered(
+                                    line_no,
+                                    "anchor does not match the log (rewritten history?)".into(),
+                                ));
+                            }
+                            anchor_seen = true;
+                        }
+                    }
+                }
+                visit(&ev).map_err(AuditVerifyError::Visitor)?;
+                running = Some(h);
+                next_seq = Some(ev.seq + 1);
+                entries += 1;
+                first_in_file = false;
+            }
+        }
+        if let Some((aseq, _)) = anchor {
+            if !anchor_seen {
+                return Err(AuditVerifyError::Tampered {
+                    file: log_path.to_path_buf(),
+                    line: 0,
+                    reason: format!(
+                        "log truncated or replaced: anchored event seq {aseq} not found in the current file"
+                    ),
+                });
+            }
+        }
+        Ok(AuditFileSummary {
+            entries,
+            files,
+            anchored_at_genesis,
+            anchor_present: anchor.is_some(),
+            last_seq: next_seq.map(|n| n - 1),
+        })
+    }
+
     /// Verify a log file offline (e.g. from the admin CLI while the daemon
-    /// owns the live log). Returns `(events, last_seq)`.
+    /// owns the live log). Returns `(events, last_seq)`. Only the current
+    /// generation is checked; see [`verify_files`](Self::verify_files) for
+    /// the complete chain across rotated generations.
     pub fn verify_file(path: &Path, key_path: &Path) -> Result<(u64, u64), String> {
         let key = match load_or_create_key(key_path, true) {
             Ok(Some(k)) => k,
@@ -1375,53 +1646,7 @@ impl AuditLog {
         // Read-your-writes: make every event recorded before this call visible.
         self.flush();
         let entries = self.shared.state.read().entries.clone();
-        entries
-            .iter()
-            .map(|e| {
-                let severity = match &e.result {
-                    AuditResult::Success => 6,    // informational
-                    AuditResult::Failure(_) => 4, // warning
-                };
-                let facility = 10; // security/authorization (authpriv)
-                let priority = facility * 8 + severity;
-                let timestamp = format_rfc3339(e.timestamp);
-                let op_name = format_operation_name(&e.operation);
-                let result_str = match &e.result {
-                    AuditResult::Success => "SUCCESS".to_string(),
-                    AuditResult::Failure(rv) => format!("FAILURE(0x{:08X})", rv),
-                };
-                let key_str = e.key_id.as_deref().unwrap_or("-");
-
-                // RFC 5424 structured data for machine-parseable SIEM ingestion.
-                // Values are escaped per RFC 5424 §6.3.3: `"`, `\`, and `]` must
-                // be preceded by `\` inside SD param-values.
-                let sd = format!(
-                    "[hsm@0 session=\"{}\" op=\"{}\" result=\"{}\" key=\"{}\"]",
-                    e.session_handle,
-                    escape_sd_value(op_name),
-                    escape_sd_value(&result_str),
-                    escape_sd_value(key_str),
-                );
-
-                // (#7-fix) Sanitize msg field values to prevent syslog parser
-                // confusion from special characters (e.g., `<` `>` that could
-                // be misinterpreted as PRI markers by some syslog implementations).
-                let msg = format!(
-                    "session={} op={} result={} key={}",
-                    e.session_handle,
-                    sanitize_syslog_msg_value(op_name),
-                    sanitize_syslog_msg_value(&result_str),
-                    sanitize_syslog_msg_value(key_str),
-                );
-                // RFC 5424 PROCID field: use "-" (nil value) instead of the real
-                // process ID to avoid leaking container/process topology details
-                // in multi-tenant environments.
-                format!(
-                    "<{}>1 {} craton_hsm craton_hsm - - {} {}",
-                    priority, timestamp, sd, msg
-                )
-            })
-            .collect()
+        entries.iter().map(format_syslog).collect()
     }
 
     /// Verify the integrity of the in-memory audit log chain (starting from
@@ -1542,8 +1767,55 @@ fn rotated_path(base: &Path, generation: u32) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Format an event as an RFC 5424 syslog line with structured data
+/// (`<PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID [SD] MSG`), suitable for
+/// forwarding to syslog daemons or SIEM systems. Field values are escaped /
+/// sanitised against log injection. Public so offline tools (admin CLI)
+/// produce exactly the same format as [`AuditLog::export_syslog`] (H5-03).
+pub fn format_syslog(e: &AuditEvent) -> String {
+    let severity = match &e.result {
+        AuditResult::Success => 6,    // informational
+        AuditResult::Failure(_) => 4, // warning
+    };
+    let facility = 10; // security/authorization (authpriv)
+    let priority = facility * 8 + severity;
+    let timestamp = format_rfc3339(e.timestamp);
+    let op_name = format_operation_name(&e.operation);
+    let result_str = match &e.result {
+        AuditResult::Success => "SUCCESS".to_string(),
+        AuditResult::Failure(rv) => format!("FAILURE(0x{:08X})", rv),
+    };
+    let key_str = e.key_id.as_deref().unwrap_or("-");
+    // RFC 5424 §6.3.3: `"`, `\` and `]` are escaped inside SD param-values.
+    let sd = format!(
+        "[hsm@0 seq=\"{}\" session=\"{}\" op=\"{}\" result=\"{}\" key=\"{}\"]",
+        e.seq,
+        e.session_handle,
+        escape_sd_value(op_name),
+        escape_sd_value(&result_str),
+        escape_sd_value(key_str),
+    );
+    let msg = format!(
+        "session={} op={} result={} key={}",
+        e.session_handle,
+        sanitize_syslog_msg_value(op_name),
+        sanitize_syslog_msg_value(&result_str),
+        sanitize_syslog_msg_value(key_str),
+    );
+    // PROCID is the nil value "-" (no process topology leak).
+    format!(
+        "<{}>1 {} craton_hsm craton_hsm - - {} {}",
+        priority, timestamp, sd, msg
+    )
+}
+
+/// Short, stable name of an audit operation (syslog / CLI tables).
+pub fn operation_name(op: &AuditOperation) -> &'static str {
+    format_operation_name(op)
+}
+
 /// Format a nanosecond UNIX timestamp as RFC 3339 (used in syslog).
-fn format_rfc3339(nanos: u64) -> String {
+pub fn format_rfc3339(nanos: u64) -> String {
     let secs = nanos / 1_000_000_000;
     let subsec = nanos % 1_000_000_000;
     // Simple UTC timestamp without pulling in chrono
@@ -1647,5 +1919,8 @@ fn format_operation_name(op: &AuditOperation) -> &'static str {
         AuditOperation::CopyObject => "CopyObject",
         AuditOperation::SetAttributeValue => "SetAttributeValue",
         AuditOperation::LogRotated { .. } => "LogRotated",
+        AuditOperation::BackupExport { .. } => "BackupExport",
+        AuditOperation::BackupRestore { .. } => "BackupRestore",
+        AuditOperation::AuditExport => "AuditExport",
     }
 }
