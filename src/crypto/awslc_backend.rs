@@ -1042,6 +1042,14 @@ mod tests {
     use super::*;
     use crate::crypto::params::{EcdhParams, CKD_SHA256_KDF};
 
+    /// All backend CASTs pass through AWS-LC (A1-04: POST exercises the
+    /// configured backend).
+    #[test]
+    fn backend_casts_pass_on_awslc() {
+        crate::crypto::self_test::run_backend_post(&AwsLcBackend, false)
+            .expect("AWS-LC backend CASTs");
+    }
+
     /// Cross-backend differential test: both backends agree on ECDH-derived
     /// keys, GCM ciphertexts, raw ECDSA format and KWP output (H2-04).
     #[cfg(feature = "rustcrypto-backend")]
