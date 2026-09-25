@@ -18,8 +18,9 @@ tonic-prost = "0.14"
 tonic-health = "0.14"
 tower = { version = "0.5", features = ["limit", "load-shed"] }
 prost = "0.14"
-rustls = "0.23"
-tokio-rustls = "0.26"
+# Only the ring provider is linked (no aws-lc-rs) — smaller binary and FIPS boundary.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging"] }
 rustls-pemfile = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
