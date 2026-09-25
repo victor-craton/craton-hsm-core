@@ -450,6 +450,34 @@ fn anchor_path(log: &Path) -> PathBuf {
     PathBuf::from(n)
 }
 
+/// Remove temporary anchor files left behind by a writer that died between
+/// creating and renaming them (we hold the single-writer lock, so no live
+/// writer can own them).
+fn remove_stale_anchor_temps(log: &Path) {
+    let (dir, name) = match (log.parent(), log.file_name()) {
+        (Some(d), Some(n)) => (d, n.to_string_lossy().into_owned()),
+        _ => return,
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let prefix = format!(".{}.anchor.", name);
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let f = e.file_name().to_string_lossy().into_owned();
+            if f.starts_with(&prefix) && f.ends_with(".tmp") {
+                if let Ok(ft) = e.file_type() {
+                    if ft.is_file() {
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Default key-file path for a log path.
 pub fn default_key_path(log: &Path) -> PathBuf {
     let mut n = log.as_os_str().to_os_string();
@@ -947,6 +975,7 @@ impl AuditLog {
                 HsmError::DeviceError
             })?;
         }
+        remove_stale_anchor_temps(&path);
         let log_exists = path.exists() || anchor_path(&path).exists();
         let key = match load_or_create_key(&key_path, log_exists)? {
             Some(k) => k,
