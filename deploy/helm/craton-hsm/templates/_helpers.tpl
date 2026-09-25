@@ -54,11 +54,28 @@ persistence enabled would cause mount failures.
 
 {{/*
 Validate TLS configuration.
-Fails rendering if TLS is disabled without explicit acknowledgement.
+Plaintext requires explicit acknowledgement AND a loopback bind address: the
+daemon refuses plaintext on any other address.
 */}}
 {{- define "craton-hsm.validateTls" -}}
-{{- if and (not .Values.tls.enabled) (not .Values.tls.acceptInsecure) }}
+{{- if not .Values.tls.enabled }}
+{{- if not .Values.tls.acceptInsecure }}
 {{- fail "SECURITY ERROR: TLS is disabled — gRPC traffic will be unencrypted. Set tls.enabled=true for production, or set tls.acceptInsecure=true to explicitly acknowledge plaintext gRPC (NOT recommended)." }}
+{{- end }}
+{{- if not (or (hasPrefix "127." .Values.daemon.bind) (hasPrefix "[::1]" .Values.daemon.bind)) }}
+{{- fail "CONFIGURATION ERROR: tls.enabled=false requires a loopback daemon.bind (127.0.0.1:port); the daemon refuses plaintext on other addresses." }}
+{{- end }}
+{{- end }}
+{{- range .Values.tls.adminCertSha256 }}
+{{- if not (regexMatch "^([0-9a-fA-F]{2}:?){31}[0-9a-fA-F]{2}$" .) }}
+{{- fail (printf "CONFIGURATION ERROR: tls.adminCertSha256 entry %q is not a SHA-256 hex fingerprint" .) }}
+{{- end }}
+{{- end }}
+{{- if and .Values.tls.adminCertSha256 (not .Values.tls.clientCaSecretName) }}
+{{- fail "CONFIGURATION ERROR: tls.adminCertSha256 requires mutual TLS (tls.clientCaSecretName)." }}
+{{- end }}
+{{- if and .Values.tls.clientCrlSecretName (not .Values.tls.clientCaSecretName) }}
+{{- fail "CONFIGURATION ERROR: tls.clientCrlSecretName requires tls.clientCaSecretName." }}
 {{- end }}
 {{- end }}
 
@@ -71,3 +88,25 @@ Fails rendering if persistence is disabled and audit disable is not explicitly a
 {{- fail "SECURITY ERROR: Persistence is disabled, which means audit logs will be lost on restart. Either set persistence.enabled=true, or set audit.acceptNoLogging=true to explicitly acknowledge running without persistent audit trails." }}
 {{- end }}
 {{- end }}
+
+{{/*
+Container image reference (digest preferred over tag).
+*/}}
+{{- define "craton-hsm.image" -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.repository (default .Chart.AppVersion .Values.image.tag) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Filesystem layout inside the container. Secret mounts are siblings of the
+read-only config mount (not nested inside it).
+*/}}
+{{- define "craton-hsm.configDir" -}}/etc/craton-hsm{{- end }}
+{{- define "craton-hsm.configFile" -}}/etc/craton-hsm/craton_hsm.toml{{- end }}
+{{- define "craton-hsm.tlsDir" -}}/etc/craton-hsm-tls{{- end }}
+{{- define "craton-hsm.clientCaDir" -}}/etc/craton-hsm-client-ca{{- end }}
+{{- define "craton-hsm.crlDir" -}}/etc/craton-hsm-crl{{- end }}
+{{- define "craton-hsm.dataDir" -}}/data{{- end }}

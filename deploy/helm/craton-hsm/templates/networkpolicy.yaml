@@ -12,17 +12,27 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # gRPC API: labelled client pods only. The label is a coarse filter —
+    # mutual TLS is the actual trust boundary.
     - from:
-        # Restrict to pods in the SAME namespace with the client label.
-        # Cross-namespace access requires adding namespaceSelector entries below.
         - podSelector:
             matchLabels:
-              craton-hsm-client: "true"
+              {{- toYaml .Values.networkPolicy.clientPodLabels | nindent 14 }}
+          {{- with .Values.networkPolicy.clientNamespaceSelector }}
+          namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       ports:
-        - port: 5696
+        - port: {{ regexFind "[0-9]+$" .Values.daemon.bind | int }}
           protocol: TCP
+    # Health endpoint (grpc.health.v1 only, no HSM API) for kubelet probes,
+    # whose source address is the node and cannot be selected portably.
+    - ports:
+        - port: {{ int .Values.daemon.healthPort }}
+          protocol: TCP
+  # The daemon makes no outbound connections (CRLs are read from files; there
+  # is no OCSP client). Only DNS is allowed.
   egress:
-    # DNS resolution — restricted to kube-dns only to prevent DNS exfiltration
     - to:
         - namespaceSelector:
             matchLabels:
@@ -35,11 +45,3 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    {{- if .Values.networkPolicy.allowOcsp }}
-    # OCSP/CRL — allow outbound HTTPS for certificate revocation checks
-    - ports:
-        - port: 80
-          protocol: TCP
-        - port: 443
-          protocol: TCP
-    {{- end }}

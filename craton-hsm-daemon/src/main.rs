@@ -167,9 +167,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // ── Health service (H4-13) ──────────────────────────────────────────────
+    // Reported SERVING only once the main listener is bound (below).
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
-        .set_serving::<HsmServiceServer<server::HsmServiceImpl>>()
+        .set_not_serving::<HsmServiceServer<server::HsmServiceImpl>>()
+        .await;
+    health_reporter
+        .set_service_status("", tonic_health::ServingStatus::NotServing)
         .await;
     {
         let reporter = health_reporter.clone();
@@ -295,6 +299,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: std::net::SocketAddr = dcfg.bind.parse()?;
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Craton HSM daemon listening on {}", addr);
+    health_reporter
+        .set_serving::<HsmServiceServer<server::HsmServiceImpl>>()
+        .await;
+    health_reporter
+        .set_service_status("", tonic_health::ServingStatus::Serving)
+        .await;
 
     let mut conn_rx = listener::spawn_acceptor(
         listener,

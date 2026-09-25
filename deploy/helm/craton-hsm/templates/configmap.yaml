@@ -2,6 +2,7 @@
 {{- include "craton-hsm.validateTls" . -}}
 {{- include "craton-hsm.validateMtls" . -}}
 {{- include "craton-hsm.validateAudit" . -}}
+{{- $l := .Values.daemon.limits -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,33 +10,68 @@ metadata:
   labels:
     {{- include "craton-hsm.labels" . | nindent 4 }}
 data:
-  craton-hsm.toml: |
+  # Single configuration file: every section below is read and validated by
+  # the daemon at startup (unknown keys are rejected).
+  craton_hsm.toml: |
     [token]
     label = {{ .Values.config.tokenLabel | quote }}
+    # Relative to the working directory {{ include "craton-hsm.dataDir" . }}.
     storage_path = {{ .Values.config.storagePath | quote }}
-    max_sessions = {{ .Values.config.maxSessions }}
-    max_rw_sessions = {{ .Values.config.maxRwSessions }}
+    max_sessions = {{ int .Values.config.maxSessions }}
+    max_rw_sessions = {{ int .Values.config.maxRwSessions }}
+    persist_objects = {{ .Values.persistence.enabled }}
+
+    [security]
+    pin_min_length = {{ int .Values.config.pinMinLength }}
+    pin_max_length = {{ int .Values.config.pinMaxLength }}
+    max_failed_logins = {{ int .Values.config.maxFailedLogins }}
 
     [algorithms]
+    fips_approved_only = {{ .Values.config.fipsApprovedOnly }}
     enable_pqc = {{ .Values.config.enablePqc }}
 
     [audit]
-    {{- if .Values.persistence.enabled }}
-    enabled = true
-    log_path = "/data/craton-hsm_audit.jsonl"
-    {{- else }}
-    # Audit disabled — persistence is off and audit.acceptNoLogging=true was set.
-    enabled = false
-    log_path = "/tmp/craton-hsm_audit.jsonl"
+    {{- if not .Values.persistence.enabled }}
+    # persistence.enabled=false (audit.acceptNoLogging=true): the audit log is
+    # written to an emptyDir and is LOST when the pod is deleted.
     {{- end }}
+    enabled = true
+    log_path = {{ .Values.config.auditLogPath | quote }}
     log_level = "all"
 
     [daemon]
     bind = {{ .Values.daemon.bind | quote }}
+    health_bind = {{ printf "0.0.0.0:%d" (int .Values.daemon.healthPort) | quote }}
     {{- if .Values.tls.enabled }}
-    tls_cert = "/etc/craton-hsm/tls/tls.crt"
-    tls_key = "/etc/craton-hsm/tls/tls.key"
+    tls_cert = "{{ include "craton-hsm.tlsDir" . }}/tls.crt"
+    tls_key = "{{ include "craton-hsm.tlsDir" . }}/tls.key"
+    {{- else }}
+    allow_insecure = true
     {{- end }}
     {{- if .Values.tls.clientCaSecretName }}
-    tls_client_ca = "/etc/craton-hsm/tls-client-ca/ca.crt"
+    tls_client_ca = "{{ include "craton-hsm.clientCaDir" . }}/ca.crt"
+    {{- else if .Values.tls.enabled }}
+    allow_no_client_auth = true
     {{- end }}
+    {{- if .Values.tls.clientCrlSecretName }}
+    tls_client_crl = [{{- range $i, $k := .Values.tls.clientCrlKeys }}{{ if $i }}, {{ end }}"{{ include "craton-hsm.crlDir" $ }}/{{ $k }}"{{- end }}]
+    tls_client_crl_reload_secs = {{ int .Values.tls.crlReloadSecs }}
+    {{- end }}
+    admin_client_cert_sha256 = [{{- range $i, $f := .Values.tls.adminCertSha256 }}{{ if $i }}, {{ end }}{{ $f | quote }}{{- end }}]
+    max_request_bytes = {{ int $l.maxRequestBytes }}
+    max_response_bytes = {{ int $l.maxResponseBytes }}
+    max_random_length = {{ int $l.maxRandomLength }}
+    max_digest_length = {{ int $l.maxDigestLength }}
+    max_connections = {{ int $l.maxConnections }}
+    max_connections_per_ip = {{ int $l.maxConnectionsPerIp }}
+    max_inflight_requests = {{ int $l.maxInflightRequests }}
+    max_concurrent_streams = {{ int $l.maxConcurrentStreams }}
+    request_timeout_secs = {{ int $l.requestTimeoutSecs }}
+    handshake_timeout_secs = {{ int $l.handshakeTimeoutSecs }}
+    connection_idle_timeout_secs = {{ int $l.connectionIdleTimeoutSecs }}
+    max_sessions_per_client = {{ int $l.maxSessionsPerClient }}
+    session_idle_timeout_secs = {{ int $l.sessionIdleTimeoutSecs }}
+    max_objects_per_client = {{ int $l.maxObjectsPerClient }}
+    max_login_attempts = {{ int $l.maxLoginAttempts }}
+    login_cooldown_secs = {{ int $l.loginCooldownSecs }}
+    max_blocking_tasks = {{ int $l.maxBlockingTasks }}

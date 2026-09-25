@@ -512,6 +512,14 @@ mod tests {
     const FP: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
     #[test]
+    fn shipped_example_config_is_valid() {
+        let text = include_str!("../craton_hsm.example.toml");
+        FullConfig::parse(text).unwrap();
+        let core: craton_hsm::config::config::HsmConfig = toml::from_str(text).unwrap();
+        core.validate().unwrap();
+    }
+
+    #[test]
     fn unknown_daemon_key_is_rejected() {
         let err = FullConfig::parse(
             "[daemon]\ntls_cert = \"c\"\ntls_key = \"k\"\ntls_clent_ca = \"ca\"\n",

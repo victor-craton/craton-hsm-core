@@ -6,6 +6,11 @@ metadata:
     {{- include "craton-hsm.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.daemon.replicas }}
+  # Never run two daemons on the same ReadWriteOnce volume (audit chain and
+  # lockout state would be corrupted; RollingUpdate would also stall on
+  # Multi-Attach).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "craton-hsm.selectorLabels" . | nindent 6 }}
@@ -13,14 +18,19 @@ spec:
     metadata:
       labels:
         {{- include "craton-hsm.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "craton-hsm.fullname" . }}
       automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ int .Values.daemon.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
-        fsGroup: 65534
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       {{- if gt (int .Values.daemon.replicas) 1 }}
@@ -41,79 +51,105 @@ spec:
       {{- end }}
       containers:
         - name: craton-hsm
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "craton-hsm.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          workingDir: {{ include "craton-hsm.dataDir" . }}
+          args:
+            - {{ include "craton-hsm.configFile" . }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.daemon.logLevel | quote }}
+            - name: CRATON_HSM_LOG_FORMAT
+              value: {{ .Values.daemon.logFormat | quote }}
           ports:
-            - containerPort: 5696
+            - containerPort: {{ regexFind "[0-9]+$" .Values.daemon.bind | int }}
               protocol: TCP
               name: grpc
-          args:
-            - /etc/craton-hsm/craton-hsm.toml
+            - containerPort: {{ int .Values.daemon.healthPort }}
+              protocol: TCP
+              name: health
           volumeMounts:
             - name: config
-              mountPath: /etc/craton-hsm
-              readOnly: true
-            - name: security
-              mountPath: /etc/craton-hsm/security
+              mountPath: {{ include "craton-hsm.configDir" . }}
               readOnly: true
             {{- if .Values.tls.enabled }}
             - name: tls
-              mountPath: /etc/craton-hsm/tls
+              mountPath: {{ include "craton-hsm.tlsDir" . }}
               readOnly: true
             {{- end }}
             {{- if .Values.tls.clientCaSecretName }}
             - name: tls-client-ca
-              mountPath: /etc/craton-hsm/tls-client-ca
+              mountPath: {{ include "craton-hsm.clientCaDir" . }}
               readOnly: true
             {{- end }}
-            {{- if .Values.persistence.enabled }}
-            - name: data
-              mountPath: /data
+            {{- if .Values.tls.clientCrlSecretName }}
+            - name: tls-client-crl
+              mountPath: {{ include "craton-hsm.crlDir" . }}
+              readOnly: true
             {{- end }}
+            - name: data
+              mountPath: {{ include "craton-hsm.dataDir" . }}
           resources:
             {{- toYaml .Values.daemon.resources | nindent 12 }}
+          # Health is served in plaintext on a dedicated port that exposes only
+          # grpc.health.v1 (kubelet gRPC probes cannot do TLS/mTLS).
+          startupProbe:
+            grpc:
+              port: {{ int .Values.daemon.healthPort }}
+            periodSeconds: 2
+            failureThreshold: 30
           readinessProbe:
             grpc:
-              port: 5696
-            initialDelaySeconds: 5
+              port: {{ int .Values.daemon.healthPort }}
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
             grpc:
-              port: 5696
-            initialDelaySeconds: 15
+              port: {{ int .Values.daemon.healthPort }}
             periodSeconds: 20
             timeoutSeconds: 3
             failureThreshold: 3
           securityContext:
             runAsNonRoot: true
-            runAsUser: 65534
-            runAsGroup: 65534
+            runAsUser: 65532
+            runAsGroup: 65532
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
+            privileged: false
             capabilities:
               drop:
                 - ALL
+            seccompProfile:
+              type: RuntimeDefault
       volumes:
         - name: config
           configMap:
             name: {{ include "craton-hsm.fullname" . }}-config
-        - name: security
-          secret:
-            secretName: {{ include "craton-hsm.fullname" . }}-security
+            defaultMode: 0444
         {{- if .Values.tls.enabled }}
         - name: tls
           secret:
             secretName: {{ .Values.tls.secretName }}
+            defaultMode: 0440
         {{- end }}
         {{- if .Values.tls.clientCaSecretName }}
         - name: tls-client-ca
           secret:
             secretName: {{ .Values.tls.clientCaSecretName }}
+            defaultMode: 0444
         {{- end }}
-        {{- if .Values.persistence.enabled }}
+        {{- if .Values.tls.clientCrlSecretName }}
+        - name: tls-client-crl
+          secret:
+            secretName: {{ .Values.tls.clientCrlSecretName }}
+            defaultMode: 0444
+        {{- end }}
         - name: data
+          {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "craton-hsm.fullname" . }}-data
-        {{- end }}
+          {{- else }}
+          emptyDir:
+            sizeLimit: 64Mi
+          {{- end }}

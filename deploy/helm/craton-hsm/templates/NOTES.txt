@@ -1,29 +1,37 @@
 Craton HSM has been deployed as {{ .Release.Name }}.
 
-  gRPC endpoint: {{ include "craton-hsm.fullname" . }}:{{ .Values.service.port }}
+  gRPC endpoint: {{ include "craton-hsm.fullname" . }}:{{ .Values.service.port }} (TLS 1.3{{ if .Values.tls.clientCaSecretName }}, client certificate required{{ end }})
 
 {{- if not .Values.tls.enabled }}
 
-  ⚠  WARNING: TLS is DISABLED. gRPC traffic is unencrypted.
-     Set tls.enabled=true and provide a TLS secret for production use.
+  WARNING: TLS is DISABLED. The daemon only listens on a loopback address
+     and is unreachable through the Service.
 {{- end }}
 
 {{- if and .Values.tls.enabled .Values.tls.disableMtls }}
 
-  ⚠  WARNING: Mutual TLS (mTLS) is EXPLICITLY DISABLED (tls.disableMtls=true).
-     Any pod with network access can call the HSM without client authentication.
-     Remove tls.disableMtls and set tls.clientCaSecretName for production use.
+  WARNING: Mutual TLS (mTLS) is EXPLICITLY DISABLED (tls.disableMtls=true).
+     Every TLS client is an anonymous, per-connection principal.
 {{- end }}
+
+{{- if not .Values.tls.adminCertSha256 }}
+
+  NOTE: tls.adminCertSha256 is empty — InitToken, SO login and InitPin are
+     unavailable over gRPC. Add the SHA-256 fingerprint of an administrator
+     client certificate to provision the token.
+{{- end }}
+
+  Key persistence: keys and token state survive restarts only if the HSM core
+  provides a persistent store. Until then the daemon refuses CKA_TOKEN=true
+  objects and all keys are EPHEMERAL (lost on every restart), even though a
+  PersistentVolumeClaim is {{ if .Values.persistence.enabled }}provisioned{{ else }}not provisioned{{ end }}.
 
 {{- if and (not .Values.persistence.enabled) .Values.audit.acceptNoLogging }}
 
-  ⚠  WARNING: Persistence is DISABLED and audit.acceptNoLogging=true.
-     HSM key material and audit logs will be LOST on pod restart.
-     Set persistence.enabled=true for production use.
+  WARNING: Persistence is DISABLED and audit.acceptNoLogging=true.
+     Audit logs are written to an emptyDir and are LOST on pod deletion.
 {{- end }}
 
-  NetworkPolicy is active — client pods must have the label:
-    craton-hsm-client: "true"
-
-  Security configuration is stored in Secret:
-    {{ include "craton-hsm.fullname" . }}-security
+  NetworkPolicy is active — client pods must have the labels:
+{{ toYaml .Values.networkPolicy.clientPodLabels | indent 4 }}
+  (mTLS, not the label, is the trust boundary.)
