@@ -369,10 +369,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // (H4-16) Make every queued audit event durable before exiting.
+    // (H4-16, A1-10) Zeroize all SSPs and make every queued audit event
+    // durable before exiting.
     let sh = shared.clone();
-    let _ = tokio::task::spawn_blocking(move || sh.flush_audit()).await;
-    tracing::info!("audit log flushed; shutdown complete");
+    let _ = tokio::task::spawn_blocking(move || sh.finalize()).await;
+    tracing::info!("keys zeroized and audit log flushed; shutdown complete");
     Ok(())
 }
 

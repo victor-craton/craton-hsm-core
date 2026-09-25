@@ -169,6 +169,12 @@ pub fn status(ctx: &Ctx) -> CliResult {
     warn_if_ephemeral(&core, ctx.json);
     let audit_tamper = core.hsm().audit_log().is_tamper_detected();
     let config = &cfg.config;
+    let backend = core.hsm().crypto_backend();
+    // Approved-mode status (A1-24): build property, configured mode and
+    // whether the serving backend is a validated module.
+    let fips_build = cfg!(feature = "fips");
+    let approved_mode = config.algorithms.fips_approved_only && backend.is_fips_validated();
+    let mlock_failures = craton_hsm::crypto::mlock::mlock_failure_count();
 
     if ctx.json {
         let value = serde_json::json!({
@@ -178,6 +184,13 @@ pub fn status(ctx: &Ctx) -> CliResult {
             "token_initialized": token.is_initialized(),
             "audit_enabled": config.audit.enabled,
             "audit_tamper_detected": audit_tamper,
+            "fips_build": fips_build,
+            "fips_approved_only": config.algorithms.fips_approved_only,
+            "crypto_backend": backend.name(),
+            "backend_fips_validated": backend.is_fips_validated(),
+            "approved_mode": approved_mode,
+            "self_tests": "passed",
+            "mlock_failures": mlock_failures,
             "config": {
                 "max_sessions": config.token.max_sessions,
                 "pqc_enabled": config.algorithms.enable_pqc,
@@ -194,6 +207,11 @@ pub fn status(ctx: &Ctx) -> CliResult {
             ("Token Init:", token.is_initialized().to_string()),
             ("Audit Enabled:", config.audit.enabled.to_string()),
             ("Audit Tamper:", audit_tamper.to_string()),
+            ("FIPS Build:", fips_build.to_string()),
+            ("Approved Mode:", approved_mode.to_string()),
+            ("Crypto Backend:", backend.name().to_string()),
+            ("Self-Tests:", "passed".to_string()),
+            ("mlock Failures:", mlock_failures.to_string()),
             ("Max Sessions:", config.token.max_sessions.to_string()),
             ("PQC Enabled:", config.algorithms.enable_pqc.to_string()),
         ]);

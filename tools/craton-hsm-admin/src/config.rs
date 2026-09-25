@@ -69,7 +69,9 @@ pub fn load_strict(path: &Path) -> CliResult<LoadedConfig> {
 
     // Anchor relative paths to the config directory first, so validation
     // (symlink / system-directory checks) sees the paths actually used.
-    let config = anchor_paths(parse(file, path)?, &dir);
+    let mut config = anchor_paths(parse(file, path)?, &dir);
+    // Non-overridable build policy (FIPS builds force approved mode).
+    config.enforce_build_policy();
     config
         .validate()
         .map_err(|e| config_err(path, format!("validation failed: {e}")))?;

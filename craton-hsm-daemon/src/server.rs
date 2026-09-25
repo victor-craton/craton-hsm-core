@@ -335,6 +335,12 @@ impl Shared {
         self.hsm.audit_log().flush();
     }
 
+    /// Shutdown: zeroize keys, PIN verifiers and storage keys, record the
+    /// Finalize event and flush the audit log (A1-10, H4-16).
+    pub fn finalize(&self) {
+        self.hsm.finalize();
+    }
+
     /// Register ownership of a freshly inserted object; destroys it if the
     /// creating session vanished meanwhile.
     fn track_new_object(
@@ -1894,6 +1900,15 @@ impl HsmServiceImpl {
         let alg = cipher_alg_for(mech_type, &param, &key.read(), decrypt)?;
         drop(param);
         let fips_mode = self.shared.hsm.algorithm_config().fips_approved_only;
+        if matches!(alg, CipherAlg::AesGcm(Some(_)))
+            && !decrypt
+            && !self.shared.hsm.algorithm_config().caller_gcm_iv_allowed()
+        {
+            return Err(Status::invalid_argument(
+                "Caller-supplied GCM IVs are not permitted by policy; omit the parameter so the \
+                 module generates the IV",
+            ));
+        }
         // Plaintext (input of encrypt, output of decrypt) stays in zeroizing
         // buffers until the response message is built.
         let input = Zeroizing::new(input);
