@@ -34,7 +34,7 @@ v2.40 functions that return `CKR_FUNCTION_NOT_SUPPORTED`.
 
 - **PKCS#11 C ABI**: the 68 PKCS#11 v2.40 entry points plus v3.0 interface discovery
 - **Classical cryptography**: RSA (2048/3072/4096), ECDSA and ECDH (P-256/P-384), EdDSA (Ed25519), AES (GCM/CBC/CTR, key wrap), SHA-1/SHA-2/SHA-3 digests
-- **Post-quantum cryptography** (vendor-defined mechanisms): ML-KEM-512/768/1024, ML-DSA-44/65/87, SLH-DSA-SHA2-128s/256s. *The PQC crates are pre-release (release-candidate) versions with no stability guarantee and no CAVP validation; see [FIPS Gap Analysis](docs/fips-gap-analysis.md).*
+- **Post-quantum cryptography** (vendor-defined mechanisms): ML-KEM-512/768/1024, ML-DSA-44/65/87, SLH-DSA-SHA2-128s/256s. *The PQC crates are pre-release (release-candidate) versions, pinned exactly, with no independent audit history, no stability guarantee (encodings may change between candidates) and no CAVP validation; PQC is disabled in approved-only mode and `fips` builds. See [Security Model](docs/security-model.md#pre-release-post-quantum-crates) and [FIPS Gap Analysis](docs/fips-gap-analysis.md).*
 - **Multi-part operations**: streaming sign/verify and encrypt/decrypt
 - **SP 800-90A HMAC_DRBG** (HMAC-SHA-256, prediction resistance) used for key generation and `C_GenerateRandom`; seeded from the operating-system RNG (the entropy source is not SP 800-90B/ESV validated)
 - **Power-on self-tests**: Ed25519 software-integrity test plus known-answer self-tests (see [FIPS 140-3 document §9](docs/fips-140-3-certification.md#9-self-tests) for the exact list); pairwise-consistency tests on every key-pair generation

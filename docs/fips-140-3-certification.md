@@ -473,7 +473,7 @@ AWS-LC configuration and must not be used for a claimed OE.
 |---|---|
 | Rust toolchain | as pinned in `rust-toolchain.toml` (1.94.1); MSRV 1.89 |
 | AWS-LC backend | CMake, Clang, Go (for `aws-lc-fips-sys`) |
-| Approved-only build | `cargo build --release --locked --features fips,awslc-backend`, with `CRATON_HSM_INTEGRITY_PUBLIC_KEY` set, followed by signing (§4.1) — exactly what the release workflow's `-fips` flavour does |
+| Approved-only build | `cargo build --release --locked -p craton-hsm --no-default-features --features fips` (the release workflow's `-fips` flavour builds with `craton-hsm/fips,craton-hsm/awslc-backend`), with `CRATON_HSM_INTEGRITY_PUBLIC_KEY` set, followed by signing (§4.1) |
 
 ---
 
@@ -726,9 +726,18 @@ verification procedure.
 
 ```bash
 export CRATON_HSM_INTEGRITY_PUBLIC_KEY=<64 hex chars>
-cargo build --release --locked --features fips,awslc-backend --lib
+cargo build --release --locked -p craton-hsm --no-default-features --features fips --lib
 ./tools/sign-integrity.sh target/release/libcraton_hsm.so
-cargo test --locked --features fips,awslc-backend -- --test-threads=1
+
+# Tests: in a fips build every test executable is "the module" for the
+# integrity test, so it must be signed too (CI uses a throw-away key; see the
+# `features` job in .github/workflows/ci.yml).
+cargo test --locked -p craton-hsm --no-default-features --features fips \
+  --lib --test fips_approved_mode --no-run --message-format=json \
+  | jq -r 'select(.reason=="compiler-artifact" and .profile.test and .executable!=null) | .executable' \
+  | while read -r exe; do ./tools/sign-integrity.sh "$exe" /path/to/test-key.pem; done
+cargo test --locked -p craton-hsm --no-default-features --features fips \
+  --lib --test fips_approved_mode -- --test-threads=1
 ```
 
 The configuration file is ignored in `fips` builds, so there is no FIPS
