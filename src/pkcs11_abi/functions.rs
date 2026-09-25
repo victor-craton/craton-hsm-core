@@ -58,6 +58,7 @@ use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::constants::*;
 use crate::pkcs11_abi::types::*;
 use crate::session::session::{ActiveOperation, FindContext};
+use crate::store::attributes::{ObjectContext, ObjectOrigin};
 use crate::store::key_material::RawKeyMaterial;
 use crate::store::object::StoredObject;
 use zeroize::Zeroizing;
@@ -260,7 +261,13 @@ pub extern "C" fn C_Initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
                 return CKR_GENERAL_ERROR;
             }
         };
-        let core = Arc::new(HsmCore::new(&config));
+        let core = match HsmCore::try_new(&config) {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                tracing::error!("HSM core initialization failed: {}", e);
+                return CKR_GENERAL_ERROR;
+            }
+        };
 
         // Record the PID for fork detection
         INIT_PID.store(current_pid(), Ordering::Release);
@@ -290,10 +297,9 @@ pub extern "C" fn C_Finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
             None => return CKR_CRYPTOKI_NOT_INITIALIZED,
         };
 
-        let _ = hsm
-            .audit_log
-            .record(0, AuditOperation::Finalize, AuditResult::Success, None);
-        hsm.audit_log.flush();
+        // Zeroize keys, PIN verifiers and storage keys and close all sessions
+        // (A1-10); records the Finalize audit event and flushes the log.
+        hsm.finalize();
 
         // Reset state so a subsequent C_Initialize can succeed (PKCS#11 spec compliant)
         *guard = None;
@@ -511,15 +517,13 @@ pub extern "C" fn C_InitToken(
         let mut label = [b' '; 32];
         label.copy_from_slice(label_bytes);
 
-        // Close all sessions for this slot first
-        hsm.session_manager.close_all_sessions(slot_id, &token);
+        drop(token);
 
-        // Per PKCS#11 spec: C_InitToken destroys all objects on the token
-        hsm.object_store.clear();
-        // All keys are destroyed — safe to reset all GCM/IV counters
-        crate::crypto::encrypt::force_reset_all_counters();
-
-        match token.init_token(pin, &label) {
+        // H1-01/H3-01: HsmCore::init_token returns CKR_SESSION_EXISTS while
+        // sessions are open, verifies the existing SO PIN under the SO
+        // lockout policy, and only then destroys this slot's objects (and
+        // their per-key counters) — never other slots'.
+        match hsm.init_token(slot_id, pin, &label) {
             Ok(()) => CKR_OK,
             Err(e) => err_to_rv(e),
         }
@@ -556,11 +560,13 @@ pub extern "C" fn C_InitPIN(
         if !sess.state.is_so() {
             return CKR_USER_NOT_LOGGED_IN;
         }
+        drop(sess);
+        drop(token);
         if (pin_len as usize) > MAX_PIN_BYTES {
             return CKR_PIN_LEN_RANGE;
         }
         let pin = unsafe { slice::from_raw_parts(p_pin, pin_len as usize) };
-        match token.init_pin(pin) {
+        match hsm.init_pin(session, pin) {
             Ok(()) => CKR_OK,
             Err(e) => err_to_rv(e),
         }
@@ -598,9 +604,11 @@ pub extern "C" fn C_SetPIN(
         if (old_len as usize) > MAX_PIN_BYTES || (new_len as usize) > MAX_PIN_BYTES {
             return CKR_PIN_LEN_RANGE;
         }
+        drop(sess);
+        drop(token);
         let old_pin = unsafe { slice::from_raw_parts(p_old_pin, old_len as usize) };
         let new_pin = unsafe { slice::from_raw_parts(p_new_pin, new_len as usize) };
-        match token.set_pin(old_pin, new_pin) {
+        match hsm.set_pin(session, old_pin, new_pin) {
             Ok(()) => CKR_OK,
             Err(e) => err_to_rv(e),
         }
@@ -799,12 +807,11 @@ pub extern "C" fn C_OpenSession(
             return CKR_ARGUMENTS_BAD;
         }
 
-        let token = match hsm.slot_manager.get_token(slot_id) {
-            Ok(t) => t,
-            Err(e) => return err_to_rv(e),
-        };
-
-        match hsm.session_manager.open_session(slot_id, flags, &token) {
+        match hsm.open_session(
+            slot_id,
+            flags,
+            crate::session::manager::PROCESS_APPLICATION,
+        ) {
             Ok(handle) => {
                 unsafe {
                     *ph_session = handle;
@@ -825,18 +832,9 @@ pub extern "C" fn C_CloseSession(session: CK_SESSION_HANDLE) -> CK_RV {
             Err(rv) => return rv,
         };
 
-        // Need to get the slot_id from the session first
-        let sess = match hsm.session_manager.get_session(session) {
-            Ok(s) => s,
-            Err(e) => return err_to_rv(e),
-        };
-        let slot_id = sess.read().slot_id;
-        let token = match hsm.slot_manager.get_token(slot_id) {
-            Ok(t) => t,
-            Err(e) => return err_to_rv(e),
-        };
-
-        match hsm.session_manager.close_session(session, &token) {
+        // Closes the session, destroys its session objects (H3-07) and logs
+        // the token out when this was its last session (H1-06).
+        match hsm.close_session(session) {
             Ok(()) => CKR_OK,
             Err(e) => err_to_rv(e),
         }
@@ -851,13 +849,10 @@ pub extern "C" fn C_CloseAllSessions(slot_id: CK_SLOT_ID) -> CK_RV {
             Ok(h) => h,
             Err(rv) => return rv,
         };
-        let token = match hsm.slot_manager.get_token(slot_id) {
-            Ok(t) => t,
-            Err(e) => return err_to_rv(e),
-        };
-
-        hsm.session_manager.close_all_sessions(slot_id, &token);
-        CKR_OK
+        match hsm.close_all_sessions(slot_id) {
+            Ok(()) => CKR_OK,
+            Err(e) => err_to_rv(e),
+        }
     })
     .unwrap_or(CKR_GENERAL_ERROR)
 }
@@ -926,32 +921,12 @@ pub extern "C" fn C_Login(
             unsafe { slice::from_raw_parts(p_pin, pin_len as usize) }
         };
 
-        match token.login(user_type, pin) {
-            Ok(()) => {
-                // Update all sessions for this slot
-                let _ = hsm.session_manager.login_all(slot_id, user_type);
-                let _ = hsm.audit_log.record(
-                    session as u64,
-                    AuditOperation::Login {
-                        user_type: user_type as u64,
-                    },
-                    AuditResult::Success,
-                    None,
-                );
-                CKR_OK
-            }
-            Err(e) => {
-                let rv = err_to_rv(e);
-                let _ = hsm.audit_log.record(
-                    session as u64,
-                    AuditOperation::Login {
-                        user_type: user_type as u64,
-                    },
-                    AuditResult::Failure(rv as u64),
-                    None,
-                );
-                rv
-            }
+        drop(token);
+        // Token login + session promotion + (persistent) object load, rolled
+        // back as a unit on failure; audited by the core.
+        match hsm.login(session, user_type, pin) {
+            Ok(()) => CKR_OK,
+            Err(e) => err_to_rv(e),
         }
     })
     .unwrap_or(CKR_GENERAL_ERROR)
@@ -975,17 +950,10 @@ pub extern "C" fn C_Logout(session: CK_SESSION_HANDLE) -> CK_RV {
             Err(e) => return err_to_rv(e),
         };
 
-        match token.logout() {
-            Ok(()) => {
-                let _ = hsm.session_manager.logout_all(slot_id);
-                let _ = hsm.audit_log.record(
-                    session as u64,
-                    AuditOperation::Logout,
-                    AuditResult::Success,
-                    None,
-                );
-                CKR_OK
-            }
+        drop(token);
+        let _ = slot_id;
+        match hsm.logout(session) {
+            Ok(()) => CKR_OK,
             Err(e) => err_to_rv(e),
         }
     })
@@ -1041,9 +1009,11 @@ pub extern "C" fn C_CreateObject(
         if is_key_object && !sess_read.state.is_logged_in() {
             return CKR_USER_NOT_LOGGED_IN;
         }
+        // Objects carry the session's real slot and owner (H1-13, H3-07).
+        let ctx = sess_read.object_ctx();
         drop(sess_read);
 
-        match hsm.object_store.create_object(&template) {
+        match hsm.object_store.create_object_in(&template, &ctx) {
             Ok(handle) => {
                 let _ = hsm.audit_log.record(
                     session as u64,
@@ -1078,29 +1048,12 @@ pub extern "C" fn C_DestroyObject(session: CK_SESSION_HANDLE, object: CK_OBJECT_
             return CKR_SESSION_READ_ONLY;
         }
 
-        // PKCS#11: check CKA_DESTROYABLE before destroying
-        let obj = match hsm.object_store.get_object(object) {
-            Ok(o) => o,
-            Err(e) => return err_to_rv(e),
-        };
-        let obj_read = obj.read();
-        if !obj_read.destroyable {
-            return CKR_ATTRIBUTE_READ_ONLY;
-        }
-        // Capture key material reference for GCM counter cleanup
-        let key_bytes: Option<Vec<u8>> = obj_read
-            .key_material
-            .as_ref()
-            .map(|km| km.as_bytes().to_vec());
-        drop(obj_read);
-        drop(obj);
-
-        match hsm.object_store.destroy_object(object) {
+        // The store checks CKA_DESTROYABLE (CKR_ACTION_PROHIBITED), deletes
+        // any persisted record first, zeroizes the key material and removes
+        // its per-key GCM/IV counters — no plaintext copy is made here.
+        let slot = sess.read().slot_id;
+        match hsm.object_store.destroy_object_in(object, slot) {
             Ok(()) => {
-                // Clean up per-key GCM/IV counters now that the key is destroyed
-                if let Some(ref kb) = key_bytes {
-                    crate::crypto::encrypt::remove_gcm_counter(kb);
-                }
                 let _ = hsm.audit_log.record(
                     session as u64,
                     AuditOperation::DestroyObject,
@@ -1135,7 +1088,7 @@ pub extern "C" fn C_GetObjectSize(
         };
 
         // PKCS#11 §4.4: Private objects must not be accessible without login.
-        let obj_ref = match hsm.object_store.get_object(object) {
+        let obj_ref = match hsm.object_store.get_object_in_slot(object, sess.read().slot_id) {
             Ok(o) => o,
             Err(e) => return err_to_rv(e),
         };
@@ -1176,7 +1129,7 @@ pub extern "C" fn C_GetAttributeValue(
             Err(e) => return err_to_rv(e),
         };
 
-        let obj = match hsm.object_store.get_object(object) {
+        let obj = match hsm.object_store.get_object_in_slot(object, sess.read().slot_id) {
             Ok(o) => o,
             Err(e) => return err_to_rv(e),
         };
@@ -1193,6 +1146,21 @@ pub extern "C" fn C_GetAttributeValue(
         let mut rv = CKR_OK;
 
         for attr in attrs.iter_mut() {
+            // Audit every request for secret key material (granted or not).
+            if crate::store::attributes::is_protected_secret_attribute(&obj, attr.attr_type) {
+                let _ = hsm.audit_log.record(
+                    session as u64,
+                    AuditOperation::GetAttributeValueSensitive {
+                        attribute: attr.attr_type as u64,
+                    },
+                    if obj.sensitive || !obj.extractable {
+                        AuditResult::Failure(CKR_ATTRIBUTE_SENSITIVE as u64)
+                    } else {
+                        AuditResult::Success
+                    },
+                    None,
+                );
+            }
             match crate::store::attributes::read_attribute(&obj, attr.attr_type) {
                 Ok(Some(value)) => {
                     if attr.p_value.is_null() {
@@ -1255,42 +1223,43 @@ pub extern "C" fn C_SetAttributeValue(
             }
         }
 
-        let obj = match hsm.object_store.get_object(object) {
-            Ok(o) => o,
-            Err(e) => return err_to_rv(e),
+        let (slot, is_so, is_user) = {
+            let s = sess.read();
+            (s.slot_id, s.state.is_so(), s.state.is_logged_in())
         };
-        let mut obj = obj.write();
-
-        // PKCS#11 §4.4: Private objects must not be accessible without login.
-        if obj.private && !sess.read().state.is_logged_in() {
-            return CKR_USER_NOT_LOGGED_IN;
-        }
-
-        if !obj.modifiable {
-            return CKR_ATTRIBUTE_READ_ONLY;
+        {
+            let obj = match hsm.object_store.get_object_in_slot(object, slot) {
+                Ok(o) => o,
+                Err(e) => return err_to_rv(e),
+            };
+            // PKCS#11 §4.4: Private objects must not be accessible without login.
+            if obj.read().private && !is_user {
+                return CKR_USER_NOT_LOGGED_IN;
+            }
         }
 
         let template = match parse_template(p_template, count) {
             Ok(t) => t,
             Err(rv) => return rv,
         };
-        for (attr_type, value) in &template {
-            match *attr_type {
-                // PKCS#11 §4.1.2: Only CKA_LABEL and CKA_ID are modifiable
-                // after object creation. All other attributes (especially
-                // CKA_CLASS, CKA_KEY_TYPE, CKA_SENSITIVE, CKA_EXTRACTABLE,
-                // CKA_PRIVATE, permission flags, key material, etc.) are
-                // read-only once the object exists.
-                CKA_LABEL => obj.label = value.clone(),
-                CKA_ID => obj.id = value.clone(),
-                // Reject all other attributes as read-only
-                _ => {
-                    return CKR_ATTRIBUTE_READ_ONLY;
-                }
-            }
+        // Atomic, persisted modification with PKCS#11 one-way rules,
+        // CKA_MODIFIABLE and SO-only CKA_TRUSTED enforced by the store (H1-09).
+        let result = hsm
+            .object_store
+            .set_attributes(object, slot, &template, is_so);
+        let _ = hsm.audit_log.record(
+            session as u64,
+            AuditOperation::SetAttributeValue,
+            match &result {
+                Ok(()) => AuditResult::Success,
+                Err(e) => AuditResult::Failure(CK_RV::from(e.clone()) as u64),
+            },
+            None,
+        );
+        match result {
+            Ok(()) => CKR_OK,
+            Err(e) => err_to_rv(e),
         }
-
-        CKR_OK
     })
     .unwrap_or(CKR_GENERAL_ERROR)
 }
@@ -1327,7 +1296,9 @@ pub extern "C" fn C_FindObjectsInit(
         };
 
         let is_logged_in = sess.state.is_logged_in();
-        let results = hsm.object_store.find_objects(&template, is_logged_in);
+        let results =
+            hsm.object_store
+                .find_objects_for_slot(&template, is_logged_in, Some(sess.slot_id));
 
         sess.find_context = Some(FindContext {
             results,
@@ -1448,7 +1419,7 @@ pub extern "C" fn C_EncryptInit(
         }
 
         // Verify key exists and has CKA_ENCRYPT
-        let obj = match hsm.object_store.get_object(key) {
+        let obj = match hsm.object_store.get_object_in_slot(key, sess.slot_id) {
             Ok(o) => o,
             Err(_) => return CKR_KEY_HANDLE_INVALID,
         };
@@ -1561,7 +1532,7 @@ pub extern "C" fn C_Encrypt(
         let data = unsafe { slice::from_raw_parts(p_data, data_len as usize) };
 
         // Get key material
-        let obj = match hsm.object_store.get_object(key_handle) {
+        let obj = match hsm.object_store.get_object_in_slot(key_handle, sess.slot_id) {
             Ok(o) => o,
             Err(e) => {
                 sess.active_operation = None;
@@ -1745,7 +1716,7 @@ pub extern "C" fn C_DecryptInit(
             return rv;
         }
 
-        let obj = match hsm.object_store.get_object(key) {
+        let obj = match hsm.object_store.get_object_in_slot(key, sess.slot_id) {
             Ok(o) => o,
             Err(_) => return CKR_KEY_HANDLE_INVALID,
         };
@@ -1816,7 +1787,7 @@ pub extern "C" fn C_Decrypt(
         }
         let data = unsafe { slice::from_raw_parts(p_encrypted_data, encrypted_data_len as usize) };
 
-        let obj = match hsm.object_store.get_object(key_handle) {
+        let obj = match hsm.object_store.get_object_in_slot(key_handle, sess.slot_id) {
             Ok(o) => o,
             Err(e) => {
                 sess.active_operation = None;
@@ -1990,7 +1961,7 @@ pub extern "C" fn C_SignInit(
             return rv;
         }
 
-        let obj = match hsm.object_store.get_object(key) {
+        let obj = match hsm.object_store.get_object_in_slot(key, sess.slot_id) {
             Ok(o) => o,
             Err(_) => return CKR_KEY_HANDLE_INVALID,
         };
@@ -2059,7 +2030,7 @@ pub extern "C" fn C_Sign(
         }
         let data = unsafe { slice::from_raw_parts(p_data, data_len as usize) };
 
-        let obj = match hsm.object_store.get_object(key_handle) {
+        let obj = match hsm.object_store.get_object_in_slot(key_handle, sess.slot_id) {
             Ok(o) => o,
             Err(e) => {
                 sess.active_operation = None;
@@ -2370,7 +2341,7 @@ pub extern "C" fn C_VerifyInit(
             return rv;
         }
 
-        let obj = match hsm.object_store.get_object(key) {
+        let obj = match hsm.object_store.get_object_in_slot(key, sess.slot_id) {
             Ok(o) => o,
             Err(_) => return CKR_KEY_HANDLE_INVALID,
         };
@@ -2444,7 +2415,7 @@ pub extern "C" fn C_Verify(
         let data = unsafe { slice::from_raw_parts(p_data, data_len as usize) };
         let signature = unsafe { slice::from_raw_parts(p_signature, signature_len as usize) };
 
-        let obj = match hsm.object_store.get_object(key_handle) {
+        let obj = match hsm.object_store.get_object_in_slot(key_handle, sess.slot_id) {
             Ok(o) => o,
             Err(e) => {
                 sess.active_operation = None;
@@ -2661,7 +2632,11 @@ pub extern "C" fn C_GenerateKey(
             }
         }
 
-        if let Err(e) = hsm.object_store.insert_object(obj) {
+        let ctx = sess.read().object_ctx();
+        if let Err(e) =
+            hsm.object_store
+                .insert_object_in(obj, &ctx, ObjectOrigin::Generated { mechanism })
+        {
             return err_to_rv(e);
         }
 
@@ -2740,15 +2715,18 @@ pub extern "C" fn C_GenerateKeyPair(
             }
         };
 
+        let ctx = sess.read().object_ctx();
         let result = match mechanism {
-            CKM_RSA_PKCS_KEY_PAIR_GEN => generate_rsa_keypair(&hsm, &pub_template, &priv_template),
-            CKM_EC_KEY_PAIR_GEN => generate_ec_keypair(&hsm, &pub_template, &priv_template),
-            CKM_EDDSA => generate_ed25519_keypair(&hsm, &pub_template, &priv_template),
+            CKM_RSA_PKCS_KEY_PAIR_GEN => {
+                generate_rsa_keypair(&hsm, &ctx, &pub_template, &priv_template)
+            }
+            CKM_EC_KEY_PAIR_GEN => generate_ec_keypair(&hsm, &ctx, &pub_template, &priv_template),
+            CKM_EDDSA => generate_ed25519_keypair(&hsm, &ctx, &pub_template, &priv_template),
             m if pqc::is_ml_kem_mechanism(m)
                 || pqc::is_ml_dsa_mechanism(m)
                 || pqc::is_slh_dsa_mechanism(m) =>
             {
-                generate_pqc_keypair(&hsm, mechanism, &pub_template, &priv_template)
+                generate_pqc_keypair(&hsm, &ctx, mechanism, &pub_template, &priv_template)
             }
             _ => return CKR_MECHANISM_INVALID,
         };
@@ -2780,6 +2758,7 @@ pub extern "C" fn C_GenerateKeyPair(
 /// RSA key pair generation helper
 fn generate_rsa_keypair(
     hsm: &HsmCore,
+    ctx: &ObjectContext,
     pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
     priv_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
 ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE, u32), CK_RV> {
@@ -2835,10 +2814,10 @@ fn generate_rsa_keypair(
     }
 
     hsm.object_store
-        .insert_object(pub_obj)
+        .insert_object_in(pub_obj, ctx, ObjectOrigin::Generated { mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN })
         .map_err(|e| err_to_rv(e))?;
     hsm.object_store
-        .insert_object(priv_obj)
+        .insert_object_in(priv_obj, ctx, ObjectOrigin::Generated { mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN })
         .map_err(|e| err_to_rv(e))?;
     Ok((pub_handle, priv_handle, modulus_bits))
 }
@@ -2846,6 +2825,7 @@ fn generate_rsa_keypair(
 /// EC key pair generation helper (P-256 / P-384)
 fn generate_ec_keypair(
     hsm: &HsmCore,
+    ctx: &ObjectContext,
     pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
     priv_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
 ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE, u32), CK_RV> {
@@ -2921,10 +2901,10 @@ fn generate_ec_keypair(
     }
 
     hsm.object_store
-        .insert_object(pub_obj)
+        .insert_object_in(pub_obj, ctx, ObjectOrigin::Generated { mechanism: CKM_EC_KEY_PAIR_GEN })
         .map_err(|e| err_to_rv(e))?;
     hsm.object_store
-        .insert_object(priv_obj)
+        .insert_object_in(priv_obj, ctx, ObjectOrigin::Generated { mechanism: CKM_EC_KEY_PAIR_GEN })
         .map_err(|e| err_to_rv(e))?;
     Ok((pub_handle, priv_handle, key_bits))
 }
@@ -2932,6 +2912,7 @@ fn generate_ec_keypair(
 /// Ed25519 key pair generation helper
 fn generate_ed25519_keypair(
     hsm: &HsmCore,
+    ctx: &ObjectContext,
     pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
     priv_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
 ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE, u32), CK_RV> {
@@ -2978,10 +2959,10 @@ fn generate_ed25519_keypair(
     }
 
     hsm.object_store
-        .insert_object(pub_obj)
+        .insert_object_in(pub_obj, ctx, ObjectOrigin::Generated { mechanism: CKM_EDDSA })
         .map_err(|e| err_to_rv(e))?;
     hsm.object_store
-        .insert_object(priv_obj)
+        .insert_object_in(priv_obj, ctx, ObjectOrigin::Generated { mechanism: CKM_EDDSA })
         .map_err(|e| err_to_rv(e))?;
     Ok((pub_handle, priv_handle, 256))
 }
@@ -2989,6 +2970,7 @@ fn generate_ed25519_keypair(
 /// PQC key pair generation helper (ML-KEM, ML-DSA, SLH-DSA)
 fn generate_pqc_keypair(
     hsm: &HsmCore,
+    ctx: &ObjectContext,
     mechanism: CK_MECHANISM_TYPE,
     pub_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
     priv_template: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)],
@@ -3080,10 +3062,10 @@ fn generate_pqc_keypair(
     }
 
     hsm.object_store
-        .insert_object(pub_obj)
+        .insert_object_in(pub_obj, ctx, ObjectOrigin::Generated { mechanism: mechanism })
         .map_err(|e| err_to_rv(e))?;
     hsm.object_store
-        .insert_object(priv_obj)
+        .insert_object_in(priv_obj, ctx, ObjectOrigin::Generated { mechanism: mechanism })
         .map_err(|e| err_to_rv(e))?;
     Ok((pub_handle, priv_handle, key_bits))
 }
@@ -3396,6 +3378,12 @@ pub extern "C" fn C_SetOperationState(
 
         let blob = unsafe { slice::from_raw_parts(pOperationState, ulOperationStateLen as usize) };
 
+        // Objects are only valid in the session's slot (H1-13).
+        let op_slot = match hsm.session_manager.get_session(hSession) {
+            Ok(s) => s.read().slot_id,
+            Err(e) => return err_to_rv(e),
+        };
+
         let (op_type, mechanism, key_handle, _mechanism_param, data) =
             match ActiveOperation::deserialize_state(blob, &hsm.state_hmac_key) {
                 Ok(v) => v,
@@ -3430,7 +3418,7 @@ pub extern "C" fn C_SetOperationState(
                     key_handle
                 };
                 // Validate the key handle exists
-                if hsm.object_store.get_object(resolved_key).is_err() {
+                if hsm.object_store.get_object_in_slot(resolved_key, op_slot).is_err() {
                     return CKR_KEY_HANDLE_INVALID;
                 }
                 // Try to create a hasher for hash-then-sign mechanisms
@@ -3459,7 +3447,7 @@ pub extern "C" fn C_SetOperationState(
                 } else {
                     key_handle
                 };
-                if hsm.object_store.get_object(resolved_key).is_err() {
+                if hsm.object_store.get_object_in_slot(resolved_key, op_slot).is_err() {
                     return CKR_KEY_HANDLE_INVALID;
                 }
                 let hasher = hsm
@@ -3532,7 +3520,7 @@ pub extern "C" fn C_CopyObject(
         }
 
         // Get source object
-        let src_arc = match hsm.object_store.get_object(h_object) {
+        let src_arc = match hsm.object_store.get_object_in_slot(h_object, sess.slot_id) {
             Ok(o) => o,
             Err(_) => return CKR_OBJECT_HANDLE_INVALID,
         };
@@ -3726,7 +3714,10 @@ pub extern "C" fn C_CopyObject(
         }
 
         // Insert the new object
-        let result_handle = match hsm.object_store.insert_object(new_obj) {
+        let result_handle = match hsm
+            .object_store
+            .insert_object_in(new_obj, &sess.object_ctx(), ObjectOrigin::Copied)
+        {
             Ok(h) => h,
             Err(e) => return err_to_rv(e),
         };
@@ -3925,7 +3916,7 @@ pub extern "C" fn C_EncryptFinal(
         let obj = if let Some(cached) = cached_object {
             cached
         } else {
-            match hsm.object_store.get_object(key_handle) {
+            match hsm.object_store.get_object_in_slot(key_handle, sess.slot_id) {
                 Ok(o) => o,
                 Err(e) => {
                     sess.active_operation = None;
@@ -4138,7 +4129,7 @@ pub extern "C" fn C_DecryptFinal(
         let obj = if let Some(cached) = cached_object {
             cached
         } else {
-            match hsm.object_store.get_object(key_handle) {
+            match hsm.object_store.get_object_in_slot(key_handle, sess.slot_id) {
                 Ok(o) => o,
                 Err(e) => {
                     sess.active_operation = None;
@@ -4408,7 +4399,7 @@ pub extern "C" fn C_DigestKey(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE)
         }
 
         // Look up the key object
-        let key_arc = match hsm.object_store.get_object(key) {
+        let key_arc = match hsm.object_store.get_object_in_slot(key, sess.read().slot_id) {
             Ok(o) => o,
             Err(_) => return CKR_KEY_HANDLE_INVALID,
         };
@@ -4625,7 +4616,7 @@ pub extern "C" fn C_SignFinal(
                 }) => (*mechanism, *key_handle),
                 _ => return CKR_OPERATION_NOT_INITIALIZED,
             };
-            let obj = match hsm.object_store.get_object(kh) {
+            let obj = match hsm.object_store.get_object_in_slot(kh, sess.slot_id) {
                 Ok(o) => o,
                 Err(e) => {
                     sess.active_operation = None;
@@ -4667,7 +4658,7 @@ pub extern "C" fn C_SignFinal(
         let obj = if let Some(cached) = cached_object {
             cached
         } else {
-            match hsm.object_store.get_object(key_handle) {
+            match hsm.object_store.get_object_in_slot(key_handle, sess.slot_id) {
                 Ok(o) => o,
                 Err(e) => {
                     sess.active_operation = None;
@@ -4851,7 +4842,7 @@ pub extern "C" fn C_VerifyFinal(
         let obj = if let Some(cached) = cached_object {
             cached
         } else {
-            match hsm.object_store.get_object(key_handle) {
+            match hsm.object_store.get_object_in_slot(key_handle, sess.slot_id) {
                 Ok(o) => o,
                 Err(e) => {
                     sess.active_operation = None;
@@ -5015,7 +5006,7 @@ pub extern "C" fn C_WrapKey(
         }
 
         // Get wrapping key material
-        let wk_obj = match hsm.object_store.get_object(wrapping_key) {
+        let wk_obj = match hsm.object_store.get_object_in_slot(wrapping_key, sess.read().slot_id) {
             Ok(o) => o,
             Err(e) => return err_to_rv(e),
         };
@@ -5028,11 +5019,8 @@ pub extern "C" fn C_WrapKey(
             return CKR_KEY_FUNCTION_NOT_PERMITTED;
         }
         // Check if wrapping key is trusted (for CKA_WRAP_WITH_TRUSTED enforcement)
-        let wk_is_trusted = wk_obj
-            .extra_attributes
-            .get(&CKA_TRUSTED)
-            .map(|v| v.first().copied().unwrap_or(0) != 0)
-            .unwrap_or(false);
+        // CKA_TRUSTED is a typed, SO-controlled field (H1-09).
+        let wk_is_trusted = wk_obj.trusted;
         let wk_bytes = match &wk_obj.key_material {
             Some(km) => km.as_bytes().to_vec(),
             None => return CKR_KEY_HANDLE_INVALID,
@@ -5040,7 +5028,7 @@ pub extern "C" fn C_WrapKey(
         drop(wk_obj);
 
         // Get key to wrap
-        let key_obj = match hsm.object_store.get_object(key) {
+        let key_obj = match hsm.object_store.get_object_in_slot(key, sess.read().slot_id) {
             Ok(o) => o,
             Err(e) => return err_to_rv(e),
         };
@@ -5049,11 +5037,7 @@ pub extern "C" fn C_WrapKey(
             return err_to_rv(HsmError::KeyFunctionNotPermitted);
         }
         // PKCS#11: CKA_WRAP_WITH_TRUSTED — key requires a trusted wrapping key
-        let requires_trusted = key_obj
-            .extra_attributes
-            .get(&CKA_WRAP_WITH_TRUSTED)
-            .map(|v| v.first().copied().unwrap_or(0) != 0)
-            .unwrap_or(false);
+        let requires_trusted = key_obj.wrap_with_trusted;
         if requires_trusted && !wk_is_trusted {
             return CKR_KEY_FUNCTION_NOT_PERMITTED;
         }
@@ -5069,8 +5053,31 @@ pub extern "C" fn C_WrapKey(
             hsm.algorithm_config.fips_approved_only,
         ) {
             Ok(w) => w,
-            Err(e) => return err_to_rv(e),
+            Err(e) => {
+                let rv = err_to_rv(e);
+                let _ = hsm.audit_log.record(
+                    session as u64,
+                    AuditOperation::WrapKey {
+                        mechanism: mechanism as u64,
+                        fips_approved: mechanisms::is_fips_approved(mechanism),
+                    },
+                    AuditResult::Failure(rv as u64),
+                    None,
+                );
+                return rv;
+            }
         };
+        if !p_wrapped_key.is_null() {
+            let _ = hsm.audit_log.record(
+                session as u64,
+                AuditOperation::WrapKey {
+                    mechanism: mechanism as u64,
+                    fips_approved: mechanisms::is_fips_approved(mechanism),
+                },
+                AuditResult::Success,
+                None,
+            );
+        }
 
         if p_wrapped_key.is_null() {
             unsafe {
@@ -5141,7 +5148,7 @@ pub extern "C" fn C_UnwrapKey(
         }
 
         // Get unwrapping key
-        let uk_obj = match hsm.object_store.get_object(unwrapping_key) {
+        let uk_obj = match hsm.object_store.get_object_in_slot(unwrapping_key, sess.read().slot_id) {
             Ok(o) => o,
             Err(e) => return err_to_rv(e),
         };
@@ -5248,7 +5255,23 @@ pub extern "C" fn C_UnwrapKey(
             }
         }
 
-        if let Err(e) = hsm.object_store.insert_object(obj) {
+        let ctx = sess.read().object_ctx();
+        let result = hsm
+            .object_store
+            .insert_object_in(obj, &ctx, ObjectOrigin::Unwrapped);
+        let _ = hsm.audit_log.record(
+            session as u64,
+            AuditOperation::UnwrapKey {
+                mechanism: mechanism as u64,
+                fips_approved: mechanisms::is_fips_approved(mechanism),
+            },
+            match &result {
+                Ok(_) => AuditResult::Success,
+                Err(e) => AuditResult::Failure(CK_RV::from(e.clone()) as u64),
+            },
+            None,
+        );
+        if let Err(e) = result {
             return err_to_rv(e);
         }
         unsafe {
@@ -5297,7 +5320,7 @@ pub extern "C" fn C_DeriveKey(
         }
 
         // Get base key
-        let bk_obj = match hsm.object_store.get_object(base_key) {
+        let bk_obj = match hsm.object_store.get_object_in_slot(base_key, sess.read().slot_id) {
             Ok(o) => o,
             Err(e) => return err_to_rv(e),
         };
@@ -5311,6 +5334,10 @@ pub extern "C" fn C_DeriveKey(
         };
         let ec_params = bk_obj.ec_params.as_deref().unwrap_or(&[]).to_vec();
         let bk_sensitive = bk_obj.sensitive;
+        let bk_origin = ObjectOrigin::Derived {
+            base_always_sensitive: bk_obj.always_sensitive,
+            base_never_extractable: bk_obj.never_extractable,
+        };
         drop(bk_obj);
 
         // The mechanism parameter contains the peer public key (ECDH) or ciphertext (KEM)
@@ -5422,7 +5449,21 @@ pub extern "C" fn C_DeriveKey(
             }
         }
 
-        if let Err(e) = hsm.object_store.insert_object(obj) {
+        let ctx = sess.read().object_ctx();
+        let result = hsm.object_store.insert_object_in(obj, &ctx, bk_origin);
+        let _ = hsm.audit_log.record(
+            session as u64,
+            AuditOperation::DeriveKey {
+                mechanism: mechanism as u64,
+                fips_approved: mechanisms::is_fips_approved(mechanism),
+            },
+            match &result {
+                Ok(_) => AuditResult::Success,
+                Err(e) => AuditResult::Failure(CK_RV::from(e.clone()) as u64),
+            },
+            None,
+        );
+        if let Err(e) = result {
             return err_to_rv(e);
         }
         unsafe {

@@ -28,10 +28,26 @@ const MAX_SLOT_COUNT: usize = 256;
 const MAX_LABEL_LENGTH: usize = 32;
 /// Valid crypto backend identifiers.
 const VALID_BACKENDS: &[&str] = &["rustcrypto", "awslc"];
-/// Valid audit log levels.
-const VALID_LOG_LEVELS: &[&str] = &["all", "crypto", "auth", "admin", "none"];
+/// Valid audit log levels. `all`/`crypto` record every event; `auth`/`admin`
+/// record only the mandatory authentication, token- and key-management
+/// events. There is no "none" level — disable auditing explicitly with
+/// `enabled = false` plus `allow_disabled_insecure = true`.
+const VALID_LOG_LEVELS: &[&str] = &["all", "crypto", "auth", "admin"];
 /// Relative path prefixes that could target sensitive directories.
 const SENSITIVE_PATH_PREFIXES: &[&str] = &[".git", ".ssh", ".gnupg", ".aws", ".config", ".env"];
+/// Absolute system locations that must never be used for HSM storage.
+#[cfg(unix)]
+const SYSTEM_PATH_PREFIXES: &[&str] = &[
+    "/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/boot", "/dev", "/proc", "/sys",
+];
+#[cfg(not(unix))]
+const SYSTEM_PATH_PREFIXES: &[&str] = &["C:\\Windows", "C:/Windows"];
+/// System-wide configuration file used when `CRATON_HSM_CONFIG` is unset.
+#[cfg(unix)]
+pub const SYSTEM_CONFIG_PATH: &str = "/etc/craton-hsm/craton_hsm.toml";
+/// System-wide configuration file used when `CRATON_HSM_CONFIG` is unset.
+#[cfg(not(unix))]
+pub const SYSTEM_CONFIG_PATH: &str = "C:\\ProgramData\\craton-hsm\\craton_hsm.toml";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HsmConfig {
@@ -55,11 +71,20 @@ pub struct TokenConfig {
     pub max_sessions: u64,
     #[serde(default = "default_max_rw_sessions")]
     pub max_rw_sessions: u64,
-    /// If true, token objects (CKA_TOKEN=true) are persisted to disk
-    /// via EncryptedStore. Session objects are never persisted.
-    /// Default: false (in-memory only, matching legacy behavior).
+    /// If true, the token is **persistent**: token state (initialised flag,
+    /// label, PIN verifiers, lockout counters, wrapped storage keys) and
+    /// token objects (CKA_TOKEN=true) are stored encrypted under
+    /// `storage_path` and reloaded on start (see `HsmCore::open`). Session
+    /// objects are never persisted.
+    /// Default: false — **ephemeral** token (development only): everything
+    /// is lost on restart and the token must be re-initialised.
     #[serde(default)]
     pub persist_objects: bool,
+    /// Maximum number of sessions one application (process for the C ABI,
+    /// client connection for the daemon) may hold open. Default: the
+    /// per-token `max_sessions`.
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions_per_application: u64,
     /// Number of slots to create. Default: 1 (backward compatible).
     /// Each slot gets its own independent token.
     #[serde(default = "default_slot_count")]
@@ -102,6 +127,22 @@ pub struct AuditConfig {
     pub log_path: PathBuf,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Path of the audit HMAC key file (default `<log_path>.key`). Place it
+    /// where the audit-log readers/backup operators cannot read it.
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
+    /// Fail closed: once an event cannot be written durably, every further
+    /// audited operation fails with `CKR_DEVICE_ERROR`. Default: false
+    /// (true in FIPS mode).
+    #[serde(default)]
+    pub fail_closed: bool,
+    /// Allow the HSM to start although the audit chain failed verification.
+    /// Default: false — refuse to start (H3-11).
+    #[serde(default)]
+    pub allow_start_with_broken_chain: bool,
+    /// Explicit acknowledgement required to run with `enabled = false`.
+    #[serde(default)]
+    pub allow_disabled_insecure: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -142,6 +183,7 @@ impl Default for TokenConfig {
             max_sessions: default_max_sessions(),
             max_rw_sessions: default_max_rw_sessions(),
             persist_objects: false,
+            max_sessions_per_application: default_max_sessions(),
             slot_count: default_slot_count(),
             serial_number: default_serial_number(),
         }
@@ -165,6 +207,10 @@ impl Default for AuditConfig {
             enabled: true,
             log_path: default_audit_path(),
             log_level: default_log_level(),
+            key_path: None,
+            fail_closed: false,
+            allow_start_with_broken_chain: false,
+            allow_disabled_insecure: false,
         }
     }
 }
@@ -200,10 +246,10 @@ fn default_pin_max() -> usize {
     64
 }
 fn default_max_failed() -> u32 {
-    10
+    crate::config::defaults::DEFAULT_MAX_FAILED_LOGINS
 }
 fn default_pbkdf2_iterations() -> u32 {
-    600_000
+    crate::config::defaults::DEFAULT_PBKDF2_ITERATIONS
 }
 fn default_true() -> bool {
     true
@@ -261,20 +307,35 @@ impl HsmConfig {
                      the process environment can bypass this entirely. For certified FIPS \
                      compliance, compile with `--features fips`."
                 );
-                if std::path::Path::new("craton_hsm.toml").exists() {
-                    tracing::warn!("craton_hsm.toml exists but is being ignored in FIPS mode");
-                }
                 return Ok(Self::fips_defaults());
             }
 
-            let config_path = std::env::var("CRATON_HSM_CONFIG")
-                .unwrap_or_else(|_| "craton_hsm.toml".to_string());
+            // H3-13: never load configuration from the (attacker-influenced)
+            // current working directory. Sources, in order:
+            //   1. $CRATON_HSM_CONFIG (validated, ownership-checked);
+            //   2. the system-wide SYSTEM_CONFIG_PATH;
+            //   3. built-in secure defaults.
+            if std::path::Path::new("craton_hsm.toml").exists() {
+                tracing::warn!(
+                    "./craton_hsm.toml is ignored (configuration is never read from the \
+                     working directory); set CRATON_HSM_CONFIG or use {}",
+                    SYSTEM_CONFIG_PATH
+                );
+            }
+            let config_path = match std::env::var("CRATON_HSM_CONFIG") {
+                Ok(p) => p,
+                Err(_) => {
+                    if std::path::Path::new(SYSTEM_CONFIG_PATH).exists() {
+                        SYSTEM_CONFIG_PATH.to_string()
+                    } else {
+                        tracing::info!("No configuration file — using secure defaults");
+                        return Ok(Self::default());
+                    }
+                }
+            };
 
             Self::validate_config_path(&config_path)?;
-
-            let config = Self::load_from_path(&config_path)?;
-            config.validate()?;
-            Ok(config)
+            Self::load_from_path(&config_path)
         }
     }
 
@@ -286,6 +347,7 @@ impl HsmConfig {
         config.algorithms.allow_sha1_signing = false;
         config.algorithms.enable_pqc = false;
         config.audit.enabled = true;
+        config.audit.fail_closed = true;
         config
     }
 
@@ -296,11 +358,28 @@ impl HsmConfig {
         let mut errors: Vec<String> = Vec::new();
         let path_str = path.to_string_lossy();
 
+        // Absolute paths are allowed (and recommended: a service-owned
+        // directory such as /var/lib/craton-hsm) — relative paths depend on
+        // the host process's working directory (H3-12). System locations are
+        // never acceptable.
         if path.is_absolute() {
-            errors.push(format!(
-                "{} '{}' is absolute — must be relative to the working directory",
-                label, path_str
-            ));
+            for prefix in SYSTEM_PATH_PREFIXES {
+                let p = std::path::Path::new(prefix);
+                if path.starts_with(p) {
+                    errors.push(format!(
+                        "{} '{}' points into system directory '{}'",
+                        label, path_str, prefix
+                    ));
+                    break;
+                }
+            }
+        } else {
+            tracing::warn!(
+                "{} '{}' is relative to the working directory; use an absolute, \
+                 service-owned path in production",
+                label,
+                path_str
+            );
         }
         if path_str.starts_with("\\\\") || path_str.starts_with("//") {
             errors.push(format!(
@@ -378,6 +457,20 @@ impl HsmConfig {
                 HsmError::ConfigError(format!("cannot stat config file '{}': {}", path, e))
             })?;
             let mode = meta.mode();
+            // Reject files owned by anyone other than us or root (H3-13).
+            let euid = crate::store::fs_util::effective_uid();
+            if meta.uid() != euid && meta.uid() != 0 {
+                tracing::error!(
+                    "Config file '{}' is owned by uid {} (expected {} or root)",
+                    path,
+                    meta.uid(),
+                    euid
+                );
+                return Err(HsmError::ConfigError(
+                    "config file has insecure ownership".to_string(),
+                ));
+            }
+            Self::check_ancestors(path)?;
             // Reject group-writable (0o020) or other-writable (0o002)
             if mode & 0o022 != 0 {
                 tracing::error!(
@@ -407,6 +500,40 @@ impl HsmConfig {
         Ok(())
     }
 
+    /// Reject configuration files whose directory (or any ancestor) can be
+    /// modified by other users: the parent must not be group/world writable,
+    /// and no ancestor may be world writable without the sticky bit.
+    #[cfg(unix)]
+    fn check_ancestors(path: &str) -> Result<(), HsmError> {
+        use std::os::unix::fs::MetadataExt;
+        let abs = std::fs::canonicalize(path).map_err(|e| {
+            HsmError::ConfigError(format!("cannot resolve config path '{}': {}", path, e))
+        })?;
+        let mut first = true;
+        let mut cur = abs.parent();
+        while let Some(dir) = cur {
+            let meta = std::fs::metadata(dir).map_err(|e| {
+                HsmError::ConfigError(format!("cannot stat '{}': {}", dir.display(), e))
+            })?;
+            let mode = meta.mode();
+            let sticky = mode & 0o1000 != 0;
+            if (first && mode & 0o022 != 0 && !sticky) || (mode & 0o002 != 0 && !sticky) {
+                tracing::error!(
+                    "Config directory '{}' is writable by other users ({:o})",
+                    dir.display(),
+                    mode & 0o7777
+                );
+                return Err(HsmError::ConfigError(format!(
+                    "config directory '{}' is writable by other users",
+                    dir.display()
+                )));
+            }
+            first = false;
+            cur = dir.parent();
+        }
+        Ok(())
+    }
+
     /// Windows-specific permission check: reject files writable by broad groups.
     /// Uses the file's metadata to verify the read-only attribute as a baseline,
     /// and checks NTFS ACLs via icacls on the canonical path.
@@ -415,17 +542,20 @@ impl HsmConfig {
         // Check NTFS ACLs via icacls for broad write access.
         // Resolve the canonical path from the open handle to avoid TOCTOU on
         // the path string (the handle is already pinned to an inode).
-        let canonical = match std::fs::canonicalize(path) {
-            Ok(p) => p,
-            Err(_) => {
-                // If canonicalize fails, fall through — the file is already open.
-                return Ok(());
-            }
-        };
+        // Fail closed (H3-29): if the ACL cannot be inspected, refuse the file.
+        let canonical = std::fs::canonicalize(path).map_err(|e| {
+            HsmError::ConfigError(format!("cannot resolve config path '{}': {}", path, e))
+        })?;
         let output = std::process::Command::new("icacls")
             .arg(&canonical)
-            .output();
-        if let Ok(output) = output {
+            .output()
+            .map_err(|e| HsmError::ConfigError(format!("cannot inspect config ACL: {}", e)))?;
+        if !output.status.success() {
+            return Err(HsmError::ConfigError(
+                "cannot inspect config file ACL (icacls failed)".to_string(),
+            ));
+        }
+        {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stdout_upper = stdout.to_uppercase();
             // Reject if Everyone, Users, or Authenticated Users have write/full access.
@@ -485,19 +615,30 @@ impl HsmConfig {
         Ok(())
     }
 
-    /// Load from a specific path. Returns defaults if the file does not exist.
-    /// Returns an error if the file exists but cannot be parsed.
+    /// Load **and validate** configuration from an explicit path.
     ///
-    /// Opens the file first, then performs permission and symlink checks on the
-    /// open file descriptor to eliminate TOCTOU race conditions.
+    /// A missing file is an error (an explicitly named configuration must not
+    /// silently fall back to defaults, H3-13). The file is opened without
+    /// following symlinks; ownership, permissions and ancestor directories
+    /// are checked on the open descriptor.
     pub fn load_from_path(path: &str) -> Result<Self, HsmError> {
         use std::io::Read;
 
-        let file = match std::fs::File::open(path) {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = match opts.open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!("No config file at '{}' — using secure defaults", path);
-                return Ok(Self::default());
+                tracing::error!("Config file '{}' not found", path);
+                return Err(HsmError::ConfigError(format!(
+                    "config file '{}' not found",
+                    path
+                )));
             }
             Err(e) => {
                 tracing::error!("Cannot read config file '{}': {}", path, e);
@@ -518,7 +659,7 @@ impl HsmConfig {
             HsmError::ConfigError("cannot read config file — check logs for details".to_string())
         })?;
 
-        toml::from_str(&content).map_err(|e| {
+        let config: Self = toml::from_str(&content).map_err(|e| {
             // Log full details internally; return sanitized error to caller
             tracing::error!(
                 "Failed to parse config file '{}': {} — refusing to start with potentially \
@@ -529,7 +670,9 @@ impl HsmConfig {
             HsmError::ConfigError(
                 "failed to parse config file — check logs for details".to_string(),
             )
-        })
+        })?;
+        config.validate()?;
+        Ok(config)
     }
 
     /// Comprehensive validation of all security-critical configuration values.
@@ -679,6 +822,21 @@ impl HsmConfig {
                 "audit log_level '{}' is not recognized (valid: {:?})",
                 self.audit.log_level, VALID_LOG_LEVELS
             ));
+        }
+
+        // --- audit: disabling requires explicit acknowledgement (H3-13) ---
+        if !self.audit.enabled && !self.audit.allow_disabled_insecure {
+            errors.push(
+                "audit.enabled = false requires audit.allow_disabled_insecure = true".to_string(),
+            );
+        }
+        if let Some(ref kp) = self.audit.key_path {
+            if let Err(path_errs) = Self::validate_path_safety(kp, "audit key_path") {
+                errors.extend(path_errs);
+            }
+        }
+        if self.token.max_sessions_per_application == 0 {
+            errors.push("max_sessions_per_application must be at least 1".to_string());
         }
 
         // --- FIPS consistency: reject contradictory weak-algorithm flags ---

@@ -25,6 +25,8 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"InfoTest");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,

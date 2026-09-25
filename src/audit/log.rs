@@ -1,24 +1,53 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
+//! Tamper-evident audit log.
+//!
+//! # Integrity (H3-10, H3-11)
+//!
+//! Events form a **keyed** chain:
+//! `H_n = HMAC-SHA256(K, H_{n-1} || serialize(payload_n))`, where the payload
+//! includes a monotonic sequence number `seq`. `K` is a random 256-bit key
+//! stored in a separate 0600 key file (`audit.key_path`, default
+//! `<log_path>.key`) that is never written to the log, so a party that can
+//! edit the log but not read the key cannot recompute the chain. After every
+//! durable write a MAC-protected **anchor** (`<log_path>.anchor`: last `seq`
+//! and chain value) is updated atomically, so truncating the tail or deleting
+//! the log is detected on the next start. Rotation starts every new
+//! generation with a `LogRotated` event chained to the previous generation,
+//! so restarts after rotation verify cleanly.
+//!
+//! Operators should additionally forward events off-host (syslog/SIEM) —
+//! whoever controls both the key file and the log can still rewrite history.
+//!
+//! # Durability and fail-closed behaviour
+//!
+//! Events are processed by a worker thread over a **bounded** queue
+//! (back-pressure instead of unbounded memory, H3-22) with a persistent file
+//! handle and group-commit `fsync`. [`AuditLog::record_sync`] waits until the
+//! event is durable and returns an error if it could not be written; the
+//! core uses it for authentication and key-management events. A failed disk
+//! write sets a sticky failure flag; with `audit.fail_closed = true` every
+//! later `record` call fails (`CKR_DEVICE_ERROR`).
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::io::BufRead;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
-/// Every security-relevant operation emits an audit event.
-/// The audit log is append-only and tamper-evident (chained SHA-256 hashes).
-///
-/// Hash chain: `H_n = SHA-256(H_{n-1} || serialize(payload_n))`
-/// where `payload_n` is the event data *excluding* `previous_hash`,
-/// avoiding circularity in the hash computation.
+use crate::error::{HsmError, HsmResult};
+
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
+    /// Monotonic sequence number (0 for the first event ever written).
+    #[serde(default)]
+    pub seq: u64,
     pub timestamp: u64,
     pub session_handle: u64,
     pub operation: AuditOperation,
@@ -32,6 +61,7 @@ pub struct AuditEvent {
 /// non-circular and cryptographically sound.
 #[derive(Serialize)]
 struct AuditEventPayload<'a> {
+    seq: u64,
     timestamp: u64,
     session_handle: u64,
     operation: &'a AuditOperation,
@@ -42,6 +72,7 @@ struct AuditEventPayload<'a> {
 impl AuditEvent {
     fn payload(&self) -> AuditEventPayload<'_> {
         AuditEventPayload {
+            seq: self.seq,
             timestamp: self.timestamp,
             session_handle: self.session_handle,
             operation: &self.operation,
@@ -120,12 +151,73 @@ pub enum AuditOperation {
         result_count: u32,
     },
     GetAttributeValue,
+    /// A request for secret key material through `C_GetAttributeValue`
+    /// (granted or denied).
+    GetAttributeValueSensitive {
+        attribute: u64,
+    },
+    /// `C_InitPIN` (SO sets the user PIN).
+    InitPin {
+        slot_id: u64,
+    },
+    /// `C_SetPIN`.
+    SetPin {
+        slot_id: u64,
+    },
+    CopyObject,
+    SetAttributeValue,
+    /// First event of a new log generation after rotation; chains to the
+    /// last event of the previous generation.
+    LogRotated {
+        previous_generation_last_seq: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditResult {
     Success,
     Failure(u64),
+}
+
+/// Which events are written (`audit.log_level`, S2).
+///
+/// Authentication, token-management and key-management events are always
+/// recorded. `All`/`Crypto` additionally record routine cryptographic
+/// operations (sign, verify, encrypt, decrypt, digest, random, find, read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditLevel {
+    /// Every event.
+    All,
+    /// Mandatory events only.
+    Mandatory,
+}
+
+impl AuditLevel {
+    /// Parse a config value (`all`, `crypto`, `auth`, `admin`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "all" | "crypto" => Some(AuditLevel::All),
+            "auth" | "admin" => Some(AuditLevel::Mandatory),
+            _ => None,
+        }
+    }
+
+    fn records(self, op: &AuditOperation) -> bool {
+        if self == AuditLevel::All {
+            return true;
+        }
+        !matches!(
+            op,
+            AuditOperation::Sign { .. }
+                | AuditOperation::Verify { .. }
+                | AuditOperation::Encrypt { .. }
+                | AuditOperation::Decrypt { .. }
+                | AuditOperation::Digest { .. }
+                | AuditOperation::GenerateRandom { .. }
+                | AuditOperation::FindObjects { .. }
+                | AuditOperation::GetAttributeValue
+        )
+    }
 }
 
 /// Commands sent to the background audit worker thread.
@@ -135,16 +227,14 @@ enum AuditCommand {
         operation: AuditOperation,
         result: AuditResult,
         key_id: Option<String>,
+        done: Option<std::sync::mpsc::SyncSender<HsmResult<()>>>,
     },
     Flush {
-        done: std::sync::mpsc::Sender<()>,
+        done: std::sync::mpsc::SyncSender<()>,
     },
 }
 
-/// Maximum number of audit events retained in memory.
-/// Once exceeded, the oldest entries are discarded (they remain on disk
-/// if disk logging is enabled). This prevents unbounded memory growth
-/// for long-running HSM processes.
+/// Maximum number of audit events retained in memory (ring buffer, P3).
 const MAX_IN_MEMORY_ENTRIES: usize = 100_000;
 
 /// Maximum audit log file size in bytes before rotation (100 MB).
@@ -153,45 +243,83 @@ const MAX_LOG_FILE_BYTES: u64 = 100 * 1024 * 1024;
 /// Maximum number of rotated log file generations to keep.
 const MAX_ROTATED_FILES: u32 = 5;
 
+/// Capacity of the bounded queue between callers and the worker.
+const AUDIT_QUEUE_CAPACITY: usize = 10_000;
+
+/// Maximum events written between two `fsync`s (group commit, P2).
+const GROUP_COMMIT_MAX: usize = 256;
+
+const ANCHOR_LABEL: &[u8] = b"craton-hsm/audit-anchor/v1";
+
 /// Result of attempting to recover the hash chain from an existing log file.
 enum ChainRecoveryResult {
-    /// No existing log file — start fresh with the zero hash.
+    /// No existing log (and no anchor) — start a fresh chain.
     NoFile,
-    /// Chain recovered and verified successfully; contains the final hash.
-    Verified([u8; 32]),
-    /// Chain is broken: the file is corrupt, tampered, or unreadable.
-    /// Contains a human-readable reason for the failure.
+    /// Chain recovered and verified; (last chain value, next seq, last ts).
+    Verified([u8; 32], u64, u64),
+    /// Chain is broken: the file is corrupt, tampered, truncated or unreadable.
     Broken(String),
 }
 
-/// Internal state protected by a single RwLock to guarantee atomicity
-/// between the hash chain and the entry list, while allowing concurrent reads.
+/// Internal state protected by a single RwLock.
 struct AuditLogState {
-    entries: Vec<AuditEvent>,
+    entries: VecDeque<AuditEvent>,
+    /// Chain value preceding `entries[0]` (H3-26).
+    base_hash: [u8; 32],
     last_hash: [u8; 32],
-    /// Set to `true` if the audit log chain was found to be corrupt or tampered
-    /// with during recovery. Once set, this flag is permanent for the lifetime
-    /// of the `AuditLog` instance and is exposed via `is_tamper_detected()`.
-    /// When set, `record()` refuses to append new events to prevent an attacker
-    /// from continuing to build a valid chain after tampering.
-    tamper_detected: bool,
-    /// Monotonic timestamp floor — each event's timestamp is guaranteed to be
-    /// strictly greater than the previous one, even if the wall clock jumps
-    /// backwards (NTP correction, VM migration, etc.).
+    /// Monotonic timestamp floor.
     last_timestamp: u64,
 }
 
+struct Shared {
+    state: RwLock<AuditLogState>,
+    key: Zeroizing<[u8; 32]>,
+    tamper_flag: AtomicBool,
+    /// Sticky flag: an event could not be written durably.
+    io_failed: AtomicBool,
+    fail_closed: bool,
+    level: AuditLevel,
+}
+
+/// Worker thread + queue + (for file-backed logs) the exclusive
+/// cross-process lock. Shared by every `AuditLog` handle opened on the same
+/// path in this process, so all of them append to one chain.
+struct Backend {
+    shared: Arc<Shared>,
+    sender: parking_lot::Mutex<Option<std::sync::mpsc::SyncSender<AuditCommand>>>,
+    worker: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
+    _lock: Option<std::fs::File>,
+}
+
+impl Backend {
+    fn sender(&self) -> Option<std::sync::mpsc::SyncSender<AuditCommand>> {
+        self.sender.lock().clone()
+    }
+}
+
+impl Drop for Backend {
+    fn drop(&mut self) {
+        // Drop sender to signal the worker to exit, then wait for it to
+        // drain remaining events.
+        self.sender.lock().take();
+        if let Some(handle) = self.worker.lock().take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Process-wide registry: one backend per canonical log path. A single
+/// writer per chain is required; two independent writers appending to the
+/// same file would corrupt the chain.
+static REGISTRY: parking_lot::Mutex<Option<std::collections::HashMap<PathBuf, std::sync::Weak<Backend>>>> =
+    parking_lot::Mutex::new(None);
+
+/// Tamper-evident audit log (see module documentation).
 pub struct AuditLog {
-    state: Arc<RwLock<AuditLogState>>,
+    backend: Arc<Backend>,
+    shared: Arc<Shared>,
     /// Optional path for persistent NDJSON audit trail on disk.
     log_path: Option<PathBuf>,
-    /// Channel sender for dispatching audit commands to the background worker.
-    sender: Option<std::sync::mpsc::Sender<AuditCommand>>,
-    /// Shared flag indicating that the audit chain has been tampered with.
-    /// Checked in `record()` without acquiring the RwLock for fast-path rejection.
-    tamper_flag: Arc<AtomicBool>,
-    /// Handle to the background worker thread that processes audit events.
-    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Default for AuditLog {
@@ -200,356 +328,555 @@ impl Default for AuditLog {
     }
 }
 
-/// Compute the chain hash for an event:
-/// `SHA-256(previous_hash || serialize(payload))`
-///
-/// The payload excludes `previous_hash` to avoid circularity.
-fn compute_chain_hash(
-    previous_hash: &[u8; 32],
-    event: &AuditEvent,
-) -> Result<[u8; 32], crate::error::HsmError> {
-    let payload_bytes = serde_json::to_vec(&event.payload()).map_err(|e| {
-        tracing::error!("Audit event payload serialization failed: {}", e);
-        crate::error::HsmError::GeneralError
-    })?;
-    let mut hasher = Sha256::new();
-    hasher.update(previous_hash);
-    hasher.update(&payload_bytes);
-    let hash = hasher.finalize();
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&hash);
-    Ok(result)
+/// Compute the keyed chain value `HMAC(K, previous_hash || payload)`.
+fn compute_chain_hash(key: &[u8; 32], previous_hash: &[u8; 32], payload: &[u8]) -> [u8; 32] {
+    use hmac::Mac;
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(previous_hash);
+    mac.update(payload);
+    mac.finalize().into_bytes().into()
 }
 
-/// Validate and canonicalize the audit log path.
-///
-/// - Resolves symlinks in the parent directory to prevent path traversal.
-/// - Rejects paths where the target file itself is a symlink, preventing
-///   an attacker from redirecting audit writes to arbitrary files.
-fn validate_log_path(path: &Path) -> Result<PathBuf, crate::error::HsmError> {
-    // If the file already exists, ensure it is a regular file (not a symlink,
-    // device, pipe, etc.).
-    if path.exists() {
-        let meta = std::fs::symlink_metadata(path).map_err(|e| {
-            tracing::error!(
-                "Audit log path validation: cannot stat {}: {}",
-                path.display(),
-                e,
-            );
-            crate::error::HsmError::GeneralError
-        })?;
+fn payload_bytes(event: &AuditEvent) -> HsmResult<Vec<u8>> {
+    serde_json::to_vec(&event.payload()).map_err(|e| {
+        tracing::error!("Audit event payload serialization failed: {}", e);
+        HsmError::GeneralError
+    })
+}
+
+fn event_hash(key: &[u8; 32], event: &AuditEvent) -> HsmResult<[u8; 32]> {
+    Ok(compute_chain_hash(key, &event.previous_hash, &payload_bytes(event)?))
+}
+
+#[derive(Serialize, Deserialize)]
+struct Anchor {
+    seq: u64,
+    hash: String,
+    mac: String,
+}
+
+impl Anchor {
+    fn mac(key: &[u8; 32], seq: u64, hash: &[u8; 32]) -> [u8; 32] {
+        use hmac::Mac;
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("any key length");
+        mac.update(ANCHOR_LABEL);
+        mac.update(&seq.to_le_bytes());
+        mac.update(hash);
+        mac.finalize().into_bytes().into()
+    }
+}
+
+fn anchor_path(log: &Path) -> PathBuf {
+    let mut n = log.as_os_str().to_os_string();
+    n.push(".anchor");
+    PathBuf::from(n)
+}
+
+/// Default key-file path for a log path.
+pub fn default_key_path(log: &Path) -> PathBuf {
+    let mut n = log.as_os_str().to_os_string();
+    n.push(".key");
+    PathBuf::from(n)
+}
+
+fn write_anchor(log: &Path, key: &[u8; 32], seq: u64, hash: &[u8; 32]) -> HsmResult<()> {
+    let a = Anchor {
+        seq,
+        hash: hex::encode(hash),
+        mac: hex::encode(Anchor::mac(key, seq, hash)),
+    };
+    let bytes = serde_json::to_vec(&a).map_err(|_| HsmError::GeneralError)?;
+    crate::store::fs_util::atomic_write_private(&anchor_path(log), &bytes)
+}
+
+fn read_anchor(log: &Path, key: &[u8; 32]) -> Result<Option<(u64, [u8; 32])>, String> {
+    match crate::store::fs_util::read_private(&anchor_path(log)) {
+        Ok(None) => Ok(None),
+        Ok(Some(b)) => {
+            let a: Anchor = serde_json::from_slice(&b).map_err(|e| format!("anchor corrupt: {e}"))?;
+            let h: [u8; 32] = hex::decode(&a.hash)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or("anchor hash malformed")?;
+            let m = hex::decode(&a.mac).map_err(|_| "anchor mac malformed")?;
+            use subtle::ConstantTimeEq;
+            if !bool::from(m.ct_eq(&Anchor::mac(key, a.seq, &h))) {
+                return Err("anchor MAC invalid".to_string());
+            }
+            Ok(Some((a.seq, h)))
+        }
+        Err(e) => Err(format!("anchor unreadable: {e:?}")),
+    }
+}
+
+/// Load the audit HMAC key, creating it (0600, `O_EXCL`) only for a brand
+/// new log. A missing key for an existing log is reported as `Ok(None)`.
+fn load_or_create_key(key_path: &Path, log_exists: bool) -> HsmResult<Option<Zeroizing<[u8; 32]>>> {
+    if let Some(bytes) = crate::store::fs_util::read_private(key_path)? {
+        let bytes = Zeroizing::new(bytes);
+        if bytes.len() != 32 {
+            tracing::error!("audit key file {} is malformed", key_path.display());
+            return Err(HsmError::DeviceError);
+        }
+        let mut k = Zeroizing::new([0u8; 32]);
+        k.copy_from_slice(&bytes);
+        return Ok(Some(k));
+    }
+    if log_exists {
+        return Ok(None);
+    }
+    let mut k = Zeroizing::new([0u8; 32]);
+    crate::store::encrypted_store::fill_random(k.as_mut())?;
+    let mut f = crate::store::fs_util::create_new_private(key_path)?;
+    f.write_all(k.as_ref()).map_err(|_| HsmError::DeviceError)?;
+    f.sync_all().map_err(|_| HsmError::DeviceError)?;
+    if let Some(dir) = key_path.parent() {
+        crate::store::fs_util::fsync_dir(dir)?;
+    }
+    Ok(Some(k))
+}
+
+/// Validate the audit log path: the file (if present) must be a regular,
+/// private file; the parent directory is canonicalized.
+fn validate_log_path(path: &Path) -> Result<PathBuf, HsmError> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
-            tracing::error!("Audit log path is a symlink, refusing: {}", path.display(),);
-            return Err(crate::error::HsmError::AuditChainBroken(
+            tracing::error!("Audit log path is a symlink, refusing: {}", path.display());
+            return Err(HsmError::AuditChainBroken(
                 "audit log path is a symlink".to_string(),
             ));
         }
         if !meta.file_type().is_file() {
-            tracing::error!("Audit log path is not a regular file: {}", path.display(),);
-            return Err(crate::error::HsmError::AuditChainBroken(
+            tracing::error!("Audit log path is not a regular file: {}", path.display());
+            return Err(HsmError::AuditChainBroken(
                 "audit log path is not a regular file".to_string(),
             ));
         }
     }
-
-    // Canonicalize the parent directory to resolve any symlinks in the path
-    // components leading to the file. This prevents traversal attacks like
-    // `/var/log/../../etc/shadow`.
-    if let Some(parent) = path.parent() {
-        if parent.as_os_str().is_empty() {
-            // Relative filename with no directory — use as-is.
-            return Ok(path.to_path_buf());
-        }
-        let canonical_parent = parent.canonicalize().map_err(|e| {
-            tracing::error!(
-                "Audit log path validation: cannot canonicalize parent {}: {}",
-                parent.display(),
-                e,
-            );
-            crate::error::HsmError::GeneralError
-        })?;
-        if let Some(file_name) = path.file_name() {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            let canonical_parent = parent.canonicalize().map_err(|e| {
+                tracing::error!(
+                    "Audit log path validation: cannot canonicalize parent {}: {}",
+                    parent.display(),
+                    e,
+                );
+                HsmError::GeneralError
+            })?;
+            let file_name = path.file_name().ok_or(HsmError::GeneralError)?;
             Ok(canonical_parent.join(file_name))
-        } else {
-            tracing::error!(
-                "Audit log path has no filename component: {}",
-                path.display(),
-            );
-            Err(crate::error::HsmError::GeneralError)
         }
-    } else {
-        Ok(path.to_path_buf())
+        _ => Ok(path.to_path_buf()),
     }
 }
 
-/// Open (or create) the audit log file with restrictive permissions.
-fn open_audit_file(path: &Path) -> Result<std::fs::File, crate::error::HsmError> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.create(true).append(true);
+/// Open (or create, 0600, `O_NOFOLLOW`) the audit log file for appending.
+fn open_audit_file(path: &Path) -> Result<std::fs::File, HsmError> {
+    crate::store::fs_util::open_private(path, true)
+}
 
-    // On Unix, restrict to owner-only read/write (0o600).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+struct Writer {
+    path: PathBuf,
+    file: std::io::BufWriter<std::fs::File>,
+    size: u64,
+}
+
+struct WorkerCtx {
+    shared: Arc<Shared>,
+    writer: Option<Writer>,
+    last_hash: [u8; 32],
+    next_seq: u64,
+    last_timestamp: u64,
+}
+
+impl WorkerCtx {
+    fn build_event(
+        &mut self,
+        session_handle: u64,
+        operation: AuditOperation,
+        result: AuditResult,
+        key_id: Option<String>,
+    ) -> HsmResult<(AuditEvent, [u8; 32], Vec<u8>)> {
+        let wall = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX);
+        let timestamp = if wall <= self.last_timestamp {
+            self.last_timestamp.checked_add(1).ok_or_else(|| {
+                tracing::error!("Audit timestamp space exhausted");
+                HsmError::GeneralError
+            })?
+        } else {
+            wall
+        };
+        let event = AuditEvent {
+            seq: self.next_seq,
+            timestamp,
+            session_handle,
+            operation,
+            key_id,
+            result,
+            previous_hash: self.last_hash,
+        };
+        // Serialize the payload once for hashing and the full line once for
+        // the file (P4).
+        let hash = compute_chain_hash(&self.shared.key, &self.last_hash, &payload_bytes(&event)?);
+        let line = serde_json::to_vec(&event).map_err(|_| HsmError::GeneralError)?;
+        Ok((event, hash, line))
     }
 
-    let file = opts.open(path).map_err(|e| {
-        tracing::error!("Audit log file open failed: {}", e);
-        crate::error::HsmError::GeneralError
-    })?;
-
-    // On Windows, restrict the file ACL to the current user only (equivalent
-    // to Unix 0o600). If ACL setting fails, we log an error (not just a
-    // warning) so the failure is visible in monitoring, but continue rather
-    // than refusing to audit — a world-readable audit log is better than
-    // no audit log at all.
-    #[cfg(windows)]
-    {
-        if let Err(e) = crate::platform_acl::restrict_file_to_owner(path) {
-            tracing::error!(
-                "Failed to restrict audit log file permissions on {}: {}. \
-                 File may be readable by other users.",
-                path.display(),
-                e,
-            );
+    fn commit(&mut self, event: AuditEvent, hash: [u8; 32]) {
+        self.last_hash = hash;
+        self.next_seq += 1;
+        self.last_timestamp = event.timestamp;
+        let mut s = self.shared.state.write();
+        s.last_hash = hash;
+        s.last_timestamp = event.timestamp;
+        s.entries.push_back(event);
+        while s.entries.len() > MAX_IN_MEMORY_ENTRIES {
+            if let Some(old) = s.entries.pop_front() {
+                if let Ok(h) = event_hash(&self.shared.key, &old) {
+                    s.base_hash = h;
+                }
+            }
         }
     }
 
-    Ok(file)
+    fn rotate(&mut self) -> HsmResult<()> {
+        let w = match self.writer.take() {
+            Some(w) => w,
+            None => return Ok(()),
+        };
+        let path = w.path.clone();
+        let mut file = w.file.into_inner().map_err(|_| HsmError::DeviceError)?;
+        file.flush().map_err(|_| HsmError::DeviceError)?;
+        file.sync_all().map_err(|_| HsmError::DeviceError)?;
+        drop(file);
+        AuditLog::rotate_log_files(&path)?;
+        let f = crate::store::fs_util::create_new_private(&path)?;
+        self.writer = Some(Writer {
+            path,
+            file: std::io::BufWriter::new(f),
+            size: 0,
+        });
+        // First event of the new generation chains to the old one.
+        let prev_seq = self.next_seq.saturating_sub(1);
+        let (ev, h, line) = self.build_event(
+            0,
+            AuditOperation::LogRotated {
+                previous_generation_last_seq: prev_seq,
+            },
+            AuditResult::Success,
+            None,
+        )?;
+        self.write_line(&line)?;
+        self.commit(ev, h);
+        Ok(())
+    }
+
+    fn write_line(&mut self, line: &[u8]) -> HsmResult<()> {
+        if let Some(w) = self.writer.as_mut() {
+            w.file
+                .write_all(line)
+                .and_then(|_| w.file.write_all(b"\n"))
+                .map_err(|e| {
+                    tracing::error!("Audit log write failed: {}", e);
+                    HsmError::DeviceError
+                })?;
+            w.size += line.len() as u64 + 1;
+        }
+        Ok(())
+    }
+
+    fn sync(&mut self) -> HsmResult<()> {
+        if let Some(w) = self.writer.as_mut() {
+            w.file
+                .flush()
+                .and_then(|_| w.file.get_ref().sync_data())
+                .map_err(|e| {
+                    tracing::error!("Audit log fsync failed: {}", e);
+                    HsmError::DeviceError
+                })?;
+            let path = w.path.clone();
+            if self.next_seq > 0 {
+                write_anchor(&path, &self.shared.key, self.next_seq - 1, &self.last_hash)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn process(
+        &mut self,
+        session_handle: u64,
+        operation: AuditOperation,
+        result: AuditResult,
+        key_id: Option<String>,
+    ) -> HsmResult<()> {
+        if self.shared.tamper_flag.load(Ordering::Acquire) {
+            return Err(HsmError::AuditChainBroken(
+                "refusing to record: audit chain tamper previously detected".to_string(),
+            ));
+        }
+        if self
+            .writer
+            .as_ref()
+            .is_some_and(|w| w.size >= MAX_LOG_FILE_BYTES)
+        {
+            self.rotate()?;
+        }
+        let (event, hash, line) = self.build_event(session_handle, operation, result, key_id)?;
+        // The in-memory chain only advances if the line reached the file.
+        self.write_line(&line)?;
+        self.commit(event, hash);
+        Ok(())
+    }
 }
 
 impl AuditLog {
-    /// Spawn the background worker thread that processes audit commands.
-    /// The worker owns the receiver end of the channel and maintains local
-    /// copies of `last_hash` and `last_timestamp` for lock-free event building.
     fn spawn_worker(
-        state: Arc<RwLock<AuditLogState>>,
-        log_path: Option<PathBuf>,
-        tamper_flag: Arc<AtomicBool>,
+        mut ctx: WorkerCtx,
         receiver: std::sync::mpsc::Receiver<AuditCommand>,
-        initial_hash: [u8; 32],
-        initial_timestamp: u64,
-    ) -> std::thread::JoinHandle<()> {
+    ) -> HsmResult<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
             .name("audit-worker".to_string())
             .spawn(move || {
-                let mut last_hash = initial_hash;
-                let mut last_timestamp = initial_timestamp;
-
-                /// Process a single Record command. Returns the updated
-                /// (last_hash, last_timestamp) on success.
-                fn process_record(
-                    state: &Arc<RwLock<AuditLogState>>,
-                    log_path: &Option<PathBuf>,
-                    tamper_flag: &Arc<AtomicBool>,
-                    last_hash: &mut [u8; 32],
-                    last_timestamp: &mut u64,
-                    session_handle: u64,
-                    operation: AuditOperation,
-                    result: AuditResult,
-                    key_id: Option<String>,
-                ) {
-                    if tamper_flag.load(Ordering::Acquire) {
-                        return;
-                    }
-
-                    let duration = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default();
-                    let wall_timestamp = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-
-                    // Enforce monotonicity
-                    let timestamp = if wall_timestamp <= *last_timestamp {
-                        match last_timestamp.checked_add(1) {
-                            Some(next) => next,
-                            None => {
-                                tracing::error!(
-                                    "Audit timestamp space exhausted (u64::MAX reached). \
-                                     Cannot guarantee monotonicity."
-                                );
-                                tamper_flag.store(true, Ordering::Release);
-                                return;
-                            }
-                        }
-                    } else {
-                        wall_timestamp
-                    };
-                    *last_timestamp = timestamp;
-
-                    let event = AuditEvent {
-                        timestamp,
-                        session_handle,
-                        operation,
-                        key_id,
-                        result,
-                        previous_hash: *last_hash,
-                    };
-
-                    // Compute chain hash: SHA-256(previous_hash || payload)
-                    let new_hash = match compute_chain_hash(last_hash, &event) {
-                        Ok(h) => h,
-                        Err(_) => {
-                            tracing::error!("Audit worker: chain hash computation failed");
-                            return;
-                        }
-                    };
-                    *last_hash = new_hash;
-
-                    // Persist to disk if configured
-                    if let Some(path) = log_path {
-                        let io_result = (|| -> Result<(), crate::error::HsmError> {
-                            let mut file = open_audit_file(path)?;
-                            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-
-                            if file_size >= MAX_LOG_FILE_BYTES {
-                                drop(file);
-                                AuditLog::rotate_log_files(path)?;
-                                file = open_audit_file(path)?;
-                            }
-
-                            let line = serde_json::to_string(&event).map_err(|e| {
-                                tracing::error!("Audit log serialization failed: {}", e);
-                                crate::error::HsmError::GeneralError
-                            })?;
-
-                            writeln!(file, "{}", line).map_err(|e| {
-                                tracing::error!("Audit log write failed: {}", e);
-                                crate::error::HsmError::GeneralError
-                            })?;
-                            file.sync_all().map_err(|e| {
-                                tracing::error!("Audit log fsync failed: {}", e);
-                                crate::error::HsmError::GeneralError
-                            })?;
-                            Ok(())
-                        })();
-
-                        if let Err(e) = io_result {
-                            tracing::error!("Audit worker: disk I/O failed: {}", e);
-                        }
-                    }
-
-                    // Push to shared state so readers (get_entries, verify_chain, etc.) see it.
-                    {
-                        let mut s = state.write();
-                        s.last_hash = new_hash;
-                        s.last_timestamp = *last_timestamp;
-                        s.entries.push(event);
-
-                        // Cap in-memory entries to prevent unbounded growth.
-                        if s.entries.len() > MAX_IN_MEMORY_ENTRIES {
-                            let excess = s.entries.len() - MAX_IN_MEMORY_ENTRIES;
-                            s.entries.drain(..excess);
-                        }
-                    }
-                }
-
+                let mut pending_sync: Vec<std::sync::mpsc::SyncSender<HsmResult<()>>> = Vec::new();
+                let mut pending_flush: Vec<std::sync::mpsc::SyncSender<()>> = Vec::new();
+                let mut batch_err: Option<HsmError> = None;
                 loop {
-                    match receiver.recv() {
-                        Ok(AuditCommand::Record {
-                            session_handle,
-                            operation,
-                            result,
-                            key_id,
-                        }) => {
-                            process_record(
-                                &state,
-                                &log_path,
-                                &tamper_flag,
-                                &mut last_hash,
-                                &mut last_timestamp,
+                    let first = match receiver.recv() {
+                        Ok(c) => c,
+                        Err(_) => break,
+                    };
+                    let mut cmd = Some(first);
+                    let mut n = 0;
+                    while let Some(c) = cmd.take() {
+                        match c {
+                            AuditCommand::Record {
                                 session_handle,
                                 operation,
                                 result,
                                 key_id,
-                            );
-                        }
-                        Ok(AuditCommand::Flush { done }) => {
-                            // Drain any pending records before acknowledging.
-                            while let Ok(cmd) = receiver.try_recv() {
-                                match cmd {
-                                    AuditCommand::Record {
-                                        session_handle,
-                                        operation,
-                                        result,
-                                        key_id,
-                                    } => {
-                                        process_record(
-                                            &state,
-                                            &log_path,
-                                            &tamper_flag,
-                                            &mut last_hash,
-                                            &mut last_timestamp,
-                                            session_handle,
-                                            operation,
-                                            result,
-                                            key_id,
-                                        );
-                                    }
-                                    AuditCommand::Flush { done: inner_done } => {
-                                        let _ = inner_done.send(());
-                                    }
+                                done,
+                            } => {
+                                let r = ctx.process(session_handle, operation, result, key_id);
+                                if let Err(e) = &r {
+                                    batch_err.get_or_insert(e.clone());
+                                }
+                                if let Some(d) = done {
+                                    pending_sync.push(d);
                                 }
                             }
-                            let _ = done.send(());
+                            AuditCommand::Flush { done } => pending_flush.push(done),
                         }
-                        Err(_) => {
-                            // Channel closed — sender dropped. Exit the worker.
-                            break;
+                        n += 1;
+                        if n < GROUP_COMMIT_MAX {
+                            cmd = receiver.try_recv().ok();
                         }
                     }
+                    // Group commit: one fsync + anchor update per batch.
+                    if let Err(e) = ctx.sync() {
+                        batch_err.get_or_insert(e);
+                    }
+                    let res = match batch_err.take() {
+                        Some(e) => {
+                            if !matches!(e, HsmError::AuditChainBroken(_)) {
+                                ctx.shared.io_failed.store(true, Ordering::Release);
+                            }
+                            Err(e)
+                        }
+                        None => Ok(()),
+                    };
+                    for d in pending_sync.drain(..) {
+                        let _ = d.send(res.clone());
+                    }
+                    for d in pending_flush.drain(..) {
+                        let _ = d.send(());
+                    }
                 }
+                let _ = ctx.sync();
             })
-            .expect("failed to spawn audit worker thread")
+            .map_err(|e| {
+                tracing::error!("failed to spawn audit worker thread: {}", e);
+                HsmError::GeneralError
+            })
     }
 
-    pub fn new() -> Self {
-        let state = Arc::new(RwLock::new(AuditLogState {
-            entries: Vec::new(),
-            last_hash: [0u8; 32],
-            tamper_detected: false,
-            last_timestamp: 0,
-        }));
-        let tamper_flag = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = std::sync::mpsc::channel();
-
+    fn start(
+        key: Zeroizing<[u8; 32]>,
+        writer: Option<Writer>,
+        recovered: ([u8; 32], u64, u64),
+        tampered: bool,
+        fail_closed: bool,
+        level: AuditLevel,
+        log_path: Option<PathBuf>,
+        lock: Option<std::fs::File>,
+    ) -> HsmResult<Self> {
+        let (hash, next_seq, last_ts) = recovered;
+        let shared = Arc::new(Shared {
+            state: RwLock::new(AuditLogState {
+                entries: VecDeque::new(),
+                base_hash: hash,
+                last_hash: hash,
+                last_timestamp: last_ts,
+            }),
+            key,
+            tamper_flag: AtomicBool::new(tampered),
+            io_failed: AtomicBool::new(false),
+            fail_closed,
+            level,
+        });
+        let (sender, receiver) = std::sync::mpsc::sync_channel(AUDIT_QUEUE_CAPACITY);
         let worker = Self::spawn_worker(
-            Arc::clone(&state),
-            None,
-            Arc::clone(&tamper_flag),
+            WorkerCtx {
+                shared: Arc::clone(&shared),
+                writer,
+                last_hash: hash,
+                next_seq,
+                last_timestamp: last_ts,
+            },
             receiver,
-            [0u8; 32],
-            0,
-        );
-
-        Self {
-            state,
-            log_path: None,
-            sender: Some(sender),
-            tamper_flag,
-            worker: Some(worker),
-        }
+        )?;
+        let backend = Arc::new(Backend {
+            shared: Arc::clone(&shared),
+            sender: parking_lot::Mutex::new(Some(sender)),
+            worker: parking_lot::Mutex::new(Some(worker)),
+            _lock: lock,
+        });
+        Ok(Self {
+            backend,
+            shared,
+            log_path,
+        })
     }
 
-    /// Create an audit log with disk persistence enabled.
-    /// Events are appended to the file as NDJSON (one JSON object per line).
-    ///
-    /// The path is validated and canonicalized to prevent symlink/path traversal
-    /// attacks. Returns an error if the path is invalid (symlink, not a regular
-    /// file, parent directory unresolvable).
-    ///
-    /// If an existing log file is found, the hash chain is recovered **and
-    /// verified** so that new events are correctly chained to the previous
-    /// entries. If the chain is broken or the file is corrupt, the
-    /// `tamper_detected` flag is set permanently and `record()` will refuse
-    /// to append new events. Callers should check `is_tamper_detected()` after
-    /// construction.
-    pub fn new_with_path(path: PathBuf) -> Result<Self, crate::error::HsmError> {
-        let path = validate_log_path(&path)?;
+    /// In-memory audit log (no disk persistence) with a random per-instance
+    /// chain key.
+    pub fn new() -> Self {
+        let mut key = Zeroizing::new([0u8; 32]);
+        {
+            use rand::RngCore;
+            rand::rngs::OsRng.fill_bytes(key.as_mut());
+        }
+        Self::start(
+            key,
+            None,
+            ([0u8; 32], 0, 0),
+            false,
+            false,
+            AuditLevel::All,
+            None,
+            None,
+        )
+        .expect("failed to spawn audit worker thread")
+    }
 
-        let (recovered_hash, tampered) = match Self::recover_chain_from_file(&path) {
-            ChainRecoveryResult::NoFile => ([0u8; 32], false),
-            ChainRecoveryResult::Verified(hash) => (hash, false),
+    /// Create an audit log with disk persistence at `path` (key file
+    /// `<path>.key`, anchor `<path>.anchor`, fail-open, all events).
+    ///
+    /// If the existing log (or its anchor) fails verification the tamper
+    /// flag is set permanently and `record()` refuses new events.
+    pub fn new_with_path(path: PathBuf) -> Result<Self, HsmError> {
+        let key_path = default_key_path(&path);
+        Self::open_file(path, key_path, false, AuditLevel::All)
+    }
+
+    /// Build the audit log described by the configuration.
+    pub fn from_config(cfg: &crate::config::config::AuditConfig) -> Result<Self, HsmError> {
+        let level = AuditLevel::parse(&cfg.log_level)
+            .ok_or_else(|| HsmError::ConfigError("invalid audit.log_level".to_string()))?;
+        if !cfg.enabled {
+            tracing::warn!("audit logging to disk is DISABLED (audit.enabled = false)");
+            let mut key = Zeroizing::new([0u8; 32]);
+            crate::store::encrypted_store::fill_random(key.as_mut())?;
+            return Self::start(key, None, ([0u8; 32], 0, 0), false, false, level, None, None);
+        }
+        let key_path = cfg
+            .key_path
+            .clone()
+            .unwrap_or_else(|| default_key_path(&cfg.log_path));
+        Self::open_file(cfg.log_path.clone(), key_path, cfg.fail_closed, level)
+    }
+
+    fn open_file(
+        path: PathBuf,
+        key_path: PathBuf,
+        fail_closed: bool,
+        level: AuditLevel,
+    ) -> Result<Self, HsmError> {
+        let path = validate_log_path(&path)?;
+        let mut reg = REGISTRY.lock();
+        let map = reg.get_or_insert_with(Default::default);
+        if let Some(backend) = map.get(&path).and_then(|w| w.upgrade()) {
+            // Another handle in this process already owns this log.
+            let shared = Arc::clone(&backend.shared);
+            return Ok(Self {
+                backend,
+                shared,
+                log_path: Some(path),
+            });
+        }
+        let log = Self::open_file_exclusive(path.clone(), key_path, fail_closed, level)?;
+        map.retain(|_, w| w.strong_count() > 0);
+        map.insert(path, Arc::downgrade(&log.backend));
+        Ok(log)
+    }
+
+    fn open_file_exclusive(
+        path: PathBuf,
+        key_path: PathBuf,
+        fail_closed: bool,
+        level: AuditLevel,
+    ) -> Result<Self, HsmError> {
+        // Cross-process single-writer lock (<log>.lock, 0600, O_NOFOLLOW).
+        let lock_path = {
+            let mut n = path.as_os_str().to_os_string();
+            n.push(".lock");
+            PathBuf::from(n)
+        };
+        let lock = crate::store::fs_util::open_private(&lock_path, false)?;
+        {
+            use fs2::FileExt;
+            lock.try_lock_exclusive().map_err(|_| {
+                tracing::error!(
+                    "audit log {} is in use by another process — configure a distinct \
+                     audit.log_path per process",
+                    path.display()
+                );
+                HsmError::DeviceError
+            })?;
+        }
+        let log_exists = path.exists() || anchor_path(&path).exists();
+        let key = match load_or_create_key(&key_path, log_exists)? {
+            Some(k) => k,
+            None => {
+                tracing::error!(
+                    "audit key file {} missing for existing log {} — cannot verify; \
+                     treating as tampered",
+                    key_path.display(),
+                    path.display()
+                );
+                let mut k = Zeroizing::new([0u8; 32]);
+                crate::store::encrypted_store::fill_random(k.as_mut())?;
+                return Self::start(
+                    k,
+                    None,
+                    ([0u8; 32], 0, 0),
+                    true,
+                    fail_closed,
+                    level,
+                    Some(path),
+                    Some(lock),
+                );
+            }
+        };
+
+        let (recovered, tampered) = match Self::recover_chain_from_file(&path, &key) {
+            ChainRecoveryResult::NoFile => (([0u8; 32], 0, 0), false),
+            ChainRecoveryResult::Verified(h, seq, ts) => ((h, seq, ts), false),
             ChainRecoveryResult::Broken(reason) => {
                 tracing::error!(
                     "Audit chain integrity check FAILED for {}: {}. \
@@ -557,63 +884,90 @@ impl AuditLog {
                     path.display(),
                     reason,
                 );
-                ([0u8; 32], true)
+                (([0u8; 32], 0, 0), true)
             }
         };
-
-        let state = Arc::new(RwLock::new(AuditLogState {
-            entries: Vec::new(),
-            last_hash: recovered_hash,
-            tamper_detected: tampered,
-            last_timestamp: 0,
-        }));
-        let tamper_flag = Arc::new(AtomicBool::new(tampered));
-        let (sender, receiver) = std::sync::mpsc::channel();
-
-        let worker = Self::spawn_worker(
-            Arc::clone(&state),
-            Some(path.clone()),
-            Arc::clone(&tamper_flag),
-            receiver,
-            recovered_hash,
-            0,
-        );
-
-        Ok(Self {
-            state,
-            log_path: Some(path),
-            sender: Some(sender),
-            tamper_flag,
-            worker: Some(worker),
-        })
+        let writer = if tampered {
+            None
+        } else {
+            let f = open_audit_file(&path)?;
+            let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+            Some(Writer {
+                path: path.clone(),
+                file: std::io::BufWriter::new(f),
+                size,
+            })
+        };
+        Self::start(
+            key,
+            writer,
+            recovered,
+            tampered,
+            fail_closed,
+            level,
+            Some(path),
+            Some(lock),
+        )
     }
 
     /// Returns `true` if the audit log chain was found to be corrupt or
     /// tampered with during recovery. Once set, this flag is permanent.
-    /// When `true`, `record()` will refuse to append new events.
     pub fn is_tamper_detected(&self) -> bool {
-        self.tamper_flag.load(Ordering::Acquire)
+        self.shared.tamper_flag.load(Ordering::Acquire)
     }
 
-    /// Read the existing NDJSON audit log file, recompute the SHA-256
-    /// hash chain, and **verify each link** to detect tampering.
-    fn recover_chain_from_file(path: &Path) -> ChainRecoveryResult {
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
+    /// Returns `true` if an event could not be written durably.
+    pub fn has_io_failure(&self) -> bool {
+        self.shared.io_failed.load(Ordering::Acquire)
+    }
+
+    /// Verify a log file offline (e.g. from the admin CLI while the daemon
+    /// owns the live log). Returns `(events, last_seq)`.
+    pub fn verify_file(path: &Path, key_path: &Path) -> Result<(u64, u64), String> {
+        let key = match load_or_create_key(key_path, true) {
+            Ok(Some(k)) => k,
+            _ => return Err("audit key unavailable".to_string()),
+        };
+        match Self::recover_chain_from_file(path, &key) {
+            ChainRecoveryResult::NoFile => Ok((0, 0)),
+            ChainRecoveryResult::Verified(_, next, _) => Ok((next, next.saturating_sub(1))),
+            ChainRecoveryResult::Broken(r) => Err(r),
+        }
+    }
+
+    /// Read the existing NDJSON audit log file, recompute the keyed chain,
+    /// verify each link and the sequence numbers, and check the anchor.
+    fn recover_chain_from_file(path: &Path, key: &[u8; 32]) -> ChainRecoveryResult {
+        let anchor = match read_anchor(path, key) {
+            Ok(a) => a,
+            Err(e) => return ChainRecoveryResult::Broken(e),
+        };
+        let file = match crate::store::fs_util::open_existing_readonly(path) {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                return match anchor {
+                    None => ChainRecoveryResult::NoFile,
+                    Some((seq, _)) => ChainRecoveryResult::Broken(format!(
+                        "log file missing but anchor records {} event(s)",
+                        seq + 1
+                    )),
+                };
+            }
             Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    return ChainRecoveryResult::NoFile;
-                }
                 return ChainRecoveryResult::Broken(format!(
-                    "could not open log file {}: {}",
+                    "could not open log file {}: {:?}",
                     path.display(),
-                    e,
-                ));
+                    e
+                ))
             }
         };
 
         let reader = std::io::BufReader::new(file);
         let mut running_hash = [0u8; 32];
+        let mut expected_seq: Option<u64> = None;
+        let mut last_ts = 0u64;
+        let mut anchor_seen = false;
+        let mut count = 0u64;
 
         for (line_num, line_result) in reader.lines().enumerate() {
             let line = match line_result {
@@ -622,150 +976,242 @@ impl AuditLog {
                     return ChainRecoveryResult::Broken(format!(
                         "I/O error at line {}: {}",
                         line_num + 1,
-                        e,
-                    ));
+                        e
+                    ))
                 }
             };
-
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-
             let event: AuditEvent = match serde_json::from_str(trimmed) {
                 Ok(ev) => ev,
                 Err(e) => {
                     return ChainRecoveryResult::Broken(format!(
                         "failed to deserialize line {}: {}",
                         line_num + 1,
-                        e,
-                    ));
+                        e
+                    ))
                 }
             };
-
-            // Verify that this event's previous_hash matches our running chain.
-            if event.previous_hash != running_hash {
-                return ChainRecoveryResult::Broken(format!(
-                    "TAMPER DETECTED at line {}: expected previous_hash {:02x?}, found {:02x?}",
-                    line_num + 1,
-                    &running_hash[..8],
-                    &event.previous_hash[..8],
-                ));
+            match expected_seq {
+                None => {
+                    // First line: either the very first event (seq 0, zero
+                    // chain) or the rotation header of a later generation.
+                    if event.seq == 0 {
+                        if event.previous_hash != [0u8; 32] {
+                            return ChainRecoveryResult::Broken(
+                                "first event does not start the chain".to_string(),
+                            );
+                        }
+                    } else if !matches!(event.operation, AuditOperation::LogRotated { .. }) {
+                        return ChainRecoveryResult::Broken(format!(
+                            "log starts at seq {} without a rotation header (head truncated?)",
+                            event.seq
+                        ));
+                    }
+                }
+                Some(seq) => {
+                    if event.seq != seq {
+                        return ChainRecoveryResult::Broken(format!(
+                            "sequence gap at line {}: expected {}, found {}",
+                            line_num + 1,
+                            seq,
+                            event.seq
+                        ));
+                    }
+                    if event.previous_hash != running_hash {
+                        return ChainRecoveryResult::Broken(format!(
+                            "TAMPER DETECTED at line {}: chain mismatch",
+                            line_num + 1
+                        ));
+                    }
+                }
             }
-
-            // Recompute the chain hash: SHA-256(previous_hash || payload).
-            match compute_chain_hash(&running_hash, &event) {
-                Ok(h) => running_hash = h,
+            running_hash = match event_hash(key, &event) {
+                Ok(h) => h,
                 Err(_) => {
                     return ChainRecoveryResult::Broken(format!(
                         "serialization failed at line {}",
-                        line_num + 1,
-                    ));
+                        line_num + 1
+                    ))
+                }
+            };
+            if let Some((aseq, ahash)) = anchor {
+                if aseq == event.seq {
+                    if ahash != running_hash {
+                        return ChainRecoveryResult::Broken(
+                            "anchor does not match the log (rewritten history?)".to_string(),
+                        );
+                    }
+                    anchor_seen = true;
                 }
             }
+            expected_seq = Some(event.seq + 1);
+            last_ts = event.timestamp;
+            count += 1;
         }
 
-        if running_hash == [0u8; 32] {
-            // File existed but was empty — treat as fresh start.
-            ChainRecoveryResult::NoFile
-        } else {
-            tracing::info!(
-                "Audit chain recovery: restored and verified chain from {}",
-                path.display(),
-            );
-            ChainRecoveryResult::Verified(running_hash)
+        match (expected_seq, anchor) {
+            (None, None) => ChainRecoveryResult::NoFile,
+            (None, Some(_)) => {
+                ChainRecoveryResult::Broken("log is empty but anchor exists (truncated)".into())
+            }
+            (Some(next), Some((aseq, _))) if aseq >= next => ChainRecoveryResult::Broken(
+                format!("log truncated: anchor seq {} beyond last event {}", aseq, next - 1),
+            ),
+            (Some(_), Some(_)) if !anchor_seen => {
+                ChainRecoveryResult::Broken("anchor refers to an event not in this log".into())
+            }
+            (Some(next), anchor) => {
+                if anchor.is_none() {
+                    tracing::warn!(
+                        "audit log {} has no anchor file; tail truncation cannot be ruled out",
+                        path.display()
+                    );
+                }
+                tracing::info!(
+                    "Audit chain recovery: verified {} event(s) from {}",
+                    count,
+                    path.display()
+                );
+                ChainRecoveryResult::Verified(running_hash, next, last_ts)
+            }
         }
     }
 
     /// Rotate the log files: shift existing generations downward.
     /// `.4` is deleted, `.3` → `.4`, … `.1` → `.2`, current → `.1`.
-    ///
-    /// **Chain continuity:** The hash chain is NOT broken by rotation. New events
-    /// written after rotation carry `previous_hash` from the last event in the
-    /// rotated file (preserved in `AuditLogState::last_hash`). To verify the full
-    /// chain across rotations, verify each generation file's internal chain and
-    /// ensure the first event of generation N has `previous_hash` equal to the
-    /// last chain hash of generation N+1.
-    fn rotate_log_files(path: &Path) -> Result<(), crate::error::HsmError> {
+    fn rotate_log_files(path: &Path) -> Result<(), HsmError> {
         tracing::info!(
             "Audit log rotation: {} exceeds {} bytes, rotating.",
             path.display(),
             MAX_LOG_FILE_BYTES,
         );
-
-        // Shift existing generations downward.
         for gen in (1..MAX_ROTATED_FILES).rev() {
             let from = rotated_path(path, gen);
             let to = rotated_path(path, gen + 1);
-            if from.exists() {
-                if let Err(e) = std::fs::rename(&from, &to) {
+            if std::fs::symlink_metadata(&from).is_ok() {
+                std::fs::rename(&from, &to).map_err(|e| {
                     tracing::error!(
                         "Audit log rotation: failed to rename {} -> {}: {}",
                         from.display(),
                         to.display(),
                         e,
                     );
-                    return Err(crate::error::HsmError::GeneralError);
-                }
+                    HsmError::DeviceError
+                })?;
             }
         }
-
-        // Move current file to generation 1.
         let gen1 = rotated_path(path, 1);
         std::fs::rename(path, &gen1).map_err(|e| {
             tracing::error!("Audit log rotation: rename failed: {}", e);
-            crate::error::HsmError::GeneralError
+            HsmError::DeviceError
         })?;
-
+        if let Some(dir) = path.parent() {
+            crate::store::fs_util::fsync_dir(dir)?;
+        }
         Ok(())
     }
 
-    /// Record an audit event asynchronously by sending it to the background
-    /// worker thread. The expensive work (hash chain computation, JSON
-    /// serialization, file I/O with fsync) happens off the caller's hot path.
+    fn precheck(&self, operation: &AuditOperation) -> HsmResult<bool> {
+        if self.shared.tamper_flag.load(Ordering::Acquire) {
+            return Err(HsmError::AuditChainBroken(
+                "refusing to record: audit chain tamper previously detected".to_string(),
+            ));
+        }
+        if self.shared.fail_closed && self.shared.io_failed.load(Ordering::Acquire) {
+            return Err(HsmError::DeviceError);
+        }
+        Ok(self.shared.level.records(operation))
+    }
+
+    /// Record an audit event asynchronously (bounded queue; blocks when the
+    /// queue is full).
     ///
-    /// Returns `Err(AuditChainBroken)` if tamper has been detected — the
-    /// HSM must not continue normal operations with a compromised audit trail.
+    /// Returns `Err(AuditChainBroken)` if tamper has been detected, and — in
+    /// fail-closed mode — `Err(DeviceError)` after a failed disk write.
     pub fn record(
         &self,
         session_handle: u64,
         operation: AuditOperation,
         result: AuditResult,
         key_id: Option<String>,
-    ) -> crate::error::HsmResult<()> {
-        // Fast-path rejection via atomic flag — no lock needed.
-        if self.tamper_flag.load(Ordering::Acquire) {
-            return Err(crate::error::HsmError::AuditChainBroken(
-                "refusing to record: audit chain tamper previously detected".to_string(),
-            ));
+    ) -> HsmResult<()> {
+        if !self.precheck(&operation)? {
+            return Ok(());
         }
-
-        // Sanitize key_id to prevent log injection via control characters
         let key_id = key_id.map(|s| sanitize_audit_field(&s));
-
-        if let Some(sender) = &self.sender {
+        if let Some(sender) = self.backend.sender() {
             sender
                 .send(AuditCommand::Record {
                     session_handle,
                     operation,
                     result,
                     key_id,
+                    done: None,
                 })
-                .map_err(|_| crate::error::HsmError::GeneralError)?;
+                .map_err(|_| HsmError::GeneralError)?;
         }
-
         Ok(())
     }
 
-    /// Flush all pending audit events synchronously. Blocks until the
-    /// background worker has processed every queued command, or until
-    /// a 5-second timeout expires.
-    pub fn flush(&self) {
-        if let Some(sender) = &self.sender {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let _ = sender.send(AuditCommand::Flush { done: tx });
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+    /// Record an event and wait until it is durable (flushed and fsynced).
+    /// Returns an error if it could not be written. With
+    /// `audit.fail_closed = false` write errors are only logged.
+    pub fn record_sync(
+        &self,
+        session_handle: u64,
+        operation: AuditOperation,
+        result: AuditResult,
+        key_id: Option<String>,
+    ) -> HsmResult<()> {
+        if !self.precheck(&operation)? {
+            return Ok(());
         }
+        let key_id = key_id.map(|s| sanitize_audit_field(&s));
+        let sender = match self.backend.sender() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        sender
+            .send(AuditCommand::Record {
+                session_handle,
+                operation,
+                result,
+                key_id,
+                done: Some(tx),
+            })
+            .map_err(|_| HsmError::GeneralError)?;
+        let r = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap_or(Err(HsmError::DeviceError));
+        match r {
+            Err(e) if self.shared.fail_closed => Err(e),
+            Err(e) => {
+                tracing::error!("audit event could not be made durable: {:?}", e);
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+        }
+    }
+
+    /// Flush all pending audit events synchronously. Blocks until the
+    /// background worker has processed every queued command, or until a
+    /// 5-second timeout expires.
+    pub fn flush(&self) {
+        if let Some(sender) = self.backend.sender() {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            if sender.send(AuditCommand::Flush { done: tx }).is_ok() {
+                let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            }
+        }
+    }
+
+    /// Path of the on-disk log, if any.
+    pub fn log_path(&self) -> Option<&Path> {
+        self.log_path.as_deref()
     }
 
     /// # Security
@@ -774,7 +1220,7 @@ impl AuditLog {
     /// privileges before exposing audit data. This method does not enforce
     /// authorization internally.
     pub fn entry_count(&self) -> usize {
-        self.state.read().entries.len()
+        self.shared.state.read().entries.len()
     }
 
     /// Get a clone of all audit entries (for export/inspection).
@@ -784,7 +1230,7 @@ impl AuditLog {
     /// Callers must verify SO authorization. Prefer `get_entries_paginated()`
     /// for large logs to avoid cloning up to 100K entries at once.
     pub fn get_entries(&self) -> Vec<AuditEvent> {
-        self.state.read().entries.clone()
+        self.shared.state.read().entries.iter().cloned().collect()
     }
 
     /// Get a clone of the most recent `n` entries.
@@ -793,9 +1239,9 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn get_recent_entries(&self, n: usize) -> Vec<AuditEvent> {
-        let state = self.state.read();
+        let state = self.shared.state.read();
         let start = state.entries.len().saturating_sub(n);
-        state.entries[start..].to_vec()
+        state.entries.iter().skip(start).cloned().collect()
     }
 
     /// Get a paginated window of entries. Returns entries in the range
@@ -806,12 +1252,11 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn get_entries_paginated(&self, offset: usize, limit: usize) -> Vec<AuditEvent> {
-        let state = self.state.read();
-        let end = (offset + limit).min(state.entries.len());
+        let state = self.shared.state.read();
         if offset >= state.entries.len() {
             return Vec::new();
         }
-        state.entries[offset..end].to_vec()
+        state.entries.iter().skip(offset).take(limit).cloned().collect()
     }
 
     /// Export all entries as a JSON array string.
@@ -822,7 +1267,7 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn export_json(&self) -> String {
-        let entries = self.state.read().entries.clone();
+        let entries = self.shared.state.read().entries.clone();
         serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
     }
 
@@ -834,7 +1279,7 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn export_ndjson(&self) -> String {
-        let entries = self.state.read().entries.clone();
+        let entries = self.shared.state.read().entries.clone();
         entries
             .iter()
             .map(|e| {
@@ -866,7 +1311,7 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn export_syslog(&self) -> Vec<String> {
-        let entries = self.state.read().entries.clone();
+        let entries = self.shared.state.read().entries.clone();
         entries
             .iter()
             .map(|e| {
@@ -916,35 +1361,33 @@ impl AuditLog {
             .collect()
     }
 
-    /// Verify the integrity of the in-memory audit log chain.
+    /// Verify the integrity of the in-memory audit log chain (starting from
+    /// the chain value preceding the oldest retained entry, H3-26).
     /// Returns `Ok(count)` if the chain is valid,
     /// `Err(index)` with the index of the first broken link.
     pub fn verify_chain(&self) -> Result<usize, usize> {
-        let state = self.state.read();
-        let mut expected_hash = [0u8; 32];
+        let state = self.shared.state.read();
+        let mut expected_hash = state.base_hash;
+        let mut expected_seq: Option<u64> = None;
         for (i, entry) in state.entries.iter().enumerate() {
             if entry.previous_hash != expected_hash {
                 return Err(i);
             }
-            match compute_chain_hash(&expected_hash, entry) {
+            if let Some(seq) = expected_seq {
+                if entry.seq != seq {
+                    return Err(i);
+                }
+            }
+            match event_hash(&self.shared.key, entry) {
                 Ok(h) => expected_hash = h,
                 Err(_) => return Err(i),
             }
+            expected_seq = Some(entry.seq + 1);
         }
         Ok(state.entries.len())
     }
 }
 
-impl Drop for AuditLog {
-    fn drop(&mut self) {
-        // Drop sender to signal the worker to exit.
-        self.sender.take();
-        // Wait for worker to drain remaining events and exit.
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
-        }
-    }
-}
 
 /// Build a rotated file path: `path.1`, `path.2`, etc.
 fn rotated_path(base: &Path, generation: u32) -> PathBuf {
@@ -1052,5 +1495,11 @@ fn format_operation_name(op: &AuditOperation) -> &'static str {
         AuditOperation::DeriveKey { .. } => "DeriveKey",
         AuditOperation::FindObjects { .. } => "FindObjects",
         AuditOperation::GetAttributeValue => "GetAttributeValue",
+        AuditOperation::GetAttributeValueSensitive { .. } => "GetAttributeValueSensitive",
+        AuditOperation::InitPin { .. } => "InitPIN",
+        AuditOperation::SetPin { .. } => "SetPIN",
+        AuditOperation::CopyObject => "CopyObject",
+        AuditOperation::SetAttributeValue => "SetAttributeValue",
+        AuditOperation::LogRotated { .. } => "LogRotated",
     }
 }

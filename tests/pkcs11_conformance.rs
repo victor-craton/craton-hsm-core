@@ -41,6 +41,8 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"ConformTe");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -173,6 +175,8 @@ fn test_double_session_close() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"DblClose");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -214,6 +218,8 @@ fn test_pin_complexity_all_same_char() {
     let weak_pin = b"aaaaaaaa"; // 8 chars, but only 1 distinct byte
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinTest!");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         weak_pin.as_ptr() as *mut _,
@@ -233,6 +239,8 @@ fn test_pin_complexity_single_class() {
     let weak_pin = b"abcdefgh"; // 8 chars, >=3 distinct, but only lowercase class
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinCls1!");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         weak_pin.as_ptr() as *mut _,
@@ -252,6 +260,8 @@ fn test_pin_complexity_valid() {
     let good_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinGood!");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         good_pin.as_ptr() as *mut _,
@@ -271,6 +281,8 @@ fn test_pin_too_short() {
     let short_pin = b"Ab1!"; // 4 chars, below min of 8
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinShort");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         short_pin.as_ptr() as *mut _,
@@ -660,6 +672,8 @@ fn test_logout_without_login() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LgOutNoL");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -714,6 +728,8 @@ fn test_close_all_sessions() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"ClsAllSs");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -1337,6 +1353,8 @@ fn test_login_lockout() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LockTst!");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,

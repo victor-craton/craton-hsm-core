@@ -22,6 +22,8 @@ fn test_extended_pkcs11_compliance() {
     let so_pin = b"extpin12";
     let mut label = [b' '; 32];
     label[..12].copy_from_slice(b"ExtTestToken");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,

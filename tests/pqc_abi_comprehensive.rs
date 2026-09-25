@@ -31,6 +31,8 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"PQCTest");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -568,6 +570,8 @@ fn test_ml_dsa_sign_without_login() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"NoLoginTk");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -760,6 +764,8 @@ fn test_ml_dsa_keygen_on_ro_session() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..6].copy_from_slice(b"ROTest");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -1149,6 +1155,8 @@ fn test_pqc_mechanism_in_mechanism_list() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"MechList");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,

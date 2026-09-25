@@ -2,49 +2,77 @@
 // Copyright 2026 Craton Software Company
 //! HSM backup/restore — encrypted export of token objects.
 //!
-//! Backup file format:
+//! Backup file format (version 2):
 //! ```text
 //! [4 bytes: magic "RHBK"]
-//! [4 bytes: version (1) as u32 LE]
+//! [4 bytes: version (2) as u32 LE]
+//! [1 byte : KDF id (1 = PBKDF2-HMAC-SHA256)]
+//! [4 bytes: PBKDF2 iterations as u32 LE]
 //! [32 bytes: PBKDF2 salt]
 //! [12 bytes: AES-GCM nonce]
 //! [remaining: AES-256-GCM ciphertext of JSON payload]
 //! ```
 //!
-//! The JSON payload (before encryption) contains a `BackupPayload` struct
-//! with metadata and a Vec of serialized `StoredObject`s.
+//! The whole header is passed to AES-GCM as associated data, so magic,
+//! version, KDF parameters, salt and nonce are authenticated (H3-16). The KDF
+//! parameters travel with the backup, so changing `pbkdf2_iterations` does not
+//! make old backups unreadable.
+//!
+//! Restored objects are validated with the same policy as object creation
+//! ([`sanitize_restored_object`]): secret keys must be sensitive,
+//! `CKA_TRUSTED` and provenance claims are stripped, and callers must
+//! re-allocate handles when inserting them (see `HsmCore::import_objects`).
+//!
+//! **Binding:** pass a per-token random identity (e.g. `HsmCore::token_binding`)
+//! as `token_serial` — the public serial number is not a secret binding.
 
 use std::collections::HashSet;
 
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use rand::rngs::OsRng;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
+use crate::config::defaults::{DEFAULT_PBKDF2_ITERATIONS, NONCE_LEN, SALT_LEN};
 use crate::error::{HsmError, HsmResult};
-use crate::store::encrypted_store::derive_key_from_pin;
+use crate::store::attributes::{sanitize_restored_object, ZeroizingObjects};
+use crate::store::encrypted_store::{derive_key_from_pin, fill_random};
 use crate::store::object::StoredObject;
 
 const BACKUP_MAGIC: &[u8; 4] = b"RHBK";
-const BACKUP_VERSION: u32 = 1;
-const SALT_LEN: usize = 32;
-const NONCE_LEN: usize = 12;
-const HEADER_LEN: usize = 4 + 4 + SALT_LEN + NONCE_LEN; // 52 bytes
+const BACKUP_VERSION: u32 = 2;
+const KDF_PBKDF2_SHA256: u8 = 1;
+const HEADER_LEN: usize = 4 + 4 + 1 + 4 + SALT_LEN + NONCE_LEN; // 57 bytes
 const MIN_PASSPHRASE_LEN: usize = 16;
+/// Bounds on the iteration count accepted from a backup header.
+const MIN_BACKUP_ITERATIONS: u32 = 100_000;
+const MAX_BACKUP_ITERATIONS: u32 = 10_000_000;
 
-/// Inner JSON payload that gets encrypted in the backup file.
-#[derive(Serialize, Deserialize)]
+/// Inner JSON payload that gets encrypted in the backup file (borrowing
+/// form used for serialization, P12 — no clone of every key).
+#[derive(Serialize)]
+struct BackupPayloadRef<'a> {
+    version: u32,
+    created: String,
+    created_epoch: u64,
+    backup_id: String,
+    token_serial: &'a str,
+    object_count: usize,
+    objects: &'a [StoredObject],
+}
+
+/// Owned form used for deserialization.
+#[derive(Deserialize)]
 struct BackupPayload {
     version: u32,
+    #[allow(dead_code)]
     created: String,
     /// Seconds since UNIX epoch — used for replay/staleness detection on restore.
     created_epoch: u64,
-    /// Random UUID to uniquely identify this backup instance.
+    /// Random identifier of this backup instance.
     backup_id: String,
-    /// Token serial number that produced this backup — prevents cross-token restore.
+    /// Token binding (per-token identity) that produced this backup.
     token_serial: String,
     object_count: usize,
     objects: Vec<StoredObject>,
@@ -55,192 +83,170 @@ const DEFAULT_MAX_BACKUP_AGE_SECS: u64 = 30 * 24 * 3600;
 
 /// Create an encrypted backup blob from a collection of objects.
 ///
-/// `token_serial` binds the backup to a specific token — restoring to a
-/// different token will be rejected unless the caller opts out.
+/// `token_serial` binds the backup to a specific token — pass the per-token
+/// random identity, not the public serial number.
 ///
-/// `pbkdf2_iterations`: if `Some`, uses the given iteration count for key
-/// derivation (should match the runtime config). Falls back to the crate
-/// default (600k) if `None`.
-///
-/// The backup is encrypted with AES-256-GCM using a key derived from
-/// the passphrase via PBKDF2-HMAC-SHA256.
+/// `pbkdf2_iterations`: iteration count for the passphrase KDF; defaults to
+/// [`DEFAULT_PBKDF2_ITERATIONS`] (600,000). It is recorded in the header.
 pub fn create_backup(
     objects: &[StoredObject],
     passphrase: &str,
     token_serial: &str,
     pbkdf2_iterations: Option<u32>,
 ) -> HsmResult<Vec<u8>> {
-    // Check character count, not byte count — a short string of multi-byte
-    // characters (e.g. 4 CJK chars = 12 UTF-8 bytes) could otherwise pass
-    // the minimum length check despite having very low entropy.
+    // Check character count, not byte count.
     if passphrase.chars().count() < MIN_PASSPHRASE_LEN {
         return Err(HsmError::PinLenRange);
     }
-
-    // Reject low-entropy passphrases: require at least 3 distinct character
-    // classes (lowercase, uppercase, digits, symbols) to prevent trivially
-    // guessable inputs like "aaaaaaaaaaaaaaaa" or "1234567890123456".
     if !check_passphrase_complexity(passphrase) {
         return Err(HsmError::PinInvalid);
     }
+    let iterations = pbkdf2_iterations.unwrap_or(DEFAULT_PBKDF2_ITERATIONS);
+    if !(MIN_BACKUP_ITERATIONS..=MAX_BACKUP_ITERATIONS).contains(&iterations) {
+        return Err(HsmError::ArgumentsBad);
+    }
 
-    // Generate a random backup ID (UUID v4-like)
-    let mut uuid_bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut uuid_bytes);
-    let backup_id = hex::encode(uuid_bytes);
-
+    let mut id_bytes = [0u8; 16];
+    fill_random(&mut id_bytes)?;
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    // Serialize payload to JSON
-    let payload = BackupPayload {
+    let payload = BackupPayloadRef {
         version: BACKUP_VERSION,
-        created: chrono_timestamp(),
+        created: iso8601_timestamp(now_epoch),
         created_epoch: now_epoch,
-        backup_id,
-        token_serial: token_serial.to_string(),
+        backup_id: hex::encode(id_bytes),
+        token_serial,
         object_count: objects.len(),
-        objects: objects.to_vec(),
+        objects,
     };
-    let mut json = serde_json::to_vec(&payload).map_err(|_| HsmError::GeneralError)?;
+    // Serialize into a pre-sized zeroizing buffer (H3-20).
+    let cap = objects
+        .iter()
+        .map(|o| o.approximate_size() as usize * 4 + 1024)
+        .sum::<usize>()
+        + 1024;
+    let mut json = Zeroizing::new(Vec::with_capacity(cap));
+    serde_json::to_writer(&mut *json, &payload).map_err(|_| HsmError::GeneralError)?;
 
-    // Derive encryption key from passphrase
-    let (key, salt) = derive_key_from_pin(passphrase.as_bytes(), None, pbkdf2_iterations);
-
-    // Generate random nonce
+    let (key, salt) = derive_key_from_pin(passphrase.as_bytes(), None, Some(iterations))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    fill_random(&mut nonce_bytes)?;
 
-    // Encrypt with AES-256-GCM
-    let aes_key = Key::<Aes256Gcm>::from_slice(key.as_ref());
-    let cipher = Aes256Gcm::new(aes_key);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, json.as_ref())
-        .map_err(|_| HsmError::GeneralError)?;
-
-    // Zeroize plaintext JSON containing key material before dropping
-    json.zeroize();
-
-    // Assemble backup file: magic + version + salt + nonce + ciphertext
-    let mut output = Vec::with_capacity(HEADER_LEN + ciphertext.len());
+    let mut output = Vec::with_capacity(HEADER_LEN + json.len() + 16);
     output.extend_from_slice(BACKUP_MAGIC);
     output.extend_from_slice(&BACKUP_VERSION.to_le_bytes());
+    output.push(KDF_PBKDF2_SHA256);
+    output.extend_from_slice(&iterations.to_le_bytes());
     output.extend_from_slice(&salt);
     output.extend_from_slice(&nonce_bytes);
-    output.extend_from_slice(&ciphertext);
 
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: json.as_ref(),
+                aad: &output[..HEADER_LEN],
+            },
+        )
+        .map_err(|_| HsmError::GeneralError)?;
+    output.extend_from_slice(&ciphertext);
     Ok(output)
 }
 
 /// Restore objects from an encrypted backup blob.
 ///
-/// `expected_serial`: the backup's token_serial must match or restore is rejected.
-///   This is mandatory to prevent cross-token restore attacks.
+/// `expected_serial`: the backup's token binding must match or restore is rejected.
 /// `max_age_secs`: if `Some`, the backup must be younger than this many seconds.
 ///   Defaults to 30 days if `None`.  Pass `Some(0)` to disable age checking.
-/// `consumed_ids`: set of previously restored backup IDs.  If the backup's
-///   `backup_id` is already in this set, the restore is rejected to prevent
-///   replay attacks.  On success the new ID is inserted into the set.
-///   Pass `None` to skip replay checking (not recommended for production).
+/// `pbkdf2_iterations`: optional *minimum* iteration count; the actual count
+///   is read from the authenticated header.
+/// `consumed_ids`: set of previously restored backup IDs (replay protection).
+///   On success the new ID is inserted into the set — callers must persist it
+///   only **after** the restored objects were committed.
 ///
-/// Returns the list of `StoredObject`s on success.
-/// Returns `HsmError::DataInvalid` for format/replay errors and
-/// `HsmError::PinIncorrect` for wrong passphrase.
+/// Every returned object has passed [`sanitize_restored_object`]. Callers
+/// must allocate fresh handles when inserting them.
+///
+/// Returns `HsmError::DataInvalid` for format/replay/policy errors and
+/// `HsmError::PinIncorrect` for a wrong passphrase.
 pub fn restore_backup(
     data: &[u8],
     passphrase: &str,
     expected_serial: &str,
     max_age_secs: Option<u64>,
     pbkdf2_iterations: Option<u32>,
-    mut consumed_ids: Option<&mut HashSet<String>>,
+    consumed_ids: Option<&mut HashSet<String>>,
 ) -> HsmResult<Vec<StoredObject>> {
     if data.len() < HEADER_LEN {
         return Err(HsmError::DataInvalid);
     }
-
-    // Verify magic
     if &data[0..4] != BACKUP_MAGIC {
         return Err(HsmError::DataInvalid);
     }
-
-    // Check version
     let version = u32::from_le_bytes(data[4..8].try_into().map_err(|_| HsmError::DataInvalid)?);
-    if version != BACKUP_VERSION {
+    if version != BACKUP_VERSION || data[8] != KDF_PBKDF2_SHA256 {
         return Err(HsmError::DataInvalid);
     }
+    let iterations =
+        u32::from_le_bytes(data[9..13].try_into().map_err(|_| HsmError::DataInvalid)?);
+    let floor = pbkdf2_iterations
+        .unwrap_or(MIN_BACKUP_ITERATIONS)
+        .max(MIN_BACKUP_ITERATIONS);
+    if iterations < floor || iterations > MAX_BACKUP_ITERATIONS {
+        return Err(HsmError::DataInvalid);
+    }
+    let salt = &data[13..13 + SALT_LEN];
+    let nonce_bytes = &data[13 + SALT_LEN..HEADER_LEN];
 
-    // Extract salt, nonce, ciphertext
-    let salt = &data[8..8 + SALT_LEN];
-    let nonce_bytes = &data[8 + SALT_LEN..HEADER_LEN];
-    let ciphertext = &data[HEADER_LEN..];
+    let (key, _) = derive_key_from_pin(passphrase.as_bytes(), Some(salt), Some(iterations))?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(nonce_bytes),
+                Payload {
+                    msg: &data[HEADER_LEN..],
+                    aad: &data[..HEADER_LEN],
+                },
+            )
+            .map_err(|_| HsmError::PinIncorrect)?,
+    );
 
-    // Derive key from passphrase using stored salt
-    let (key, _) = derive_key_from_pin(passphrase.as_bytes(), Some(salt), pbkdf2_iterations);
-
-    // Decrypt
-    let aes_key = Key::<Aes256Gcm>::from_slice(key.as_ref());
-    let cipher = Aes256Gcm::new(aes_key);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let mut plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| HsmError::PinIncorrect)?;
-
-    // Deserialize JSON payload
     let payload: BackupPayload =
         serde_json::from_slice(&plaintext).map_err(|_| HsmError::DataInvalid)?;
+    drop(plaintext);
+    // From here on every exit path zeroizes the restored objects.
+    let objects = ZeroizingObjects::new(payload.objects);
 
-    // Zeroize decrypted plaintext containing key material
-    plaintext.zeroize();
-
-    // Validate object_count matches actual objects — detects payload tampering
-    if payload.object_count != payload.objects.len() {
-        tracing::warn!(
-            "Backup restore rejected: object_count mismatch (header={}, actual={})",
-            payload.object_count,
-            payload.objects.len()
-        );
+    if payload.version != BACKUP_VERSION || payload.object_count != objects.len() {
+        tracing::warn!("Backup restore rejected: payload/header mismatch");
         return Err(HsmError::DataInvalid);
     }
-
-    // Validate token serial binding — prevents cross-token restore attacks.
-    // This check is mandatory; use create_backup/restore_backup with the
-    // correct serial rather than bypassing this check.
     if payload.token_serial != expected_serial {
-        tracing::warn!(
-            "Backup restore rejected: token serial mismatch (backup={}, expected={})",
-            payload.token_serial,
-            expected_serial
-        );
+        tracing::warn!("Backup restore rejected: token binding mismatch");
         return Err(HsmError::DataInvalid);
     }
-
-    // Replay protection — reject backups that have already been consumed.
-    // Callers SHOULD always provide consumed_ids for production use to
-    // prevent the same backup from being restored multiple times.
-    match consumed_ids {
-        Some(ref mut ids) => {
-            if ids.contains(&payload.backup_id) {
-                tracing::warn!(
-                    "Backup restore rejected: backup_id {} has already been consumed (replay attack?)",
-                    payload.backup_id
-                );
-                return Err(HsmError::DataInvalid);
-            }
-        }
-        None => {
+    match &consumed_ids {
+        Some(ids) if ids.contains(&payload.backup_id) => {
             tracing::warn!(
-                "Backup replay protection disabled (consumed_ids=None). \
-                 This is unsafe for production — duplicate key imports are possible."
+                "Backup restore rejected: backup_id {} has already been consumed (replay attack?)",
+                payload.backup_id
             );
+            return Err(HsmError::DataInvalid);
         }
+        Some(_) => {}
+        None => tracing::warn!(
+            "Backup replay protection disabled (consumed_ids=None). \
+             This is unsafe for production — duplicate key imports are possible."
+        ),
     }
 
-    // Validate backup age — prevents replay of stale backups
     let max_age = match max_age_secs {
-        Some(0) => None, // explicitly disabled
+        Some(0) => None,
         Some(age) => Some(age),
         None => Some(DEFAULT_MAX_BACKUP_AGE_SECS),
     };
@@ -250,43 +256,44 @@ pub fn restore_backup(
             .unwrap_or_default()
             .as_secs();
         if payload.created_epoch > now + 300 {
-            // Backup claims to be from the future (>5 min tolerance) — suspicious
             tracing::warn!("Backup restore rejected: timestamp is in the future");
             return Err(HsmError::DataInvalid);
         }
         if now.saturating_sub(payload.created_epoch) > max {
-            tracing::warn!(
-                "Backup restore rejected: backup is {} seconds old (max allowed: {})",
-                now - payload.created_epoch,
-                max
-            );
+            tracing::warn!("Backup restore rejected: backup is too old");
+            return Err(HsmError::DataInvalid);
+        }
+    }
+
+    // Re-validate every object with the creation policy (H3-16).
+    let mut objects = objects.into_inner();
+    for obj in objects.iter_mut() {
+        if let Err(e) = sanitize_restored_object(obj, false) {
+            tracing::warn!("Backup restore rejected: object failed policy check: {:?}", e);
+            drop(ZeroizingObjects::new(objects));
             return Err(HsmError::DataInvalid);
         }
     }
 
     tracing::info!(
-        "Backup restored: id={}, serial={}, objects={}",
+        "Backup restored: id={}, objects={}",
         payload.backup_id,
-        payload.token_serial,
-        payload.object_count
+        objects.len()
     );
-
-    // Record this backup_id as consumed to prevent future replay
     if let Some(ids) = consumed_ids {
         ids.insert(payload.backup_id);
     }
-
-    Ok(payload.objects)
+    Ok(objects)
 }
 
 /// Persistent replay guard — tracks consumed backup IDs across restarts.
 ///
-/// On creation, loads previously consumed IDs from a file. After each
-/// successful restore, the new ID is appended to the file immediately.
-/// The file format is one hex-encoded backup ID per line (simple, append-only).
-///
-/// If the file cannot be read/written (e.g., in-memory-only deployment),
-/// falls back to in-memory-only tracking with a warning.
+/// The file (one hex ID per line) is created with mode 0600 and
+/// `O_NOFOLLOW`. [`check_and_record`](Self::check_and_record) re-reads the
+/// file under an exclusive lock, so two concurrent restores cannot both pass
+/// the check (H3-16). Deleting the file resets the guard — keep it on
+/// storage the operator cannot trivially rewrite, and record IDs only after
+/// the restored objects were committed.
 pub struct PersistentReplayGuard {
     ids: HashSet<String>,
     path: Option<std::path::PathBuf>,
@@ -294,41 +301,35 @@ pub struct PersistentReplayGuard {
 
 impl PersistentReplayGuard {
     /// Create a replay guard backed by a file at `path`.
-    /// Loads existing consumed IDs from the file (one per line).
-    /// If the file doesn't exist, starts with an empty set.
     pub fn new(path: std::path::PathBuf) -> Self {
-        let mut ids = HashSet::new();
+        let ids = Self::read_ids(&path);
+        Self {
+            ids,
+            path: Some(path),
+        }
+    }
 
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                for line in content.lines() {
+    fn read_ids(path: &std::path::Path) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        match crate::store::fs_util::read_private(path) {
+            Ok(Some(content)) => {
+                for line in String::from_utf8_lossy(&content).lines() {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         ids.insert(trimmed.to_string());
                     }
                 }
-                tracing::info!(
-                    "Loaded {} consumed backup IDs from {}",
-                    ids.len(),
-                    path.display()
-                );
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // No file yet — first use
-            }
+            Ok(None) => {}
             Err(e) => {
                 tracing::warn!(
-                    "Could not read replay guard file {}: {} — starting empty",
+                    "Could not read replay guard file {}: {:?}",
                     path.display(),
                     e
                 );
             }
         }
-
-        Self {
-            ids,
-            path: Some(path),
-        }
+        ids
     }
 
     /// Create an in-memory-only replay guard (no persistence).
@@ -344,59 +345,44 @@ impl PersistentReplayGuard {
         self.ids.contains(id)
     }
 
-    /// Record a backup ID as consumed. Persists to file immediately.
-    ///
-    /// Acquires an exclusive file lock before writing to prevent concurrent
-    /// processes from both passing the replay check for the same backup ID.
-    pub fn record(&mut self, id: String) -> HsmResult<()> {
-        if let Some(ref path) = self.path {
+    /// Atomically check that `id` is unused and record it (exclusive file
+    /// lock held across re-read, check and append).
+    pub fn check_and_record(&mut self, id: &str) -> HsmResult<()> {
+        if let Some(path) = self.path.clone() {
             use fs2::FileExt;
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|e| {
-                    tracing::error!(
-                        "Failed to open replay guard file {} for append: {}",
-                        path.display(),
-                        e
-                    );
-                    HsmError::GeneralError
-                })?;
-
-            // Set restrictive permissions on first creation
-            crate::store::encrypted_store::set_restrictive_permissions(path);
-
-            // Acquire exclusive lock to prevent TOCTOU race between
-            // is_consumed() check and record() in concurrent processes.
+            let mut file = crate::store::fs_util::open_private(&path, true)?;
             file.lock_exclusive().map_err(|e| {
                 tracing::error!("Failed to lock replay guard file {}: {}", path.display(), e);
-                HsmError::GeneralError
+                HsmError::DeviceError
             })?;
-
-            writeln!(file, "{}", id).map_err(|e| {
-                tracing::error!(
-                    "Failed to write to replay guard file {}: {}",
-                    path.display(),
-                    e
-                );
-                HsmError::GeneralError
-            })?;
-            // Lock is released when file is dropped
+            self.ids.extend(Self::read_ids(&path));
+            if self.ids.contains(id) {
+                return Err(HsmError::DataInvalid);
+            }
+            writeln!(file, "{}", id).map_err(|_| HsmError::DeviceError)?;
+            file.sync_all().map_err(|_| HsmError::DeviceError)?;
+        } else if self.ids.contains(id) {
+            return Err(HsmError::DataInvalid);
         }
-        self.ids.insert(id);
+        self.ids.insert(id.to_string());
         Ok(())
     }
 
-    /// Get the inner set (for backward compatibility with callers using HashSet).
+    /// Record a backup ID as consumed. Persists to file immediately.
+    pub fn record(&mut self, id: String) -> HsmResult<()> {
+        match self.check_and_record(&id) {
+            Ok(()) | Err(HsmError::DataInvalid) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Get the inner set.
     pub fn consumed_ids(&self) -> &HashSet<String> {
         &self.ids
     }
 
     /// Clone the consumed IDs set for passing to `restore_backup`.
-    /// The caller should diff the returned set after restore to find
-    /// newly consumed IDs and persist them via `record()`.
     pub fn consumed_ids_clone(&self) -> HashSet<String> {
         self.ids.clone()
     }
@@ -404,27 +390,34 @@ impl PersistentReplayGuard {
 
 /// Check that a passphrase has sufficient entropy to resist brute-force.
 ///
-/// Accepts passphrases via two policies (either one is sufficient):
-///
 /// **Policy A — character diversity**: at least 3 of 4 character classes
-/// (lowercase, uppercase, digit, symbol) AND at least 6 unique characters.
-/// This covers mixed-case passwords like "My-S3cure-Pass!".
-///
+/// AND at least 6 unique characters.
 /// **Policy B — length-based entropy**: at least 24 characters AND at least
-/// 12 unique characters. This covers high-entropy Diceware/passphrase-style
-/// inputs like "correct horse battery staple zephyr" that may only use 1-2
-/// character classes but have ample entropy from length and word diversity.
+/// 12 unique characters.
 ///
-/// Both policies reject trivially guessable inputs like repeated characters.
+/// Single pass over the characters with a bitset for ASCII (P14).
 fn check_passphrase_complexity(passphrase: &str) -> bool {
     let mut has_lower = false;
     let mut has_upper = false;
     let mut has_digit = false;
     let mut has_symbol = false;
-    let mut unique_chars = std::collections::HashSet::new();
+    let mut ascii_seen = [false; 128];
+    let mut other_seen: Vec<char> = Vec::new();
+    let mut unique_count = 0usize;
+    let mut char_count = 0usize;
 
     for ch in passphrase.chars() {
-        unique_chars.insert(ch);
+        char_count += 1;
+        if (ch as u32) < 128 {
+            let i = ch as usize;
+            if !ascii_seen[i] {
+                ascii_seen[i] = true;
+                unique_count += 1;
+            }
+        } else if !other_seen.contains(&ch) {
+            other_seen.push(ch);
+            unique_count += 1;
+        }
         if ch.is_ascii_lowercase() {
             has_lower = true;
         } else if ch.is_ascii_uppercase() {
@@ -437,26 +430,34 @@ fn check_passphrase_complexity(passphrase: &str) -> bool {
     }
 
     let class_count = has_lower as u8 + has_upper as u8 + has_digit as u8 + has_symbol as u8;
-    let char_count = passphrase.chars().count();
-    let unique_count = unique_chars.len();
-
-    // Policy A: mixed character classes (traditional password policy)
     let policy_a = class_count >= 3 && unique_count >= 6;
-
-    // Policy B: long passphrase with sufficient unique characters
-    // (Diceware / multi-word passphrases with high entropy from length)
     let policy_b = char_count >= 24 && unique_count >= 12;
-
     policy_a || policy_b
 }
 
-/// Simple ISO-8601 timestamp without pulling in chrono.
-fn chrono_timestamp() -> String {
-    use std::time::SystemTime;
-    let duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}s-since-epoch", duration.as_secs())
+/// ISO-8601 / RFC 3339 UTC timestamp (S15) without pulling in chrono.
+fn iso8601_timestamp(secs: u64) -> String {
+    let days = secs / 86400;
+    let tod = secs % 86400;
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + u64::from(m <= 2);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        m,
+        d,
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
 }
 
 #[cfg(test)]
@@ -558,6 +559,37 @@ mod tests {
             None,
         );
         assert!(result.is_err(), "Cross-token restore should be rejected");
+    }
+
+    #[test]
+    fn iso_timestamp_format() {
+        assert_eq!(iso8601_timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso8601_timestamp(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn header_is_authenticated() {
+        let backup = create_backup(&[], "L0ng-P@ssphrase!", TEST_SERIAL, None).unwrap();
+        let mut tampered = backup.clone();
+        tampered[13] ^= 1; // salt byte
+        assert!(restore_backup(&tampered, "L0ng-P@ssphrase!", TEST_SERIAL, Some(0), None, None).is_err());
+        let mut tampered = backup;
+        tampered[9..13].copy_from_slice(&200_000u32.to_le_bytes()); // iterations
+        assert!(restore_backup(&tampered, "L0ng-P@ssphrase!", TEST_SERIAL, Some(0), None, None).is_err());
+    }
+
+    #[test]
+    fn restore_rejects_non_sensitive_secret_and_strips_trusted() {
+        let mut obj = make_test_object(1, "k");
+        obj.sensitive = false;
+        let backup = create_backup(&[obj], "L0ng-P@ssphrase!", TEST_SERIAL, None).unwrap();
+        assert!(restore_backup(&backup, "L0ng-P@ssphrase!", TEST_SERIAL, Some(0), None, None).is_err());
+
+        let mut obj = make_test_object(2, "t");
+        obj.trusted = true;
+        let backup = create_backup(&[obj], "L0ng-P@ssphrase!", TEST_SERIAL, None).unwrap();
+        let r = restore_backup(&backup, "L0ng-P@ssphrase!", TEST_SERIAL, Some(0), None, None).unwrap();
+        assert!(!r[0].trusted);
     }
 
     #[test]

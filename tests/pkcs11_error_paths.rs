@@ -32,6 +32,8 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"ErrTests");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -918,6 +920,8 @@ fn test_sign_init_without_login() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"NoLogin");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -972,6 +976,8 @@ fn test_login_wrong_pin() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"WrngPIN");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -1024,6 +1030,8 @@ fn test_generate_key_on_ro_session() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..6].copy_from_slice(b"ROTest");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,

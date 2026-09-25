@@ -32,6 +32,8 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"ConcTests");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     let rv = C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -87,6 +89,8 @@ fn test_concurrent_session_open_close() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"ConcOC1");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -219,6 +223,8 @@ fn test_session_handle_uniqueness_under_contention() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..6].copy_from_slice(b"Unique");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,
@@ -487,6 +493,8 @@ fn test_concurrent_session_login_logout() {
     let so_pin = b"sopin123";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LoginOut");
+    // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
+    let _ = C_CloseAllSessions(0);
     C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,

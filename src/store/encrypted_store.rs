@@ -1,47 +1,218 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
-use aes_gcm::aead::{Aead, KeyInit};
+//! Encrypted persistent store (redb) for token state and token objects.
+//!
+//! # Key hierarchy (A1-17, H3-15)
+//!
+//! * Each slot has a random 256-bit **data-encryption key (DEK)**, generated
+//!   at `C_InitToken`. Object records are encrypted with AES-256-GCM under
+//!   the DEK.
+//! * The DEK is stored only **wrapped** (AES-256-GCM) under key-encryption
+//!   keys derived from the SO PIN and the user PIN (PBKDF2-HMAC-SHA256 with a
+//!   per-PIN random salt, see [`crate::token::pin`]). A PIN change re-wraps
+//!   the DEK; `C_InitToken` generates a fresh DEK, crypto-shredding every
+//!   previous record.
+//! * Unwrapped DEKs live only in memory (the per-slot keyring of this store,
+//!   `Zeroizing`), are installed on successful login and wiped on
+//!   `C_Finalize` / drop / re-initialisation.
+//!
+//! # Record format and integrity
+//!
+//! Object record = `"CHO1" | slot | handle | generation | nonce | ciphertext`
+//! with AAD = `"craton-hsm/object/v1" | store_key | slot | handle | generation`,
+//! so a record cannot be moved to another key, slot or handle, and an older
+//! generation of a record cannot be replayed. Each slot has an authenticated
+//! **manifest** (HMAC-SHA256 under a DEK-derived key) listing every
+//! `(store_key, generation)` pair plus a monotonic counter. Records not in the
+//! manifest (resurrected / replayed) are quarantined instead of loaded; a
+//! manifest with an invalid MAC fails closed.
+//!
+//! Whole-file rollback (replacing the entire database with an older copy) can
+//! only be detected with an external monotonic counter (TPM NV index or
+//! similar); see `docs` / handoff notes.
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
+use parking_lot::{Mutex, RwLock};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
+use crate::config::defaults::{
+    DEFAULT_PBKDF2_ITERATIONS, KEY_LEN as DEFAULT_KEY_LEN, NONCE_LEN as DEFAULT_NONCE_LEN,
+    SALT_LEN as DEFAULT_SALT_LEN,
+};
 use crate::crypto::drbg::HmacDrbg;
 use crate::error::{HsmError, HsmResult};
+use crate::pkcs11_abi::types::{CK_OBJECT_HANDLE, CK_SLOT_ID};
 
-/// PBKDF2 iteration count per OWASP 2024 guidance (minimum 1,000,000).
-const PBKDF2_ITERATIONS: u32 = 1_000_000;
-const SALT_LEN: usize = 32;
-const NONCE_LEN: usize = 12;
-const KEY_LEN: usize = 32;
+/// PBKDF2 iteration count used when the caller does not supply one.
+/// Single source of truth: [`crate::config::defaults::DEFAULT_PBKDF2_ITERATIONS`].
+const PBKDF2_ITERATIONS: u32 = DEFAULT_PBKDF2_ITERATIONS;
+const SALT_LEN: usize = DEFAULT_SALT_LEN;
+const NONCE_LEN: usize = DEFAULT_NONCE_LEN;
+const KEY_LEN: usize = DEFAULT_KEY_LEN;
 
-/// redb table definition for encrypted object blobs.
-/// Key: UTF-8 string (object identifier), Value: nonce || ciphertext bytes.
+/// Legacy blob table (generic encrypted key/value API).
+const BLOBS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
+/// Encrypted object records.
 const OBJECTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("objects");
+/// Token records, lockout counters and manifests.
+const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+/// Records that failed authentication or were not listed in the manifest.
+const QUARANTINE_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("quarantine");
+
+const RECORD_MAGIC: &[u8; 4] = b"CHO1";
+const RECORD_HEADER_LEN: usize = 4 + 8 + 8 + 8 + NONCE_LEN;
+const OBJECT_AAD_LABEL: &[u8] = b"craton-hsm/object/v1";
+const BLOB_AAD_LABEL: &[u8] = b"craton-hsm/blob/v1";
+const MANIFEST_KEY_LABEL: &[u8] = b"craton-hsm/manifest-key/v1";
+
+/// Default database file name inside the storage directory.
+pub const DB_FILE_NAME: &str = "craton_hsm.redb";
+
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+/// Fill `buf` with random bytes from the SP 800-90A DRBG, falling back to the
+/// OS RNG on any DRBG error. Refuses to return an all-zero buffer (H3-18).
+pub(crate) fn fill_random(buf: &mut [u8]) -> HsmResult<()> {
+    let drbg_ok = match HmacDrbg::new() {
+        Ok(mut d) => d.generate(buf).is_ok(),
+        Err(_) => false,
+    };
+    if !drbg_ok {
+        use rand::RngCore;
+        tracing::warn!("DRBG unavailable for salt/nonce generation; using OS RNG");
+        rand::rngs::OsRng
+            .try_fill_bytes(buf)
+            .map_err(|_| HsmError::GeneralError)?;
+    }
+    if buf.len() >= 8 && buf.iter().all(|&b| b == 0) {
+        tracing::error!("RNG produced an all-zero buffer — refusing to use it");
+        return Err(HsmError::GeneralError);
+    }
+    Ok(())
+}
+
+fn db_err<E: std::fmt::Display>(ctx: &'static str) -> impl Fn(E) -> HsmError {
+    move |e| {
+        tracing::error!("persistent store: {}: {}", ctx, e);
+        HsmError::DeviceError
+    }
+}
+
+fn slot_prefix(slot: CK_SLOT_ID) -> String {
+    format!("s{:020}/", slot as u64)
+}
+
+/// Build the opaque store key for a slot (random, non-sequential).
+pub(crate) fn new_store_key(slot: CK_SLOT_ID) -> HsmResult<String> {
+    let mut rnd = [0u8; 16];
+    fill_random(&mut rnd)?;
+    Ok(format!("{}obj_{}", slot_prefix(slot), hex::encode(rnd)))
+}
+
+fn slot_of_store_key(store_key: &str) -> Option<CK_SLOT_ID> {
+    let rest = store_key.strip_prefix('s')?;
+    let (num, _) = rest.split_once('/')?;
+    num.parse::<u64>().ok().map(|v| v as CK_SLOT_ID)
+}
+
+/// Authenticated per-slot manifest of `(store_key, generation)` pairs.
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct Manifest {
+    version: u32,
+    /// Monotonic counter, bumped on every write to the slot.
+    counter: u64,
+    entries: BTreeMap<String, u64>,
+    #[serde(default)]
+    mac: String,
+}
+
+impl Manifest {
+    fn mac_bytes(&self, slot: CK_SLOT_ID, dek: &[u8; KEY_LEN]) -> [u8; 32] {
+        use hmac::Mac;
+        let mut kmac = <HmacSha256 as Mac>::new_from_slice(dek).expect("any key length");
+        kmac.update(MANIFEST_KEY_LABEL);
+        let mkey = Zeroizing::new(kmac.finalize().into_bytes());
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&mkey).expect("any key length");
+        mac.update(&(slot as u64).to_le_bytes());
+        mac.update(&self.version.to_le_bytes());
+        mac.update(&self.counter.to_le_bytes());
+        for (k, g) in &self.entries {
+            mac.update(&(k.len() as u64).to_le_bytes());
+            mac.update(k.as_bytes());
+            mac.update(&g.to_le_bytes());
+        }
+        mac.finalize().into_bytes().into()
+    }
+
+    fn seal(&mut self, slot: CK_SLOT_ID, dek: &[u8; KEY_LEN]) {
+        self.version = 1;
+        self.mac = hex::encode(self.mac_bytes(slot, dek));
+    }
+
+    fn verify(&self, slot: CK_SLOT_ID, dek: &[u8; KEY_LEN]) -> bool {
+        use subtle::ConstantTimeEq;
+        let expected = self.mac_bytes(slot, dek);
+        match hex::decode(&self.mac) {
+            Ok(m) if m.len() == 32 => m.ct_eq(&expected).into(),
+            _ => false,
+        }
+    }
+}
+
+fn manifest_key(slot: CK_SLOT_ID) -> String {
+    format!("manifest/{}", slot as u64)
+}
+
+fn object_aad(store_key: &str, header: &[u8]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(OBJECT_AAD_LABEL.len() + store_key.len() + 32);
+    aad.extend_from_slice(OBJECT_AAD_LABEL);
+    aad.extend_from_slice(&(store_key.len() as u64).to_le_bytes());
+    aad.extend_from_slice(store_key.as_bytes());
+    aad.extend_from_slice(&header[4..28]);
+    aad
+}
+
+/// A decrypted object record returned by [`EncryptedStore::load_slot_objects`].
+pub struct LoadedRecord {
+    /// Opaque store key of the record.
+    pub store_key: String,
+    /// Object handle bound into the record's AAD.
+    pub handle: CK_OBJECT_HANDLE,
+    /// Decrypted plaintext (zeroized on drop).
+    pub plaintext: Zeroizing<Vec<u8>>,
+}
 
 /// Encrypted persistent store backed by redb.
 ///
-/// Objects are encrypted with AES-256-GCM using a key derived from
-/// the user PIN via PBKDF2-HMAC-SHA256. The database file is protected
-/// by an exclusive file lock (via `fs2`) to prevent concurrent access
-/// from multiple processes.
+/// The database file is protected by an exclusive file lock (via `fs2`) to
+/// prevent concurrent access from multiple processes.
 pub struct EncryptedStore {
-    db: Option<Database>,
+    db: Option<RwLock<Database>>,
+    path: Option<PathBuf>,
     /// Hold the lock file open for the lifetime of the store.
     /// The exclusive lock is released when this file handle is dropped.
     _lock_file: Option<File>,
+    /// Unlocked per-slot data-encryption keys (zeroized on drop/clear).
+    keyring: RwLock<HashMap<CK_SLOT_ID, Zeroizing<[u8; KEY_LEN]>>>,
+    /// Serializes read-modify-write of manifests.
+    write_lock: Mutex<()>,
 }
 
 impl Drop for EncryptedStore {
     fn drop(&mut self) {
+        // Zeroize every unlocked DEK before the memory is released.
+        self.keyring.write().clear();
         // Release the exclusive lock by dropping the file handle.
         // We intentionally do NOT delete the lock file — removing it after
         // releasing the lock creates a TOCTOU race where another process
         // could acquire the (about-to-be-deleted) lock, only to have it
         // deleted out from under it, allowing a third process in.
-        // The lock file is harmless on disk and will be reused next time.
         self._lock_file.take();
     }
 }
@@ -50,50 +221,61 @@ impl EncryptedStore {
     /// Create a new encrypted store. If path is None, operates in memory-only mode.
     ///
     /// When a path is provided, acquires an exclusive file lock on
-    /// `<path>.lock` to prevent concurrent access from another process.
-    /// Returns an error if the database is already locked.
+    /// `<path>.lock` (created `O_NOFOLLOW`, mode 0600, never truncated) to
+    /// prevent concurrent access from another process. Returns an error if
+    /// the database is already locked or any file has unsafe ownership or
+    /// permissions.
     pub fn new(path: Option<&str>) -> HsmResult<Self> {
         match path {
-            Some(p) => {
-                // Acquire exclusive file lock before opening the database
-                let lock_path = PathBuf::from(format!("{}.lock", p));
-                let lock_file = File::create(&lock_path).map_err(|e| {
-                    tracing::error!(
-                        "Failed to create lock file '{}': {}",
-                        lock_path.display(),
-                        e
-                    );
-                    HsmError::GeneralError
-                })?;
-
-                // Set restrictive permissions on the lock file to prevent
-                // other users from observing HSM operation timing.
-                set_restrictive_permissions(&lock_path);
-
-                use fs2::FileExt;
-                lock_file.try_lock_exclusive().map_err(|e| {
-                    tracing::error!("Database at '{}' is locked by another process: {}", p, e);
-                    HsmError::GeneralError
-                })?;
-
-                let db = Database::create(p).map_err(|e| {
-                    tracing::error!("Failed to open database at '{}': {}", p, e);
-                    HsmError::GeneralError
-                })?;
-
-                // Set restrictive permissions on the database file itself.
-                set_restrictive_permissions(&PathBuf::from(p));
-
-                Ok(Self {
-                    db: Some(db),
-                    _lock_file: Some(lock_file),
-                })
-            }
+            Some(p) => Self::open_file(Path::new(p)),
             None => Ok(Self {
                 db: None,
+                path: None,
                 _lock_file: None,
+                keyring: RwLock::new(HashMap::new()),
+                write_lock: Mutex::new(()),
             }),
         }
+    }
+
+    /// Open (creating if necessary) the store inside a private storage
+    /// directory (created with mode 0700 and validated for ownership).
+    pub fn open_in_dir(dir: &Path) -> HsmResult<Self> {
+        crate::store::fs_util::ensure_private_dir(dir)?;
+        Self::open_file(&dir.join(DB_FILE_NAME))
+    }
+
+    fn open_file(p: &Path) -> HsmResult<Self> {
+        let lock_path = PathBuf::from(format!("{}.lock", p.display()));
+        let lock_file = crate::store::fs_util::open_private(&lock_path, false)?;
+
+        use fs2::FileExt;
+        lock_file.try_lock_exclusive().map_err(|e| {
+            tracing::error!(
+                "Database at '{}' is locked by another process: {}",
+                p.display(),
+                e
+            );
+            HsmError::DeviceError
+        })?;
+
+        // Open (creating atomically with mode 0600 and O_NOFOLLOW if absent)
+        // the database file ourselves, validate ownership/permissions on the
+        // descriptor, then hand that exact descriptor to redb — no window in
+        // which the path could be swapped for a symlink (H3-12).
+        let f = crate::store::fs_util::open_private(p, false)?;
+        let db = redb::Builder::new().create_file(f).map_err(|e| {
+            tracing::error!("Failed to open database at '{}': {}", p.display(), e);
+            HsmError::DeviceError
+        })?;
+
+        Ok(Self {
+            db: Some(RwLock::new(db)),
+            path: Some(p.to_path_buf()),
+            _lock_file: Some(lock_file),
+            keyring: RwLock::new(HashMap::new()),
+            write_lock: Mutex::new(()),
+        })
     }
 
     /// Check if persistent storage is available
@@ -101,7 +283,391 @@ impl EncryptedStore {
         self.db.is_some()
     }
 
-    /// Store an encrypted blob under a key
+    /// Path of the database file, if file-backed.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    // ------------------------------------------------------------------
+    // Keyring (unlocked DEKs)
+    // ------------------------------------------------------------------
+
+    /// Install the unlocked data-encryption key for a slot.
+    pub fn set_slot_key(&self, slot: CK_SLOT_ID, key: &Zeroizing<[u8; KEY_LEN]>) {
+        self.keyring
+            .write()
+            .insert(slot, Zeroizing::new(**key));
+    }
+
+    /// Remove (and zeroize) the unlocked key of a slot.
+    pub fn clear_slot_key(&self, slot: CK_SLOT_ID) {
+        self.keyring.write().remove(&slot);
+    }
+
+    /// Zeroize every unlocked key (C_Finalize).
+    pub fn clear_all_keys(&self) {
+        self.keyring.write().clear();
+    }
+
+    /// True if the slot's DEK is currently unlocked.
+    pub fn has_slot_key(&self, slot: CK_SLOT_ID) -> bool {
+        self.keyring.read().contains_key(&slot)
+    }
+
+    /// Slots whose DEK is currently unlocked.
+    pub fn unlocked_slots(&self) -> Vec<CK_SLOT_ID> {
+        self.keyring.read().keys().copied().collect()
+    }
+
+    fn with_slot_key<T>(
+        &self,
+        slot: CK_SLOT_ID,
+        f: impl FnOnce(&[u8; KEY_LEN]) -> HsmResult<T>,
+    ) -> HsmResult<T> {
+        let ring = self.keyring.read();
+        let key = ring.get(&slot).ok_or_else(|| {
+            tracing::warn!(
+                "persistent store for slot {} is locked (no login since start)",
+                slot
+            );
+            HsmError::UserNotLoggedIn
+        })?;
+        f(key)
+    }
+
+    // ------------------------------------------------------------------
+    // Object records
+    // ------------------------------------------------------------------
+
+    /// Encrypt and store an object record, updating the slot manifest in the
+    /// same transaction. Requires the slot's DEK to be unlocked.
+    pub fn put_object(
+        &self,
+        slot: CK_SLOT_ID,
+        store_key: &str,
+        handle: CK_OBJECT_HANDLE,
+        plaintext: &[u8],
+    ) -> HsmResult<()> {
+        let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
+        if slot_of_store_key(store_key) != Some(slot) {
+            return Err(HsmError::GeneralError);
+        }
+        self.with_slot_key(slot, |dek| {
+            let _w = self.write_lock.lock();
+            let db = db.read();
+            let txn = db.begin_write().map_err(db_err("begin write"))?;
+            {
+                let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
+                let mut manifest = match meta
+                    .get(manifest_key(slot).as_str())
+                    .map_err(db_err("read manifest"))?
+                {
+                    Some(v) => {
+                        let m: Manifest = serde_json::from_slice(v.value())
+                            .map_err(|_| HsmError::DeviceError)?;
+                        if !m.verify(slot, dek) {
+                            tracing::error!("manifest MAC invalid for slot {} — refusing write", slot);
+                            return Err(HsmError::DeviceError);
+                        }
+                        m
+                    }
+                    None => Manifest::default(),
+                };
+                manifest.counter = manifest
+                    .counter
+                    .checked_add(1)
+                    .ok_or(HsmError::DeviceError)?;
+                let generation = manifest.counter;
+
+                let mut record = Vec::with_capacity(RECORD_HEADER_LEN + plaintext.len() + 16);
+                record.extend_from_slice(RECORD_MAGIC);
+                record.extend_from_slice(&(slot as u64).to_le_bytes());
+                record.extend_from_slice(&(handle as u64).to_le_bytes());
+                record.extend_from_slice(&generation.to_le_bytes());
+                let mut nonce = [0u8; NONCE_LEN];
+                fill_random(&mut nonce)?;
+                record.extend_from_slice(&nonce);
+                let aad = object_aad(store_key, &record);
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek));
+                let ct = cipher
+                    .encrypt(
+                        Nonce::from_slice(&nonce),
+                        Payload {
+                            msg: plaintext,
+                            aad: &aad,
+                        },
+                    )
+                    .map_err(|_| HsmError::GeneralError)?;
+                record.extend_from_slice(&ct);
+
+                let mut objs = txn
+                    .open_table(OBJECTS_TABLE)
+                    .map_err(db_err("open objects"))?;
+                objs.insert(store_key, record.as_slice())
+                    .map_err(db_err("insert object"))?;
+
+                manifest.entries.insert(store_key.to_string(), generation);
+                manifest.seal(slot, dek);
+                let mbytes = serde_json::to_vec(&manifest).map_err(|_| HsmError::GeneralError)?;
+                meta.insert(manifest_key(slot).as_str(), mbytes.as_slice())
+                    .map_err(db_err("write manifest"))?;
+            }
+            txn.commit().map_err(db_err("commit"))?;
+            Ok(())
+        })
+    }
+
+    /// Delete an object record and remove it from the manifest.
+    pub fn delete_object(&self, slot: CK_SLOT_ID, store_key: &str) -> HsmResult<()> {
+        let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
+        self.with_slot_key(slot, |dek| {
+            let _w = self.write_lock.lock();
+            let db = db.read();
+            let txn = db.begin_write().map_err(db_err("begin write"))?;
+            {
+                let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
+                let mut manifest = match meta
+                    .get(manifest_key(slot).as_str())
+                    .map_err(db_err("read manifest"))?
+                {
+                    Some(v) => {
+                        let m: Manifest = serde_json::from_slice(v.value())
+                            .map_err(|_| HsmError::DeviceError)?;
+                        if !m.verify(slot, dek) {
+                            return Err(HsmError::DeviceError);
+                        }
+                        m
+                    }
+                    None => Manifest::default(),
+                };
+                let mut objs = txn
+                    .open_table(OBJECTS_TABLE)
+                    .map_err(db_err("open objects"))?;
+                objs.remove(store_key).map_err(db_err("remove object"))?;
+                manifest.entries.remove(store_key);
+                manifest.counter = manifest
+                    .counter
+                    .checked_add(1)
+                    .ok_or(HsmError::DeviceError)?;
+                manifest.seal(slot, dek);
+                let mbytes = serde_json::to_vec(&manifest).map_err(|_| HsmError::GeneralError)?;
+                meta.insert(manifest_key(slot).as_str(), mbytes.as_slice())
+                    .map_err(db_err("write manifest"))?;
+            }
+            txn.commit().map_err(db_err("commit"))?;
+            Ok(())
+        })
+    }
+
+    /// Load and authenticate every object record of a slot in a single read
+    /// transaction (P7). Records that fail authentication or are not listed
+    /// in the manifest with the same generation are quarantined and skipped
+    /// (H3-15). An invalid manifest MAC fails closed with `DeviceError`.
+    pub fn load_slot_objects(&self, slot: CK_SLOT_ID) -> HsmResult<Vec<LoadedRecord>> {
+        let db_lock = self.db.as_ref().ok_or(HsmError::GeneralError)?;
+        let (loaded, bad) = self.with_slot_key(slot, |dek| {
+            let db = db_lock.read();
+            let txn = db.begin_read().map_err(db_err("begin read"))?;
+            let manifest = match txn.open_table(META_TABLE) {
+                Ok(meta) => match meta
+                    .get(manifest_key(slot).as_str())
+                    .map_err(db_err("read manifest"))?
+                {
+                    Some(v) => {
+                        let m: Manifest = serde_json::from_slice(v.value())
+                            .map_err(|_| HsmError::DeviceError)?;
+                        if !m.verify(slot, dek) {
+                            tracing::error!(
+                                "manifest MAC invalid for slot {} — store tampered or wrong key",
+                                slot
+                            );
+                            return Err(HsmError::DeviceError);
+                        }
+                        Some(m)
+                    }
+                    None => None,
+                },
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(db_err("open meta")(e)),
+            };
+            let manifest = manifest.unwrap_or_default();
+
+            let mut loaded = Vec::new();
+            let mut bad: Vec<(String, Vec<u8>)> = Vec::new();
+            let objs = match txn.open_table(OBJECTS_TABLE) {
+                Ok(t) => Some(t),
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(db_err("open objects")(e)),
+            };
+            if let Some(objs) = objs {
+                let prefix = slot_prefix(slot);
+                let end = format!("s{:020}0", slot as u64);
+                let range = objs
+                    .range(prefix.as_str()..end.as_str())
+                    .map_err(db_err("iterate objects"))?;
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek));
+                for entry in range {
+                    let (k, v) = entry.map_err(db_err("read object"))?;
+                    let store_key = k.value().to_string();
+                    let rec = v.value();
+                    let ok = (|| -> Option<LoadedRecord> {
+                        if rec.len() < RECORD_HEADER_LEN || &rec[0..4] != RECORD_MAGIC {
+                            return None;
+                        }
+                        let rslot = u64::from_le_bytes(rec[4..12].try_into().ok()?);
+                        let handle = u64::from_le_bytes(rec[12..20].try_into().ok()?);
+                        let generation = u64::from_le_bytes(rec[20..28].try_into().ok()?);
+                        if rslot != slot as u64 {
+                            return None;
+                        }
+                        if manifest.entries.get(&store_key) != Some(&generation) {
+                            tracing::error!(
+                                "object record '{}' (generation {}) not in manifest — replay/resurrection?",
+                                store_key,
+                                generation
+                            );
+                            return None;
+                        }
+                        let aad = object_aad(&store_key, rec);
+                        let pt = cipher
+                            .decrypt(
+                                Nonce::from_slice(&rec[28..28 + NONCE_LEN]),
+                                Payload {
+                                    msg: &rec[RECORD_HEADER_LEN..],
+                                    aad: &aad,
+                                },
+                            )
+                            .ok()?;
+                        Some(LoadedRecord {
+                            store_key: store_key.clone(),
+                            handle: handle as CK_OBJECT_HANDLE,
+                            plaintext: Zeroizing::new(pt),
+                        })
+                    })();
+                    match ok {
+                        Some(r) => loaded.push(r),
+                        None => bad.push((store_key, rec.to_vec())),
+                    }
+                }
+            }
+            let present: std::collections::HashSet<&str> =
+                loaded.iter().map(|r| r.store_key.as_str()).collect();
+            for k in manifest.entries.keys() {
+                if !present.contains(k.as_str()) && !bad.iter().any(|(b, _)| b == k) {
+                    tracing::error!("object record '{}' listed in manifest is missing", k);
+                }
+            }
+            Ok((loaded, bad))
+        })?;
+
+        if !bad.is_empty() {
+            tracing::error!(
+                "quarantining {} unauthenticated object record(s) for slot {}",
+                bad.len(),
+                slot
+            );
+            let _w = self.write_lock.lock();
+            let db = db_lock.read();
+            let txn = db.begin_write().map_err(db_err("begin write"))?;
+            {
+                let mut q = txn
+                    .open_table(QUARANTINE_TABLE)
+                    .map_err(db_err("open quarantine"))?;
+                let mut objs = txn
+                    .open_table(OBJECTS_TABLE)
+                    .map_err(db_err("open objects"))?;
+                for (k, v) in &bad {
+                    q.insert(k.as_str(), v.as_slice())
+                        .map_err(db_err("quarantine insert"))?;
+                    objs.remove(k.as_str()).map_err(db_err("quarantine remove"))?;
+                }
+            }
+            txn.commit().map_err(db_err("commit"))?;
+        }
+        Ok(loaded)
+    }
+
+    /// Remove every object record and the manifest of a slot (C_InitToken),
+    /// then compact the database so freed pages are released (best effort).
+    pub fn clear_slot(&self, slot: CK_SLOT_ID) -> HsmResult<()> {
+        let db_lock = self.db.as_ref().ok_or(HsmError::GeneralError)?;
+        {
+            let _w = self.write_lock.lock();
+            let db = db_lock.read();
+            let txn = db.begin_write().map_err(db_err("begin write"))?;
+            {
+                let prefix = slot_prefix(slot);
+                let end = format!("s{:020}0", slot as u64);
+                let mut objs = txn
+                    .open_table(OBJECTS_TABLE)
+                    .map_err(db_err("open objects"))?;
+                objs.retain_in(prefix.as_str()..end.as_str(), |_, _| false)
+                    .map_err(db_err("clear objects"))?;
+                let mut q = txn
+                    .open_table(QUARANTINE_TABLE)
+                    .map_err(db_err("open quarantine"))?;
+                q.retain_in(prefix.as_str()..end.as_str(), |_, _| false)
+                    .map_err(db_err("clear quarantine"))?;
+                let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
+                meta.remove(manifest_key(slot).as_str())
+                    .map_err(db_err("remove manifest"))?;
+            }
+            txn.commit().map_err(db_err("commit"))?;
+        }
+        self.compact();
+        Ok(())
+    }
+
+    /// Compact the database (best effort) so pages of deleted records are
+    /// released. Records are additionally crypto-shredded when the slot DEK
+    /// is replaced by `C_InitToken`.
+    pub fn compact(&self) {
+        if let Some(db) = self.db.as_ref() {
+            let _w = self.write_lock.lock();
+            if let Err(e) = db.write().compact() {
+                tracing::debug!("database compaction skipped: {}", e);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Metadata (token records, lockout counters)
+    // ------------------------------------------------------------------
+
+    /// Write a metadata value (durably committed).
+    pub fn put_meta(&self, key: &str, value: &[u8]) -> HsmResult<()> {
+        let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
+        let _w = self.write_lock.lock();
+        let db = db.read();
+        let txn = db.begin_write().map_err(db_err("begin write"))?;
+        {
+            let mut meta = txn.open_table(META_TABLE).map_err(db_err("open meta"))?;
+            meta.insert(key, value).map_err(db_err("write meta"))?;
+        }
+        txn.commit().map_err(db_err("commit"))?;
+        Ok(())
+    }
+
+    /// Read a metadata value.
+    pub fn get_meta(&self, key: &str) -> HsmResult<Option<Vec<u8>>> {
+        let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
+        let db = db.read();
+        let txn = db.begin_read().map_err(db_err("begin read"))?;
+        let meta = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(db_err("open meta")(e)),
+        };
+        let v = meta.get(key).map_err(db_err("read meta"))?;
+        Ok(v.map(|v| v.value().to_vec()))
+    }
+
+    // ------------------------------------------------------------------
+    // Legacy generic encrypted blob API
+    // ------------------------------------------------------------------
+
+    /// Store an encrypted blob under a key. The ciphertext is bound to
+    /// `store_key` through the AEAD associated data.
     pub fn store_encrypted(
         &self,
         store_key: &str,
@@ -111,201 +677,171 @@ impl EncryptedStore {
         let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        // Route nonce generation through DRBG for health testing & prediction resistance,
-        // consistent with all other randomness in the HSM (see drbg.rs architecture).
-        let mut drbg = HmacDrbg::new()?;
-        drbg.generate(&mut nonce_bytes)?;
+        fill_random(&mut nonce_bytes)?;
 
-        let aes_key = Key::<Aes256Gcm>::from_slice(encryption_key);
-        let cipher = Aes256Gcm::new(aes_key);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(encryption_key));
+        let aad = [BLOB_AAD_LABEL, store_key.as_bytes()].concat();
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| HsmError::GeneralError)?;
 
-        let ciphertext = cipher.encrypt(nonce, plaintext).map_err(|e| {
-            tracing::error!("AES-GCM encryption failed for key '{}': {}", store_key, e);
-            HsmError::GeneralError
-        })?;
-
-        // Store as: nonce || ciphertext
         let mut stored = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         stored.extend_from_slice(&nonce_bytes);
         stored.extend_from_slice(&ciphertext);
 
-        let write_txn = db.begin_write().map_err(|e| {
-            tracing::error!("Failed to begin write transaction: {}", e);
-            HsmError::GeneralError
-        })?;
+        let _w = self.write_lock.lock();
+        let db = db.read();
+        let write_txn = db.begin_write().map_err(db_err("begin write"))?;
         {
-            let mut table = write_txn.open_table(OBJECTS_TABLE).map_err(|e| {
-                tracing::error!("Failed to open objects table for write: {}", e);
-                HsmError::GeneralError
-            })?;
-            table.insert(store_key, stored.as_slice()).map_err(|e| {
-                tracing::error!("Failed to insert key '{}': {}", store_key, e);
-                HsmError::GeneralError
-            })?;
+            let mut table = write_txn
+                .open_table(BLOBS_TABLE)
+                .map_err(db_err("open blobs"))?;
+            table
+                .insert(store_key, stored.as_slice())
+                .map_err(db_err("insert blob"))?;
         }
-        write_txn.commit().map_err(|e| {
-            tracing::error!("Failed to commit write transaction: {}", e);
-            HsmError::GeneralError
-        })?;
-
+        write_txn.commit().map_err(db_err("commit"))?;
         Ok(())
     }
 
-    /// Load and decrypt a blob.
-    ///
-    /// The returned buffer is wrapped in `Zeroizing` so that decrypted
-    /// plaintext (which may contain key material) is automatically zeroed
-    /// when dropped — callers no longer need to remember to zeroize manually.
+    /// Load and decrypt a blob. The returned buffer is `Zeroizing`.
     pub fn load_encrypted(
         &self,
         store_key: &str,
         encryption_key: &[u8; KEY_LEN],
     ) -> HsmResult<Option<Zeroizing<Vec<u8>>>> {
         let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
-
-        let read_txn = db.begin_read().map_err(|e| {
-            tracing::error!("Failed to begin read transaction: {}", e);
-            HsmError::GeneralError
-        })?;
-
-        // The table may not exist yet if nothing has been stored
-        let table = match read_txn.open_table(OBJECTS_TABLE) {
+        let db = db.read();
+        let read_txn = db.begin_read().map_err(db_err("begin read"))?;
+        let table = match read_txn.open_table(BLOBS_TABLE) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => {
-                tracing::error!("Failed to open objects table for read: {}", e);
-                return Err(HsmError::GeneralError);
-            }
+            Err(e) => return Err(db_err("open blobs")(e)),
         };
-
-        let stored = match table.get(store_key).map_err(|e| {
-            tracing::error!("Failed to get key '{}': {}", store_key, e);
-            HsmError::GeneralError
-        })? {
+        let stored = match table.get(store_key).map_err(db_err("read blob"))? {
             Some(data) => data.value().to_vec(),
             None => return Ok(None),
         };
-
         if stored.len() < NONCE_LEN {
             return Err(HsmError::EncryptedDataInvalid);
         }
-
-        let nonce = Nonce::from_slice(&stored[..NONCE_LEN]);
-        let ciphertext = &stored[NONCE_LEN..];
-
-        let aes_key = Key::<Aes256Gcm>::from_slice(encryption_key);
-        let cipher = Aes256Gcm::new(aes_key);
-
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(encryption_key));
+        let aad = [BLOB_AAD_LABEL, store_key.as_bytes()].concat();
         let plaintext = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(
+                Nonce::from_slice(&stored[..NONCE_LEN]),
+                Payload {
+                    msg: &stored[NONCE_LEN..],
+                    aad: &aad,
+                },
+            )
             .map_err(|_| HsmError::EncryptedDataInvalid)?;
-
         Ok(Some(Zeroizing::new(plaintext)))
     }
 
-    /// Delete a stored key
+    /// Delete a stored blob.
     pub fn delete(&self, store_key: &str) -> HsmResult<()> {
         let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
-
-        let write_txn = db.begin_write().map_err(|e| {
-            tracing::error!("Failed to begin write transaction for delete: {}", e);
-            HsmError::GeneralError
-        })?;
+        let _w = self.write_lock.lock();
+        let db = db.read();
+        let write_txn = db.begin_write().map_err(db_err("begin write"))?;
         {
-            let mut table = write_txn.open_table(OBJECTS_TABLE).map_err(|e| {
-                tracing::error!("Failed to open objects table for delete: {}", e);
-                HsmError::GeneralError
-            })?;
-            table.remove(store_key).map_err(|e| {
-                tracing::error!("Failed to remove key '{}': {}", store_key, e);
-                HsmError::GeneralError
-            })?;
+            let mut table = write_txn
+                .open_table(BLOBS_TABLE)
+                .map_err(db_err("open blobs"))?;
+            table.remove(store_key).map_err(db_err("remove blob"))?;
         }
-        write_txn.commit().map_err(|e| {
-            tracing::error!("Failed to commit delete transaction: {}", e);
-            HsmError::GeneralError
-        })?;
+        write_txn.commit().map_err(db_err("commit"))?;
         Ok(())
     }
 
-    /// List all keys in the store
+    /// List all blob keys. Iteration errors are propagated (fail closed).
     pub fn list_keys(&self) -> HsmResult<Vec<String>> {
         let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
-
-        let read_txn = db.begin_read().map_err(|e| {
-            tracing::error!("Failed to begin read transaction for list_keys: {}", e);
-            HsmError::GeneralError
-        })?;
-
-        let table = match read_txn.open_table(OBJECTS_TABLE) {
+        let db = db.read();
+        let read_txn = db.begin_read().map_err(db_err("begin read"))?;
+        let table = match read_txn.open_table(BLOBS_TABLE) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(e) => {
-                tracing::error!("Failed to open objects table for list_keys: {}", e);
-                return Err(HsmError::GeneralError);
-            }
+            Err(e) => return Err(db_err("open blobs")(e)),
         };
-
         let mut keys = Vec::new();
-        let iter = table.iter().map_err(|e| {
-            tracing::error!("Failed to iterate objects table: {}", e);
-            HsmError::GeneralError
-        })?;
-        for entry in iter {
-            if let Ok(entry) = entry {
-                keys.push(entry.0.value().to_string());
-            }
+        for entry in table.iter().map_err(db_err("iterate blobs"))? {
+            let entry = entry.map_err(db_err("read blob key"))?;
+            keys.push(entry.0.value().to_string());
         }
         Ok(keys)
     }
 
-    /// Clear all data from the store (used by C_InitToken)
+    /// Clear all blobs (legacy API).
     pub fn clear(&self) -> HsmResult<()> {
         let db = self.db.as_ref().ok_or(HsmError::GeneralError)?;
-
-        let write_txn = db.begin_write().map_err(|e| {
-            tracing::error!("Failed to begin write transaction for clear: {}", e);
-            HsmError::GeneralError
-        })?;
         {
-            // Delete the entire table. A new one will be created on next write.
-            let _ = write_txn.delete_table(OBJECTS_TABLE);
+            let _w = self.write_lock.lock();
+            let db = db.read();
+            let write_txn = db.begin_write().map_err(db_err("begin write"))?;
+            {
+                let _ = write_txn.delete_table(BLOBS_TABLE);
+            }
+            write_txn.commit().map_err(db_err("commit"))?;
         }
-        write_txn.commit().map_err(|e| {
-            tracing::error!("Failed to commit clear transaction: {}", e);
-            HsmError::GeneralError
-        })?;
+        self.compact();
         Ok(())
     }
 }
 
 /// Set restrictive file permissions (owner-only read/write) on a path.
-/// On Unix, sets mode 0o600. On Windows, sets a DACL granting only the
-/// current user GENERIC_ALL access (removing inherited ACEs).
-pub fn set_restrictive_permissions(path: &std::path::Path) {
+/// On Unix, sets mode 0o600 (0o700 for directories). On Windows, sets a DACL
+/// granting only the current user GENERIC_ALL (removing inherited ACEs).
+///
+/// Errors are propagated so callers can fail closed (H3-29).
+pub fn set_restrictive_permissions(path: &std::path::Path) -> HsmResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            tracing::warn!(
+        let meta = std::fs::symlink_metadata(path).map_err(|e| {
+            tracing::error!("cannot stat '{}': {}", path.display(), e);
+            HsmError::DeviceError
+        })?;
+        if meta.file_type().is_symlink() {
+            tracing::error!("refusing to chmod symlink '{}'", path.display());
+            return Err(HsmError::DeviceError);
+        }
+        let mode = if meta.is_dir() { 0o700 } else { 0o600 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|e| {
+            tracing::error!(
                 "Failed to set restrictive permissions on '{}': {}",
                 path.display(),
                 e
             );
-        }
+            HsmError::DeviceError
+        })?;
     }
     #[cfg(windows)]
     {
-        set_restrictive_permissions_windows(path);
+        set_restrictive_permissions_windows(path).map_err(|e| {
+            tracing::error!("{}", e);
+            HsmError::DeviceError
+        })?;
     }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// Windows implementation: set a DACL that grants only the current user
 /// GENERIC_ALL, removing any inherited permissions from parent directories.
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn set_restrictive_permissions_windows(path: &std::path::Path) {
+fn set_restrictive_permissions_windows(path: &std::path::Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
 
     // Convert path to null-terminated wide string
@@ -332,11 +868,10 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) {
         // Get current user's SID from the process token
         let mut token_handle = std::ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
-            tracing::warn!(
+            return Err(format!(
                 "Failed to open process token for ACL setup on '{}'",
                 path.display()
-            );
-            return;
+        ));
         }
 
         // Query token user info size
@@ -350,8 +885,7 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) {
         );
         if needed == 0 {
             CloseHandle(token_handle);
-            tracing::warn!("Failed to query token user size for '{}'", path.display());
-            return;
+            return Err(format!("Failed to query token user size for '{}'", path.display()));
         }
 
         let mut token_buf: Vec<u8> = vec![0u8; needed as usize];
@@ -364,8 +898,7 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) {
         ) == 0
         {
             CloseHandle(token_handle);
-            tracing::warn!("Failed to get token user info for '{}'", path.display());
-            return;
+            return Err(format!("Failed to get token user info for '{}'", path.display()));
         }
         CloseHandle(token_handle);
 
@@ -389,12 +922,11 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) {
         let mut new_acl: *mut ACL = std::ptr::null_mut();
         let result = SetEntriesInAclW(1, &ea, std::ptr::null(), &mut new_acl);
         if result != 0 {
-            tracing::warn!(
+            return Err(format!(
                 "SetEntriesInAclW failed ({}) for '{}'",
                 result,
                 path.display()
-            );
-            return;
+        ));
         }
 
         // Apply the DACL to the file with PROTECTED flag to block inheritance
@@ -407,17 +939,17 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) {
             new_acl,
             std::ptr::null_mut(),
         );
-        if result != 0 {
-            tracing::warn!(
-                "SetNamedSecurityInfoW failed ({}) for '{}'",
-                result,
-                path.display()
-            );
-        }
-
         if !new_acl.is_null() {
             LocalFree(new_acl as *mut _);
         }
+        if result != 0 {
+            return Err(format!(
+                "SetNamedSecurityInfoW failed ({}) for '{}'",
+                result,
+                path.display()
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -427,33 +959,29 @@ fn set_restrictive_permissions_windows(path: &std::path::Path) {
 ///
 /// `iterations` controls the PBKDF2 work factor. Pass the value from
 /// `HsmConfig::security.pbkdf2_iterations` so that runtime config is honored.
-/// Falls back to `PBKDF2_ITERATIONS` if `None`.
+/// Falls back to [`DEFAULT_PBKDF2_ITERATIONS`] if `None`.
+///
+/// Returns an error if no random salt can be generated (never an all-zero
+/// salt, H3-18).
 pub fn derive_key_from_pin(
     pin: &[u8],
     salt: Option<&[u8]>,
     iterations: Option<u32>,
-) -> (Zeroizing<[u8; KEY_LEN]>, Vec<u8>) {
-    let salt_bytes = if let Some(s) = salt {
-        s.to_vec()
-    } else {
-        let mut s = vec![0u8; SALT_LEN];
-        // Route through DRBG for health testing & prediction resistance
-        if let Ok(mut drbg) = HmacDrbg::new() {
-            let _ = drbg.generate(&mut s);
-        } else {
-            // Fallback to OsRng if DRBG instantiation fails (should not happen)
-            use rand::rngs::OsRng;
-            use rand::RngCore;
-            OsRng.fill_bytes(&mut s);
+) -> HsmResult<(Zeroizing<[u8; KEY_LEN]>, Vec<u8>)> {
+    let salt_bytes = match salt {
+        Some(s) => s.to_vec(),
+        None => {
+            let mut s = vec![0u8; SALT_LEN];
+            fill_random(&mut s)?;
+            s
         }
-        s
     };
 
     let iters = iterations.unwrap_or(PBKDF2_ITERATIONS);
     let mut derived_key = Zeroizing::new([0u8; KEY_LEN]);
     pbkdf2::pbkdf2_hmac::<sha2::Sha256>(pin, &salt_bytes, iters, derived_key.as_mut());
 
-    (derived_key, salt_bytes)
+    Ok((derived_key, salt_bytes))
 }
 
 /// Verify a PIN against a stored PBKDF2 hash.
@@ -465,7 +993,10 @@ pub fn verify_pin_pbkdf2(stored_hash: &[u8], pin: &[u8], iterations: Option<u32>
     let salt = &stored_hash[..SALT_LEN];
     let stored_key = &stored_hash[SALT_LEN..];
 
-    let (derived_key, _) = derive_key_from_pin(pin, Some(salt), iterations);
+    let derived_key = match derive_key_from_pin(pin, Some(salt), iterations) {
+        Ok((k, _)) => k,
+        Err(_) => return false,
+    };
 
     use subtle::ConstantTimeEq;
     stored_key.ct_eq(derived_key.as_ref()).into()
@@ -474,10 +1005,72 @@ pub fn verify_pin_pbkdf2(stored_hash: &[u8], pin: &[u8], iterations: Option<u32>
 /// Hash a PIN for storage using PBKDF2.
 /// Returns `Zeroizing<Vec<u8>>` containing salt (32 bytes) || derived_key (32 bytes).
 /// The wrapper ensures the derived key bytes are zeroized when dropped.
-pub fn hash_pin_pbkdf2(pin: &[u8], iterations: Option<u32>) -> Zeroizing<Vec<u8>> {
-    let (derived_key, salt) = derive_key_from_pin(pin, None, iterations);
-    let mut result = Vec::with_capacity(SALT_LEN + KEY_LEN);
+pub fn hash_pin_pbkdf2(pin: &[u8], iterations: Option<u32>) -> HsmResult<Zeroizing<Vec<u8>>> {
+    let (derived_key, salt) = derive_key_from_pin(pin, None, iterations)?;
+    let mut result = Zeroizing::new(Vec::with_capacity(SALT_LEN + KEY_LEN));
     result.extend_from_slice(&salt);
     result.extend_from_slice(derived_key.as_ref());
-    Zeroizing::new(result)
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(b: u8) -> Zeroizing<[u8; KEY_LEN]> {
+        Zeroizing::new([b; KEY_LEN])
+    }
+
+    #[test]
+    fn object_records_roundtrip_and_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedStore::open_in_dir(&dir.path().join("st")).unwrap();
+        store.set_slot_key(3, &key(7));
+        let k1 = new_store_key(3).unwrap();
+        store.put_object(3, &k1, 42, b"hello").unwrap();
+        let recs = store.load_slot_objects(3).unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].handle, 42);
+        assert_eq!(&recs[0].plaintext[..], b"hello");
+        // Wrong key: manifest MAC fails closed.
+        store.set_slot_key(3, &key(8));
+        assert!(store.load_slot_objects(3).is_err());
+        // Locked slot cannot write.
+        assert!(store.put_object(4, &new_store_key(4).unwrap(), 1, b"x").is_err());
+    }
+
+    #[test]
+    fn replayed_record_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedStore::open_in_dir(&dir.path().join("st")).unwrap();
+        store.set_slot_key(0, &key(1));
+        let k = new_store_key(0).unwrap();
+        store.put_object(0, &k, 5, b"v1").unwrap();
+        // Capture the old record, write a new generation, then replay the old one.
+        let old = {
+            let db = store.db.as_ref().unwrap().read();
+            let txn = db.begin_read().unwrap();
+            let t = txn.open_table(OBJECTS_TABLE).unwrap();
+            let v = t.get(k.as_str()).unwrap().unwrap().value().to_vec();
+            v
+        };
+        store.put_object(0, &k, 5, b"v2").unwrap();
+        {
+            let db = store.db.as_ref().unwrap().read();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(OBJECTS_TABLE).unwrap();
+                t.insert(k.as_str(), old.as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let recs = store.load_slot_objects(0).unwrap();
+        assert!(recs.is_empty(), "replayed old generation must not load");
+    }
+
+    #[test]
+    fn salt_is_never_all_zero() {
+        let (_, salt) = derive_key_from_pin(b"pin", None, Some(1000)).unwrap();
+        assert!(salt.iter().any(|&b| b != 0));
+    }
 }

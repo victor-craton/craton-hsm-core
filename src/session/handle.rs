@@ -1,287 +1,135 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
-use crate::error::HsmResult;
+//! Session and object handle allocation.
+//!
+//! Handles are drawn uniformly at random from the OS CSPRNG over the full
+//! non-zero `CK_ULONG` range and checked against the live handle table before
+//! use (H3-19). This replaces the earlier keyed Feistel permutation, whose
+//! round function was not a secure PRP and whose counter could wrap around
+//! onto live handles on 32-bit `CK_ULONG` platforms. Because a handle is only
+//! issued if it is not currently in use, and the tables themselves refuse to
+//! replace an occupied entry, a live session or object can never be
+//! silently replaced.
+use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::types::{CK_OBJECT_HANDLE, CK_SESSION_HANDLE, CK_ULONG};
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum handle value, bounded by the platform's `CK_ULONG` width.
-///
-/// `CK_ULONG` is `c_ulong` per the PKCS#11 spec — 32 bits on 32-bit
-/// platforms, 64 bits on 64-bit platforms.  The internal counter is always
-/// `u64`, so on 32-bit targets we must cap at `u32::MAX` to avoid silent
-/// truncation when casting `u64 → CK_ULONG`.
 const MAX_HANDLE: u64 = CK_ULONG::MAX as u64;
 
-// ── Feistel-based handle scrambling ──────────────────────────────────
+/// Upper bound on collision retries before giving up (only reachable if the
+/// handle space is almost exhausted, which cannot happen with the object and
+/// session caps enforced elsewhere).
+const MAX_ATTEMPTS: usize = 1024;
 
-/// Round function for a 32-bit Feistel network (16-bit halves).
-/// Mixes the half-block with a 64-bit round key using multiply-xorshift.
-fn round_fn_16(half: u16, key: u64) -> u16 {
-    let x = (half as u64).wrapping_mul(key | 1); // ensure odd multiplier
-    ((x >> 16) ^ x) as u16
+fn random_handle() -> HsmResult<u64> {
+    use rand::RngCore;
+    let mut buf = [0u8; 8];
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut buf)
+        .map_err(|_| HsmError::GeneralError)?;
+    let v = u64::from_ne_bytes(buf);
+    Ok(if MAX_HANDLE == u64::MAX {
+        v
+    } else {
+        v % (MAX_HANDLE + 1)
+    })
 }
 
-/// Round function for a 64-bit Feistel network (32-bit halves).
-fn round_fn_32(half: u32, key: u64) -> u32 {
-    let x = (half as u64).wrapping_mul(key | 1);
-    ((x >> 32) ^ x) as u32
+fn next_unused_impl(in_use: impl Fn(u64) -> bool) -> HsmResult<u64> {
+    for _ in 0..MAX_ATTEMPTS {
+        let h = random_handle()?;
+        // Skip CK_INVALID_HANDLE (0) and any live handle.
+        if h != 0 && !in_use(h) {
+            return Ok(h);
+        }
+    }
+    tracing::error!("handle allocation failed: handle space exhausted");
+    Err(HsmError::DeviceMemory)
 }
-
-/// Keyed bijective permutation over the handle space.
-///
-/// Uses a 4-round Feistel cipher so that sequential counter values
-/// produce unpredictable handles.  An attacker who observes any number
-/// of handles cannot predict future handles without knowing the
-/// randomly-generated round keys.
-///
-/// On platforms where `CK_ULONG` is 32 bits the Feistel operates on
-/// 16-bit halves (bijection over `u32`); otherwise on 32-bit halves
-/// (bijection over `u64`).
-struct HandleScrambler {
-    round_keys: [u64; 4],
-}
-
-impl HandleScrambler {
-    fn new() -> Self {
-        use rand::RngCore;
-        let mut rng = rand::rngs::OsRng;
-        Self {
-            round_keys: [
-                rng.next_u64(),
-                rng.next_u64(),
-                rng.next_u64(),
-                rng.next_u64(),
-            ],
-        }
-    }
-
-    /// Forward permutation: counter → handle.
-    fn scramble(&self, counter: u64) -> u64 {
-        if MAX_HANDLE <= u32::MAX as u64 {
-            self.feistel32_forward(counter as u32) as u64
-        } else {
-            self.feistel64_forward(counter)
-        }
-    }
-
-    /// Inverse permutation: handle → counter.
-    fn unscramble(&self, handle: u64) -> u64 {
-        if MAX_HANDLE <= u32::MAX as u64 {
-            self.feistel32_inverse(handle as u32) as u64
-        } else {
-            self.feistel64_inverse(handle)
-        }
-    }
-
-    fn feistel32_forward(&self, input: u32) -> u32 {
-        let mut left = (input >> 16) as u16;
-        let mut right = input as u16;
-        for key in &self.round_keys {
-            let f = round_fn_16(right, *key);
-            let new_right = left ^ f;
-            left = right;
-            right = new_right;
-        }
-        ((left as u32) << 16) | (right as u32)
-    }
-
-    fn feistel32_inverse(&self, input: u32) -> u32 {
-        let mut left = (input >> 16) as u16;
-        let mut right = input as u16;
-        for key in self.round_keys.iter().rev() {
-            let f = round_fn_16(left, *key);
-            let new_left = right ^ f;
-            right = left;
-            left = new_left;
-        }
-        ((left as u32) << 16) | (right as u32)
-    }
-
-    fn feistel64_forward(&self, input: u64) -> u64 {
-        let mut left = (input >> 32) as u32;
-        let mut right = input as u32;
-        for key in &self.round_keys {
-            let f = round_fn_32(right, *key);
-            let new_right = left ^ f;
-            left = right;
-            right = new_right;
-        }
-        ((left as u64) << 32) | (right as u64)
-    }
-
-    fn feistel64_inverse(&self, input: u64) -> u64 {
-        let mut left = (input >> 32) as u32;
-        let mut right = input as u32;
-        for key in self.round_keys.iter().rev() {
-            let f = round_fn_32(left, *key);
-            let new_left = right ^ f;
-            right = left;
-            left = new_left;
-        }
-        ((left as u64) << 32) | (right as u64)
-    }
-}
-
-// ── Handle allocators ────────────────────────────────────────────────
 
 /// Generates unique, unpredictable session handles.
-///
-/// Internally a monotonic counter feeds into a keyed Feistel permutation
-/// so that output handles are non-sequential and cannot be predicted
-/// from observed values.  The counter wraps at `MAX_HANDLE`, making the
-/// allocator resilient to long-running processes (no permanent
-/// exhaustion).  Handle 0 (`CK_INVALID_HANDLE`) is always skipped.
-pub struct SessionHandleAllocator {
-    next: AtomicU64,
-    scrambler: HandleScrambler,
-}
+#[derive(Default)]
+pub struct SessionHandleAllocator;
 
 impl SessionHandleAllocator {
+    /// Create an allocator.
     pub fn new() -> Self {
-        Self {
-            next: AtomicU64::new(0),
-            scrambler: HandleScrambler::new(),
-        }
+        Self
     }
 
+    /// Return a random non-zero handle for which `in_use` returns false.
+    pub fn next_unused(
+        &self,
+        in_use: impl Fn(CK_SESSION_HANDLE) -> bool,
+    ) -> HsmResult<CK_SESSION_HANDLE> {
+        next_unused_impl(|h| in_use(h as CK_SESSION_HANDLE)).map(|h| h as CK_SESSION_HANDLE)
+    }
+
+    /// Return a random non-zero handle (callers must still insert with a
+    /// vacancy check).
     pub fn next(&self) -> HsmResult<CK_SESSION_HANDLE> {
-        loop {
-            let current = self.next.load(Ordering::Acquire);
-            // Wrap around instead of permanently failing on exhaustion.
-            let next_val = if current >= MAX_HANDLE {
-                0
-            } else {
-                current + 1
-            };
-            if self
-                .next
-                .compare_exchange_weak(current, next_val, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                let handle = self.scrambler.scramble(current);
-                // Skip CK_INVALID_HANDLE (0)
-                if handle != 0 {
-                    return Ok(handle as CK_SESSION_HANDLE);
-                }
-                // Exactly one counter value maps to 0 per Feistel bijection;
-                // claim the next counter value instead.
-                continue;
-            }
-        }
+        self.next_unused(|_| false)
     }
 }
 
 /// Generates unique, unpredictable object handles.
-///
-/// Same Feistel-based design as [`SessionHandleAllocator`], with an
-/// additional `ensure_past` method for avoiding collisions with
-/// previously persisted object handles.
-pub struct ObjectHandleAllocator {
-    next: AtomicU64,
-    scrambler: HandleScrambler,
-    /// Handles that must not be re-issued (e.g., loaded from persistent
-    /// storage).  Checked on every allocation; populated via
-    /// [`ensure_past`](Self::ensure_past).
-    reserved: parking_lot::Mutex<HashSet<u64>>,
-}
+#[derive(Default)]
+pub struct ObjectHandleAllocator;
 
 impl ObjectHandleAllocator {
+    /// Create an allocator.
     pub fn new() -> Self {
-        Self {
-            next: AtomicU64::new(0),
-            scrambler: HandleScrambler::new(),
-            reserved: parking_lot::Mutex::new(HashSet::new()),
-        }
+        Self
     }
 
+    /// Return a random non-zero handle for which `in_use` returns false.
+    pub fn next_unused(
+        &self,
+        in_use: impl Fn(CK_OBJECT_HANDLE) -> bool,
+    ) -> HsmResult<CK_OBJECT_HANDLE> {
+        next_unused_impl(|h| in_use(h as CK_OBJECT_HANDLE)).map(|h| h as CK_OBJECT_HANDLE)
+    }
+
+    /// Return a random non-zero handle (callers must still insert with a
+    /// vacancy check).
     pub fn next(&self) -> HsmResult<CK_OBJECT_HANDLE> {
-        loop {
-            let current = self.next.load(Ordering::Acquire);
-            let next_val = if current >= MAX_HANDLE {
-                0
-            } else {
-                current + 1
-            };
-            if self
-                .next
-                .compare_exchange_weak(current, next_val, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                let handle = self.scrambler.scramble(current);
-                // Skip CK_INVALID_HANDLE (0) and any reserved handles
-                if handle == 0 || self.reserved.lock().contains(&handle) {
-                    continue;
-                }
-                return Ok(handle as CK_OBJECT_HANDLE);
-            }
-        }
+        self.next_unused(|_| false)
     }
 
-    /// Register a persisted handle so that future allocations will never
-    /// collide with it.  Call this for every object loaded from storage
-    /// before allocating new handles.
-    pub fn ensure_past(&self, handle: CK_OBJECT_HANDLE) {
-        self.reserved.lock().insert(handle as u64);
-    }
+    /// Retained for API compatibility. Persisted handles are now protected
+    /// by the live-table check in [`next_unused`](Self::next_unused), so no
+    /// separate reservation set is needed (P9).
+    pub fn ensure_past(&self, _handle: CK_OBJECT_HANDLE) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
-    fn feistel_is_bijective_32() {
-        let s = HandleScrambler::new();
-        // Verify inverse(forward(x)) == x for a sample range
-        for i in 0u32..1000 {
-            let scrambled = s.feistel32_forward(i);
-            let recovered = s.feistel32_inverse(scrambled);
-            assert_eq!(recovered, i, "Feistel32 round-trip failed for {i}");
-        }
-    }
-
-    #[test]
-    fn feistel_is_bijective_64() {
-        let s = HandleScrambler::new();
-        for i in 0u64..1000 {
-            let scrambled = s.feistel64_forward(i);
-            let recovered = s.feistel64_inverse(scrambled);
-            assert_eq!(recovered, i, "Feistel64 round-trip failed for {i}");
-        }
-    }
-
-    #[test]
-    fn scramble_produces_no_obvious_pattern() {
-        let s = HandleScrambler::new();
-        let h1 = s.scramble(0);
-        let h2 = s.scramble(1);
-        let h3 = s.scramble(2);
-        // Consecutive inputs should not produce consecutive outputs
-        assert!(
-            !(h2 == h1 + 1 && h3 == h2 + 1),
-            "Scrambler produced sequential outputs"
-        );
-    }
-
-    #[test]
-    fn session_handle_allocator_skips_zero() {
-        let alloc = SessionHandleAllocator::new();
-        for _ in 0..10_000 {
-            let h = alloc.next().unwrap();
-            assert_ne!(h as u64, 0, "Allocator produced CK_INVALID_HANDLE (0)");
-        }
-    }
-
-    #[test]
-    fn object_handle_allocator_respects_reserved() {
+    fn handles_are_nonzero_and_unique_against_live_set() {
         let alloc = ObjectHandleAllocator::new();
-        // Allocate a handle, then reserve it and verify it's not reissued
-        let first = alloc.next().unwrap();
-        alloc.ensure_past(first);
+        let mut live = HashSet::new();
         for _ in 0..10_000 {
-            let h = alloc.next().unwrap();
-            assert_ne!(h, first, "Allocator reissued reserved handle {first}");
+            let h = alloc.next_unused(|h| live.contains(&h)).unwrap();
+            assert_ne!(h, 0);
+            assert!(live.insert(h));
         }
+    }
+
+    #[test]
+    fn session_handles_not_sequential() {
+        let alloc = SessionHandleAllocator::new();
+        let a = alloc.next().unwrap();
+        let b = alloc.next().unwrap();
+        let c = alloc.next().unwrap();
+        assert!(!(b == a.wrapping_add(1) && c == b.wrapping_add(1)));
+    }
+
+    #[test]
+    fn exhausted_space_errors() {
+        let alloc = ObjectHandleAllocator::new();
+        assert!(alloc.next_unused(|_| true).is_err());
     }
 }

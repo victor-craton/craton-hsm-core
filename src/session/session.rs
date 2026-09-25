@@ -35,7 +35,26 @@ impl SessionState {
         )
     }
 
+    /// `true` only when the **normal user** (`CKU_USER`) is logged in.
+    ///
+    /// This is the predicate that gates access to private (`CKA_PRIVATE=TRUE`)
+    /// objects and to user cryptographic services. The Security Officer is
+    /// deliberately **not** included: per PKCS#11 §4 and FIPS 140-3 role
+    /// separation the SO administers the token (C_InitPIN, token policy) but
+    /// must not read, use or create the user's private objects (H1-05/H3-06).
+    ///
+    /// Use [`is_authenticated`](Self::is_authenticated) when any role counts.
     pub fn is_logged_in(&self) -> bool {
+        self.is_user()
+    }
+
+    /// `true` when the normal user is logged in (`RoUser` / `RwUser`).
+    pub fn is_user(&self) -> bool {
+        matches!(self, SessionState::RoUser | SessionState::RwUser)
+    }
+
+    /// `true` when any role (user or SO) is logged in.
+    pub fn is_authenticated(&self) -> bool {
         matches!(
             self,
             SessionState::RoUser | SessionState::RwUser | SessionState::RwSO
@@ -369,6 +388,11 @@ pub struct Session {
     /// FIPS 140-3 IG 2.4.C: Algorithm indicator for the last completed operation.
     /// `Some(true)` = approved, `Some(false)` = non-approved, `None` = no operation yet.
     pub last_operation_fips_approved: Option<bool>,
+    /// Application that owns this session (per-application caps).
+    pub app_id: u64,
+    /// Set when the session has been closed; holders of a stale `Arc` must
+    /// treat the session as invalid.
+    pub closed: bool,
 }
 
 impl Drop for Session {
@@ -397,6 +421,8 @@ impl Session {
             active_operation: None,
             find_context: None,
             last_operation_fips_approved: None,
+            app_id: 0,
+            closed: false,
         }
     }
 
@@ -404,13 +430,19 @@ impl Session {
         self.state.is_rw()
     }
 
+    /// Object-store context for this session (slot, handle, SO role).
+    pub fn object_ctx(&self) -> crate::store::attributes::ObjectContext {
+        crate::store::attributes::ObjectContext::new(self.slot_id, self.handle, self.state.is_so())
+    }
+
     /// Transition session state on user login
     pub fn on_user_login(&mut self) -> HsmResult<()> {
         self.state = match self.state {
             SessionState::RoPublic => SessionState::RoUser,
             SessionState::RwPublic => SessionState::RwUser,
-            ref s if s.is_logged_in() => return Err(HsmError::UserAlreadyLoggedIn),
-            _ => return Err(HsmError::GeneralError),
+            SessionState::RoUser | SessionState::RwUser | SessionState::RwSO => {
+                return Err(HsmError::UserAlreadyLoggedIn)
+            }
         };
         Ok(())
     }
@@ -420,8 +452,9 @@ impl Session {
         self.state = match self.state {
             SessionState::RwPublic => SessionState::RwSO,
             SessionState::RoPublic => return Err(HsmError::SessionReadOnly),
-            ref s if s.is_logged_in() => return Err(HsmError::UserAlreadyLoggedIn),
-            _ => return Err(HsmError::GeneralError),
+            SessionState::RwSO | SessionState::RoUser | SessionState::RwUser => {
+                return Err(HsmError::UserAlreadyLoggedIn)
+            }
         };
         Ok(())
     }

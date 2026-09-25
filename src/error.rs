@@ -107,6 +107,14 @@ pub enum HsmError {
     HostMemory,
     #[error("device memory")]
     DeviceMemory,
+    /// Persistent storage / audit I/O failure or detected corruption.
+    /// The module fails closed rather than continuing without durable state.
+    #[error("device error")]
+    DeviceError,
+    /// The action is prohibited by object policy (e.g. `CKA_DESTROYABLE=FALSE`,
+    /// `CKA_COPYABLE=FALSE`).
+    #[error("action prohibited")]
+    ActionProhibited,
     #[error("token write-protected")]
     TokenWriteProtected,
     #[error("random seed not supported")]
@@ -171,6 +179,8 @@ impl From<HsmError> for CK_RV {
             HsmError::GeneralError => CKR_GENERAL_ERROR,
             HsmError::HostMemory => CKR_HOST_MEMORY,
             HsmError::DeviceMemory => CKR_DEVICE_MEMORY,
+            HsmError::DeviceError => CKR_DEVICE_ERROR,
+            HsmError::ActionProhibited => CKR_ACTION_PROHIBITED,
             HsmError::TokenWriteProtected => CKR_TOKEN_WRITE_PROTECTED,
             HsmError::RandomSeedNotSupported => CKR_RANDOM_SEED_NOT_SUPPORTED,
             HsmError::ConfigError(_) => CKR_GENERAL_ERROR,
@@ -178,6 +188,10 @@ impl From<HsmError> for CK_RV {
         }
     }
 }
+
+/// `CKR_ACTION_PROHIBITED` (PKCS#11 v2.40+). Defined locally because the
+/// ABI constant table does not export it yet.
+pub const CKR_ACTION_PROHIBITED: CK_RV = 0x0000001B;
 
 /// Convenience alias for Results using `HsmError`.
 pub type HsmResult<T> = Result<T, HsmError>;

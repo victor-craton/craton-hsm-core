@@ -11,6 +11,11 @@ use craton_hsm::store::attributes::{read_attribute, ObjectStore};
 use craton_hsm::store::key_material::RawKeyMaterial;
 use craton_hsm::store::object::StoredObject;
 
+/// `read_attribute` returns a zeroizing buffer; compare as plain bytes.
+fn read_attr(obj: &StoredObject, t: CK_ATTRIBUTE_TYPE) -> Result<Option<Vec<u8>>, HsmError> {
+    read_attribute(obj, t).map(|o| o.map(|v| v.to_vec()))
+}
+
 fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
     val.to_ne_bytes().to_vec()
 }
@@ -26,19 +31,22 @@ fn test_sensitive_non_extractable_blocks_value_read() {
     obj.extractable = false;
     obj.key_material = Some(RawKeyMaterial::new(vec![0xAA; 32]));
 
-    let result = read_attribute(&obj, CKA_VALUE);
+    let result = read_attr(&obj, CKA_VALUE);
     assert!(matches!(result, Err(HsmError::AttributeSensitive)));
 }
 
 #[test]
-fn test_sensitive_extractable_allows_value_read() {
+fn test_sensitive_extractable_blocks_value_read() {
+    // H1-02/H3-02: CKA_SENSITIVE=TRUE forbids plaintext output even when the
+    // key is extractable (extractable only permits wrapping). This test
+    // previously asserted the insecure behaviour.
     let mut obj = StoredObject::new(1, CKO_SECRET_KEY);
     obj.sensitive = true;
     obj.extractable = true;
     obj.key_material = Some(RawKeyMaterial::new(vec![0xBB; 32]));
 
-    let result = read_attribute(&obj, CKA_VALUE).unwrap();
-    assert_eq!(result, Some(vec![0xBB; 32]));
+    let result = read_attr(&obj, CKA_VALUE);
+    assert!(matches!(result, Err(HsmError::AttributeSensitive)));
 }
 
 #[test]
@@ -48,20 +56,21 @@ fn test_non_sensitive_allows_value_read() {
     obj.extractable = true;
     obj.key_material = Some(RawKeyMaterial::new(vec![0xCC; 32]));
 
-    let result = read_attribute(&obj, CKA_VALUE).unwrap();
+    let result = read_attr(&obj, CKA_VALUE).unwrap();
     assert_eq!(result, Some(vec![0xCC; 32]));
 }
 
 #[test]
-fn test_non_sensitive_non_extractable_allows_value_read() {
-    // Per PKCS#11: CKA_SENSITIVE is the primary guard, EXTRACTABLE gates wrap/export
+fn test_non_sensitive_non_extractable_blocks_value_read() {
+    // H1-02: a non-extractable secret key must never be revealed in
+    // plaintext. This test previously asserted the insecure behaviour.
     let mut obj = StoredObject::new(1, CKO_SECRET_KEY);
     obj.sensitive = false;
     obj.extractable = false;
     obj.key_material = Some(RawKeyMaterial::new(vec![0xDD; 32]));
 
-    let result = read_attribute(&obj, CKA_VALUE).unwrap();
-    assert_eq!(result, Some(vec![0xDD; 32]));
+    let result = read_attr(&obj, CKA_VALUE);
+    assert!(matches!(result, Err(HsmError::AttributeSensitive)));
 }
 
 // ============================================================================
@@ -303,10 +312,10 @@ fn test_read_boolean_attributes() {
     obj.can_sign = true;
     obj.modifiable = false;
 
-    assert_eq!(read_attribute(&obj, CKA_ENCRYPT).unwrap(), Some(vec![1]));
-    assert_eq!(read_attribute(&obj, CKA_DECRYPT).unwrap(), Some(vec![0]));
-    assert_eq!(read_attribute(&obj, CKA_SIGN).unwrap(), Some(vec![1]));
-    assert_eq!(read_attribute(&obj, CKA_MODIFIABLE).unwrap(), Some(vec![0]));
+    assert_eq!(read_attr(&obj, CKA_ENCRYPT).unwrap(), Some(vec![1]));
+    assert_eq!(read_attr(&obj, CKA_DECRYPT).unwrap(), Some(vec![0]));
+    assert_eq!(read_attr(&obj, CKA_SIGN).unwrap(), Some(vec![1]));
+    assert_eq!(read_attr(&obj, CKA_MODIFIABLE).unwrap(), Some(vec![0]));
 }
 
 #[test]
@@ -314,13 +323,13 @@ fn test_read_class_and_key_type() {
     let mut obj = StoredObject::new(1, CKO_SECRET_KEY);
     obj.key_type = Some(CKK_AES);
 
-    let class_bytes = read_attribute(&obj, CKA_CLASS).unwrap().unwrap();
+    let class_bytes = read_attr(&obj, CKA_CLASS).unwrap().unwrap();
     assert_eq!(
         CK_ULONG::from_ne_bytes(class_bytes.try_into().unwrap()),
         CKO_SECRET_KEY
     );
 
-    let kt_bytes = read_attribute(&obj, CKA_KEY_TYPE).unwrap().unwrap();
+    let kt_bytes = read_attr(&obj, CKA_KEY_TYPE).unwrap().unwrap();
     assert_eq!(
         CK_ULONG::from_ne_bytes(kt_bytes.try_into().unwrap()),
         CKK_AES
@@ -334,11 +343,11 @@ fn test_read_label_and_id() {
     obj.id = b"\x01\x02\x03".to_vec();
 
     assert_eq!(
-        read_attribute(&obj, CKA_LABEL).unwrap(),
+        read_attr(&obj, CKA_LABEL).unwrap(),
         Some(b"my-key".to_vec())
     );
     assert_eq!(
-        read_attribute(&obj, CKA_ID).unwrap(),
+        read_attr(&obj, CKA_ID).unwrap(),
         Some(vec![0x01, 0x02, 0x03])
     );
 }
@@ -347,7 +356,7 @@ fn test_read_label_and_id() {
 fn test_read_unknown_attribute_returns_none() {
     let obj = StoredObject::new(1, CKO_DATA);
     // CKA with a vendor-defined type that doesn't exist
-    let result = read_attribute(&obj, 0x80000001).unwrap();
+    let result = read_attr(&obj, 0x80000001).unwrap();
     assert_eq!(result, None);
 }
 
