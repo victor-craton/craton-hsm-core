@@ -20,6 +20,7 @@ name: Release
 #   * variable  CRATON_HSM_INTEGRITY_PUBLIC_KEY   64 hex chars (Ed25519 public key)
 #   * environment `release` with required reviewers + tag rule `v*`, holding
 #     secret CRATON_HSM_INTEGRITY_SIGNING_KEY    (Ed25519 private key, PEM)
+#     secret CRATON_HSM_INTEGRITY_SIGNING_KEY_PASSPHRASE (optional, if the PEM is encrypted)
 #   * environment `crates-io` with required reviewers; crates.io trusted
 #     publishing configured for this repository/workflow/environment.
 on:
@@ -225,6 +226,9 @@ jobs:
       - name: Sign module binaries (Ed25519 software-integrity signature)
         env:
           SIGNING_KEY_PEM: ${{ secrets.CRATON_HSM_INTEGRITY_SIGNING_KEY }}
+          # Optional: passphrase of an encrypted PEM key (the default output of
+          # tools/generate-integrity-keypair.sh).
+          SIGNING_KEY_PASSPHRASE: ${{ secrets.CRATON_HSM_INTEGRITY_SIGNING_KEY_PASSPHRASE }}
         run: |
           set -euo pipefail
           command -v xxd >/dev/null || sudo apt-get install -y xxd
@@ -235,16 +239,23 @@ jobs:
           unhex() { python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))'; }
           umask 077
           key="$RUNNER_TEMP/integrity-signing-key.pem"
-          trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
+          pass="$RUNNER_TEMP/integrity-signing-key.pass"
+          trap 'shred -u "$key" "$pass" 2>/dev/null || rm -f "$key" "$pass"' EXIT
           printf '%s\n' "$SIGNING_KEY_PEM" > "$key"
+          passin=()
+          if [ -n "${SIGNING_KEY_PASSPHRASE}" ]; then
+            printf '%s' "$SIGNING_KEY_PASSPHRASE" > "$pass"
+            export CRATON_HSM_SIGNING_KEY_PASS_FILE="$pass"
+            passin=(-passin "file:$pass")
+          fi
           # The private key must match the public key embedded in the binaries.
-          derived=$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          derived=$(openssl pkey -in "$key" ${passin[@]+"${passin[@]}"} -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
           expected=$(printf '%s' "$CRATON_HSM_INTEGRITY_PUBLIC_KEY" | tr 'A-F' 'a-f')
           if [ "$derived" != "$expected" ]; then
             echo "::error::signing key does not match CRATON_HSM_INTEGRITY_PUBLIC_KEY"
             exit 1
           fi
-          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/integrity-public.pem"
+          openssl pkey -in "$key" ${passin[@]+"${passin[@]}"} -pubout -out "$RUNNER_TEMP/integrity-public.pem"
           for lib in dist/*/libcraton_hsm.so dist/*/libcraton_hsm.dylib dist/*/craton_hsm.dll; do
             [ -f "$lib" ] || continue
             bash tools/sign-integrity.sh "$lib" "$key"
