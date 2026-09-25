@@ -13,7 +13,7 @@ Craton HSM is maintained by [Craton Software Company](https://github.com/craton-
 - Architectural decisions
 
 **Crypto reviewers** are maintainers with additional responsibility for:
-- Reviewing changes to `src/crypto/`, `src/store/key_material.rs`, and `src/token/token.rs`
+- Reviewing changes to `src/crypto/`, `src/store/key_material.rs`, `src/store/encrypted_store.rs`, `src/token/` and `src/pkcs11_abi/` (enforced through [CODEOWNERS](.github/CODEOWNERS))
 - Validating cryptographic correctness and side-channel resistance
 - Approving changes to self-tests, DRBG, and key lifecycle code
 
@@ -62,18 +62,23 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed build, test, and code guidel
 
 - Security vulnerabilities are reported via [GitHub private advisories](https://github.com/craton-co/craton-hsm-core/security/advisories/new)
 - Response timeline: 48h acknowledgment, 1 week assessment, 30 days fix target
-- Security fixes are backported to all supported versions
+- Security fixes are released for the supported versions listed in [SECURITY.md](SECURITY.md) (currently only the latest 0.9.x release)
+- Dependency advisories: suppressions live only in `deny.toml` with a reason and expiry; CI fails when a suppression expires, forcing a re-review at least quarterly
 - See [SECURITY.md](SECURITY.md) for full details
 
 ## Release Process
 
-1. All tests pass on CI (multi-platform)
-2. `cargo audit` and `cargo deny check` pass
-3. CHANGELOG updated with version and date
-4. Version bumped in `Cargo.toml`
-5. Git tag created and signed
-6. Release artifacts published with checksums
-7. See [Release Signing](docs/release-signing.md) for signing procedures
+1. Version bumped in `Cargo.toml`; CHANGELOG has a `## [X.Y.Z] - date` section
+2. A maintainer creates a **signed, annotated** tag `vX.Y.Z` (tag protection rules restrict who can do this)
+3. Pushing the tag starts `.github/workflows/release.yml`, which enforces the rest automatically:
+   - the tag must match the `Cargo.toml` version and the CHANGELOG;
+   - the full CI suite (multi-platform tests, clippy, MSRV, Miri, fuzz smoke) and the security audit (`cargo deny`, `cargo audit`) must pass on the tagged commit;
+   - binaries are built with `--locked`, the integrity signature is created in the protected `release` environment (required reviewers), and SBOM, licence notices, checksums, cosign bundles and provenance are published;
+   - crates.io publishing runs last, in the protected `crates-io` environment, with trusted publishing.
+4. See [Release Signing](docs/release-signing.md) for the artefacts and the required repository settings.
+
+Note: the public history begins with the open-sourcing commit; releases
+before 0.9.1 listed in the CHANGELOG are not tagged in this repository.
 
 ## Versioning
 
