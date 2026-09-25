@@ -619,7 +619,9 @@ impl HsmService for HsmServiceImpl {
         mut request: Request<LoginRequest>,
     ) -> Result<Response<LoginResponse>, Status> {
         // (H4-19) Move the PIN into a zeroizing buffer before anything else,
-        // so every return path scrubs it.
+        // so every return path scrubs it. Copies held in HTTP/2 / tonic
+        // decode buffers cannot be scrubbed; core dumps are disabled at
+        // startup to limit exposure.
         let pin = Zeroizing::new(std::mem::take(&mut request.get_mut().pin));
         let (conn, _rpc, req) = begin(request)?;
         let user_type = req.user_type;
