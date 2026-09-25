@@ -92,18 +92,31 @@ pub enum ActiveOperation {
     Sign {
         mechanism: CK_MECHANISM_TYPE,
         key_handle: CK_OBJECT_HANDLE,
+        /// Input absorbed so far. For mechanisms without a built-in hash this
+        /// is the data to sign; for hash-then-sign mechanisms it is a copy of
+        /// the hashed input kept (up to [`OP_STATE_MAX_DATA_LEN`]) so that
+        /// `C_GetOperationState` can save the operation faithfully (H1-17).
         data: Zeroizing<Vec<u8>>,
         /// Hasher for multi-part sign operations (CKM_SHA*_RSA_PKCS, CKM_ECDSA_SHA*, etc.)
         hasher: Option<Box<dyn crate::crypto::digest::DigestAccumulator>>,
+        /// Mechanism parameters (generic RSA-PSS, ML-DSA/SLH-DSA context).
+        params: SignParams,
+        /// `false` once the absorbed input no longer fits in a state blob.
+        state_saveable: bool,
         /// Cached object reference from C_SignInit.
         cached_object: Option<Arc<parking_lot::RwLock<StoredObject>>>,
     },
     Verify {
         mechanism: CK_MECHANISM_TYPE,
         key_handle: CK_OBJECT_HANDLE,
+        /// See [`ActiveOperation::Sign::data`].
         data: Zeroizing<Vec<u8>>,
         /// Hasher for multi-part verify operations
         hasher: Option<Box<dyn crate::crypto::digest::DigestAccumulator>>,
+        /// Mechanism parameters (generic RSA-PSS, ML-DSA/SLH-DSA context).
+        params: SignParams,
+        /// `false` once the absorbed input no longer fits in a state blob.
+        state_saveable: bool,
         /// Cached object reference from C_VerifyInit.
         cached_object: Option<Arc<parking_lot::RwLock<StoredObject>>>,
     },
@@ -114,15 +127,121 @@ pub enum ActiveOperation {
         /// When C_GetOperationState is called, we serialize this data
         /// and can reconstruct the hasher by re-feeding it.
         accumulated_input: Zeroizing<Vec<u8>>,
+        /// Set by `C_DigestKey`: the hasher absorbed secret key material,
+        /// which must never be exported through `C_GetOperationState`
+        /// (H1-12), so the operation becomes unsaveable.
+        key_absorbed: bool,
+        /// `false` once the input no longer fits in a state blob; the copy
+        /// in `accumulated_input` is then dropped (H1-32).
+        state_saveable: bool,
     },
 }
 
+/// Mechanism parameters of a sign / verify operation, parsed at
+/// `C_SignInit` / `C_VerifyInit` while the caller's pointers are valid.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SignParams {
+    /// No parameters.
+    #[default]
+    None,
+    /// `CKM_RSA_PKCS_PSS` with its `CK_RSA_PKCS_PSS_PARAMS` (A2-13).
+    Pss(crate::crypto::params::PssParams),
+    /// ML-DSA / SLH-DSA `CK_SIGN_ADDITIONAL_CONTEXT` (H2-20).
+    Pqc {
+        /// Context string (at most 255 bytes).
+        context: Vec<u8>,
+        /// `true` for `CKH_DETERMINISTIC_REQUIRED`, `false` for hedged.
+        deterministic: bool,
+    },
+}
+
+impl SignParams {
+    /// Canonical byte encoding (stored in operation-state blobs).
+    pub fn encode(&self) -> Vec<u8> {
+        use crate::crypto::sign::HashAlg;
+        match self {
+            SignParams::None => Vec::new(),
+            SignParams::Pss(p) => {
+                let h = match p.hash {
+                    HashAlg::Sha256 => 1u8,
+                    HashAlg::Sha384 => 2,
+                    HashAlg::Sha512 => 3,
+                };
+                vec![b'P', h]
+            }
+            SignParams::Pqc {
+                context,
+                deterministic,
+            } => {
+                let mut v = Vec::with_capacity(2 + context.len());
+                v.push(b'Q');
+                v.push(u8::from(*deterministic));
+                v.extend_from_slice(context);
+                v
+            }
+        }
+    }
+
+    /// Inverse of [`encode`](Self::encode).
+    pub fn decode(bytes: &[u8]) -> HsmResult<Self> {
+        use crate::crypto::sign::HashAlg;
+        match bytes {
+            [] => Ok(SignParams::None),
+            [b'P', h] => {
+                let hash = match h {
+                    1 => HashAlg::Sha256,
+                    2 => HashAlg::Sha384,
+                    3 => HashAlg::Sha512,
+                    _ => return Err(HsmError::DataInvalid),
+                };
+                Ok(SignParams::Pss(crate::crypto::params::PssParams {
+                    hash,
+                    salt_len: hash.output_len(),
+                }))
+            }
+            [b'Q', d, ctx @ ..] if *d <= 1 && ctx.len() <= 255 => Ok(SignParams::Pqc {
+                context: ctx.to_vec(),
+                deterministic: *d == 1,
+            }),
+            _ => Err(HsmError::DataInvalid),
+        }
+    }
+}
+
+/// Active PKCS#11 v3.0 message-based encryption / decryption context
+/// (`C_MessageEncryptInit` / `C_MessageDecryptInit`).
+pub struct MessageOperation {
+    /// `true` for encryption, `false` for decryption.
+    pub encrypt: bool,
+    /// Mechanism (only `CKM_AES_GCM` is supported).
+    pub mechanism: CK_MECHANISM_TYPE,
+    /// Key handle.
+    pub key_handle: CK_OBJECT_HANDLE,
+    /// Key object, validated at init.
+    pub cached_object: Arc<parking_lot::RwLock<StoredObject>>,
+}
+
+impl std::fmt::Debug for MessageOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MessageOperation")
+            .field("encrypt", &self.encrypt)
+            .field("mechanism", &self.mechanism)
+            .field("key_handle", &self.key_handle)
+            .finish()
+    }
+}
+
 // ── Operation state serialization constants ──
-const OP_TYPE_ENCRYPT: u8 = 0;
-const OP_TYPE_DECRYPT: u8 = 1;
-const OP_TYPE_SIGN: u8 = 2;
-const OP_TYPE_VERIFY: u8 = 3;
-const OP_TYPE_DIGEST: u8 = 4;
+/// State-blob tag of an encrypt operation (never saveable).
+pub const OP_TYPE_ENCRYPT: u8 = 0;
+/// State-blob tag of a decrypt operation (never saveable).
+pub const OP_TYPE_DECRYPT: u8 = 1;
+/// State-blob tag of a sign operation.
+pub const OP_TYPE_SIGN: u8 = 2;
+/// State-blob tag of a verify operation.
+pub const OP_TYPE_VERIFY: u8 = 3;
+/// State-blob tag of a digest operation.
+pub const OP_TYPE_DIGEST: u8 = 4;
 
 /// HMAC-SHA256 tag length appended to operation state blobs.
 const OP_STATE_HMAC_LEN: usize = 32;
@@ -131,7 +250,7 @@ const OP_STATE_HMAC_LEN: usize = 32;
 const OP_STATE_MAX_PARAM_LEN: usize = 64 * 1024;
 
 /// Maximum allowed data size in deserialized operation state (4 MB).
-const OP_STATE_MAX_DATA_LEN: usize = 4 * 1024 * 1024;
+pub const OP_STATE_MAX_DATA_LEN: usize = 4 * 1024 * 1024;
 
 impl ActiveOperation {
     /// Serialize the operation state into a portable blob.
@@ -144,7 +263,18 @@ impl ActiveOperation {
     /// The buffer is `Zeroizing` from the start so intermediate CSPs
     /// are zeroized even if an early return or panic occurs
     /// (FIPS 140-3 §7.7).
-    pub fn serialize_state(&self, state_hmac_key: &[u8; 32]) -> HsmResult<Zeroizing<Vec<u8>>> {
+    ///
+    /// `binding` (e.g. the session handle and slot) is authenticated together
+    /// with the blob but not stored in it: a blob only restores into a context
+    /// that presents the same binding (H1-04).
+    ///
+    /// Operations that absorbed secret key material (`C_DigestKey`) or whose
+    /// input exceeded the state size limit are unsaveable.
+    pub fn serialize_state(
+        &self,
+        state_hmac_key: &[u8; 32],
+        binding: &[u8],
+    ) -> HsmResult<Zeroizing<Vec<u8>>> {
         // Use Zeroizing from the start so CSPs are zeroized on panic/drop.
         let mut buf = Zeroizing::new(Vec::new());
 
@@ -190,31 +320,41 @@ impl ActiveOperation {
                 mechanism,
                 key_handle,
                 data,
+                params,
+                state_saveable,
                 ..
-            } => {
-                buf.push(OP_TYPE_SIGN);
-                buf.extend_from_slice(&(*mechanism as u64).to_le_bytes());
-                buf.extend_from_slice(&(*key_handle as u64).to_le_bytes());
-                buf.extend_from_slice(&0u32.to_le_bytes()); // no mechanism_param
-                write_field(&mut buf, data, OP_STATE_MAX_DATA_LEN)?;
             }
-            ActiveOperation::Verify {
+            | ActiveOperation::Verify {
                 mechanism,
                 key_handle,
                 data,
+                params,
+                state_saveable,
                 ..
             } => {
-                buf.push(OP_TYPE_VERIFY);
+                if !*state_saveable {
+                    return Err(HsmError::DataLenRange);
+                }
+                buf.push(if matches!(self, ActiveOperation::Sign { .. }) {
+                    OP_TYPE_SIGN
+                } else {
+                    OP_TYPE_VERIFY
+                });
                 buf.extend_from_slice(&(*mechanism as u64).to_le_bytes());
                 buf.extend_from_slice(&(*key_handle as u64).to_le_bytes());
-                buf.extend_from_slice(&0u32.to_le_bytes()); // no mechanism_param
+                write_field(&mut buf, &params.encode(), OP_STATE_MAX_PARAM_LEN)?;
                 write_field(&mut buf, data, OP_STATE_MAX_DATA_LEN)?;
             }
             ActiveOperation::Digest {
                 mechanism,
                 accumulated_input,
+                key_absorbed,
+                state_saveable,
                 ..
             } => {
+                if *key_absorbed || !*state_saveable {
+                    return Err(HsmError::DataLenRange);
+                }
                 buf.push(OP_TYPE_DIGEST);
                 buf.extend_from_slice(&(*mechanism as u64).to_le_bytes());
                 buf.extend_from_slice(&0u64.to_le_bytes()); // key_handle = 0
@@ -229,6 +369,8 @@ impl ActiveOperation {
         type HmacSha256 = Hmac<Sha256>;
         let mut mac =
             HmacSha256::new_from_slice(state_hmac_key).expect("HMAC key length is always valid");
+        mac.update(&(binding.len() as u64).to_le_bytes());
+        mac.update(binding);
         mac.update(&buf[..]);
         let tag = mac.finalize().into_bytes();
         buf.extend_from_slice(&tag);
@@ -247,6 +389,7 @@ impl ActiveOperation {
     pub fn deserialize_state(
         blob: &[u8],
         state_hmac_key: &[u8; 32],
+        binding: &[u8],
     ) -> HsmResult<(
         u8,
         CK_MECHANISM_TYPE,
@@ -269,6 +412,8 @@ impl ActiveOperation {
         type HmacSha256 = Hmac<Sha256>;
         let mut mac =
             HmacSha256::new_from_slice(state_hmac_key).expect("HMAC key length is always valid");
+        mac.update(&(binding.len() as u64).to_le_bytes());
+        mac.update(binding);
         mac.update(payload);
         mac.verify_slice(provided_tag)
             .map_err(|_| HsmError::DataInvalid)?;
@@ -393,6 +538,12 @@ pub struct Session {
     /// Set when the session has been closed; holders of a stale `Arc` must
     /// treat the session as invalid.
     pub closed: bool,
+    /// The active sign / decrypt operation uses a key with
+    /// `CKA_ALWAYS_AUTHENTICATE=TRUE` and needs a `C_Login(CKU_CONTEXT_SPECIFIC)`
+    /// before it may proceed (A2-20). Reset by every `*Init`.
+    pub context_login_required: bool,
+    /// Active v3.0 message-based encrypt / decrypt context.
+    pub message_op: Option<MessageOperation>,
 }
 
 impl Drop for Session {
@@ -401,6 +552,7 @@ impl Drop for Session {
         // intermediate CSPs held in ActiveOperation fields.
         self.active_operation = None;
         self.find_context = None;
+        self.message_op = None;
     }
 }
 
@@ -423,6 +575,8 @@ impl Session {
             last_operation_fips_approved: None,
             app_id: 0,
             closed: false,
+            context_login_required: false,
+            message_op: None,
         }
     }
 
@@ -470,6 +624,8 @@ impl Session {
         // Clear active operations on logout
         self.active_operation = None;
         self.find_context = None;
+        self.message_op = None;
+        self.context_login_required = false;
         Ok(())
     }
 
