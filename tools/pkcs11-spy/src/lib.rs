@@ -78,6 +78,7 @@
 
 mod ckr;
 mod config;
+#[cfg(unix)]
 mod fsutil;
 mod loader;
 mod logger;

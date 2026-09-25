@@ -11,29 +11,24 @@
 //! it has the sticky bit (e.g. `/tmp`): then others cannot rename or delete
 //! entries they do not own.
 
-#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-#[cfg(unix)]
 pub fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
 }
 
-#[cfg(unix)]
 fn egid() -> u32 {
     // SAFETY: getegid has no preconditions and cannot fail.
     unsafe { libc::getegid() }
 }
 
-#[cfg(unix)]
 fn others_can_write(m: &std::fs::Metadata) -> bool {
     let mode = m.mode();
     mode & 0o002 != 0 || (mode & 0o020 != 0 && m.gid() != egid())
 }
 
-#[cfg(unix)]
 fn check_owner(path: &Path, m: &std::fs::Metadata) -> Result<(), String> {
     let uid = m.uid();
     if uid != 0 && uid != euid() {
@@ -48,7 +43,6 @@ fn check_owner(path: &Path, m: &std::fs::Metadata) -> Result<(), String> {
 }
 
 /// A regular file that nobody but root / the effective user can modify.
-#[cfg(unix)]
 pub fn check_trusted_file(path: &Path, m: &std::fs::Metadata) -> Result<(), String> {
     if !m.file_type().is_file() {
         return Err(format!("{} is not a regular file", path.display()));
@@ -65,7 +59,6 @@ pub fn check_trusted_file(path: &Path, m: &std::fs::Metadata) -> Result<(), Stri
 }
 
 /// A directory whose entries cannot be replaced by other users.
-#[cfg(unix)]
 pub fn check_trusted_dir(path: &Path, m: &std::fs::Metadata) -> Result<(), String> {
     if !m.file_type().is_dir() {
         return Err(format!("{} is not a directory", path.display()));
@@ -82,7 +75,6 @@ pub fn check_trusted_dir(path: &Path, m: &std::fs::Metadata) -> Result<(), Strin
 }
 
 /// Check every ancestor directory of a canonical (absolute, symlink-free) path.
-#[cfg(unix)]
 pub fn check_trusted_ancestors(canonical: &Path) -> Result<(), String> {
     for dir in canonical.ancestors().skip(1) {
         if dir.as_os_str().is_empty() {
@@ -95,7 +87,7 @@ pub fn check_trusted_ancestors(canonical: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
