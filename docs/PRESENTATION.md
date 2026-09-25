@@ -1,16 +1,34 @@
 # Craton HSM — A Post-Quantum Software HSM in Rust
 
+> **Read this first.** This slide deck is a marketing snapshot from the
+> v0.9.1 era (March 2026). Sample outputs (CLI, POST logs, audit entries) are
+> **illustrative**, not captured from the current binaries, and some
+> statements were inaccurate even then. The 2026-09 audit corrected the
+> following; the technical documents are authoritative:
+>
+> | Slide claim | Actual (see) |
+> |---|---|
+> | "PKCS#11 v3.0-compliant", "70+ exports" | 68 PKCS#11 v2.40 functions + v3.0 interface discovery only ([api-reference.md](api-reference.md)) |
+> | "zero `unsafe` in crypto paths" | `unsafe` also exists in `crypto/integrity.rs`, `crypto/digest.rs`, `crypto/mlock.rs` ([security-model.md](security-model.md)) |
+> | Hybrid X25519 + ML-KEM-768 | No such mechanism exists; the composite ML-DSA/ECDSA mechanism was removed |
+> | HMAC-SHA256 integrity test with `.hmac` sidecar | Ed25519 signature with `.sig` sidecar; HMAC tooling removed ([release-signing.md](release-signing.md)) |
+> | "17 POST tests", "617+ tests in 33 suites", "5 fuzz targets" | Self-test list in [fips-140-3-certification.md §9](fips-140-3-certification.md#9-self-tests); 35 integration test files; 12 fuzz targets |
+> | aws-lc-rs backend "FIPS 140-3 validated" | Links the AWS-LC FIPS module; Craton HSM is not validated and not all services use AWS-LC |
+> | "RSA blinding" side-channel resistance | RSA on the RustCrypto backend is affected by the Marvin attack (RUSTSEC-2023-0071), not mitigated |
+> | Algorithm indicator (IG 2.4.C), "all technical requirements implemented" | No API-visible indicator; the module is **not ready** for FIPS submission ([fips-gap-analysis.md](fips-gap-analysis.md)) |
+> | Admin CLI output samples | Illustrative; see `craton-hsm-admin --help` |
+
 ---
 
 ## What is Craton HSM?
 
-A **PKCS#11 v3.0-compliant Software HSM** written entirely in Rust.
+A **PKCS#11 software HSM** written in Rust (PKCS#11 v2.40 function set + v3.0 interface discovery).
 
 - Drop-in replacement for SoftHSMv2
 - Dynamically loadable shared library (`.so` / `.dll` / `.dylib`)
 - 41 cryptographic mechanisms including 9 post-quantum
-- 617+ passing tests across 33 suites (including 46 PKCS#11 conformance tests), zero `unsafe` in crypto paths
-- Dual crypto backend: RustCrypto (default) or aws-lc-rs (FIPS 140-3 validated)
+- Extensive integration test suite (35 test files, all run in CI); `unsafe` confined to the FFI layer and a few documented places
+- Dual crypto backend: RustCrypto (default) or AWS-LC (in-tree `awslc-backend`; Craton HSM itself is not validated)
 - Persistent storage with per-object encryption (redb + AES-256-GCM)
 - gRPC daemon, admin CLI, Kubernetes-ready
 
@@ -85,7 +103,6 @@ Three consumption modes, one core engine.
 | ML-DSA-44/65/87 | FIPS 204 | Digital signatures |
 | ML-KEM-512/768/1024 | FIPS 203 | Key encapsulation |
 | SLH-DSA-SHA2-128s/256s | FIPS 205 | Stateless hash-based signatures |
-| Hybrid X25519 + ML-KEM-768 | Composite | Transitional hybrid KEM |
 
 SoftHSMv2 has **zero** post-quantum support.
 
@@ -103,7 +120,7 @@ SoftHSMv2 has **zero** post-quantum support.
 6. Session state machine is authoritative (5-state FSM)
 7. Audit log written synchronously before function returns
 8. SP 800-90A DRBG for all key material (`DrbgRng` adapter routes RSA/EC/Ed25519 through HMAC_DRBG)
-9. No `unsafe` in crypto paths (all unsafe confined to ABI layer + mlock)
+9. Minimal, documented `unsafe` (ABI layer, mlock, integrity-path lookup, digest zeroization)
 10. Generic errors to callers (never leak internal state)
 
 ### PIN Protection
@@ -137,7 +154,7 @@ Run during `C_Initialize` — failure blocks all operations:
 
 | # | Test | Type |
 |---|------|------|
-| 0 | Software integrity (HMAC-SHA256) | Module binary verification (§9.4) |
+| 0 | Software integrity (Ed25519 signature, `.sig`) | Module binary verification (§9.4) |
 | 1-4 | SHA-256, SHA-384, SHA-512, SHA3-256 | NIST known-answer |
 | 5-7 | HMAC-SHA256, HMAC-SHA384, HMAC-SHA512 | RFC 4231 known-answer |
 | 8 | AES-256-GCM | Roundtrip + known-answer decrypt |
@@ -170,7 +187,7 @@ All `ActiveOperation` data buffers and mechanism parameters use `Zeroizing<Vec<u
 
 ### Software Integrity Test (§9.4) ✅
 
-HMAC-SHA256 of the module binary verified at POST time against a `.hmac` sidecar file. Tools provided for computing the integrity HMAC: `compute-integrity-hmac.sh` (Linux/macOS) and `compute-integrity-hmac.ps1` (Windows).
+Ed25519 signature over the SHA-256 digest of the module file, verified at `C_Initialize` against a `.sig` sidecar (public key embedded at build time; releases are signed by the release workflow). The earlier HMAC-SHA256/`.hmac` scheme and its tools were removed.
 
 ### SP 800-90A DRBG ✅
 
@@ -285,7 +302,7 @@ See `docs/benchmarks.md` for full methodology, setup instructions, and analysis.
 | AES-GCM nonce safety | Unknown | Per-key counters with 2^31 limit (SP 800-38D) |
 | Zero IV rejection | Unknown | All-zero IVs rejected at C_EncryptInit for CBC/CTR |
 | Pairwise Consistency | No | Sign/verify roundtrip on every keygen (§9.6) |
-| Software Integrity | No | HMAC-SHA256 of module binary at POST (§9.4) |
+| Software Integrity | No | Ed25519 signature over the module file at `C_Initialize` (§9.4) |
 | Algorithm Indicator | No | `fips_approved: bool` in all audit log entries (IG 2.4.C) |
 | Intermediate Zeroization | Unknown | `Zeroizing<Vec<u8>>` on all intermediate buffers (§7.7) |
 | FIPS crypto backend | No | Optional aws-lc-rs (FIPS 140-3 validated) |
@@ -364,14 +381,14 @@ Helm chart with:
 | Completed | 143/147 (97%) |
 | Deferred | 2 (interop tests) |
 | Test suites | 33 |
-| Total tests | 617+ |
-| PKCS#11 exports | 70+ |
+| Total tests | see `cargo test -- --list` |
+| PKCS#11 exports | 68 (v2.40) + 2 (v3.0 interface discovery) |
 | Mechanisms | 41 |
 | PQC mechanisms | 9 |
 | POST self-tests | 17 (integrity + 16 KATs) |
 | Conformance tests | 46 (PKCS#11 ABI-level security) |
 | Lines of Rust (core) | ~10,000 |
-| `unsafe` in crypto | 0 |
+| `unsafe` in crypto | a few documented blocks (integrity, digest, mlock) |
 
 ---
 
@@ -648,7 +665,7 @@ Key bytes never appear in logs, debug output, or error messages. This is enforce
 
 ```
 [C_Initialize] Running FIPS 140-3 Power-On Self-Tests...
-  [ OK ] POST 0: Software integrity (HMAC-SHA256 of module binary)
+  [ OK ] POST 0: Software integrity (Ed25519 signature of module file)
   [ OK ] KAT  1: SHA-256 digest
   [ OK ] KAT  2: SHA-384 digest
   [ OK ] KAT  3: SHA-512 digest
@@ -728,7 +745,7 @@ See `docs/release-signing.md` for binary verification instructions.
 Craton HSM is a modern, memory-safe, post-quantum-ready PKCS#11 implementation.
 
 **What it delivers today:**
-- Full PKCS#11 v3.0 C ABI (70+ exports) with multi-part operations
+- PKCS#11 C ABI (v2.40 function set + v3.0 interface discovery) with multi-part operations
 - 41 mechanisms including ML-DSA, ML-KEM, SLH-DSA
 - Memory safety by construction (Rust)
 - SP 800-90A HMAC_DRBG with prediction resistance
@@ -736,28 +753,28 @@ Craton HSM is a modern, memory-safe, post-quantum-ready PKCS#11 implementation.
 - FIPS Approved Mode (`fips_approved_only` restricts to approved algorithms)
 - FIPS 140-3 POST self-tests (17 tests: integrity + 16 KATs with genuine known-answer values)
 - Pairwise consistency tests on every key pair generation (§9.6)
-- Software integrity verification (HMAC-SHA256 of module binary, §9.4)
+- Software integrity verification (Ed25519 signature over the module file, §9.4)
 - Algorithm indicator in all audit log entries (IG 2.4.C)
 - Intermediate zeroization of all plaintext buffers (§7.7)
 - Dual crypto backend (RustCrypto or aws-lc-rs FIPS) with comparative benchmarks
 - Fork safety, memory hardening (mlock + zeroization verification)
 - Persistent encrypted storage (redb + AES-256-GCM) with file-level locking
-- Fuzzing infrastructure (5 cargo-fuzz targets: ABI, crypto, attributes, sessions, buffer overflow)
+- Fuzzing infrastructure (12 cargo-fuzz targets, 60-second smoke run of each in CI)
 - FIPS Security Policy and CSP documentation
 - Production deployment via gRPC daemon or Kubernetes sidecar
 - GitHub Actions CI/CD pipeline (build, test, lint, security audit, Miri, benchmarks)
 - Supply-chain security: `cargo audit`, `cargo deny`, Miri, AddressSanitizer support
 - Release binary signing documentation (GPG, cosign, Authenticode)
-- Side-channel resistance: constant-time comparisons, RSA blinding, AES-NI
+- Side-channel measures: constant-time comparisons, AES-NI (RSA on the RustCrypto backend is *not* timing-safe — RUSTSEC-2023-0071)
 - PKCS#11 C ABI benchmarks with SoftHSMv2 head-to-head comparison
 - Java SunPKCS11 and OpenSSL/pkcs11-tool interoperability test suites
 - Security review checklist for pre-audit preparation
 - FIPS operator guide (`docs/fips-mode-guide.md`)
-- 617+ passing tests across 33 suites (including 46 PKCS#11 conformance tests)
+- 35 integration test files run in CI on three operating systems
 
 **What it honestly does not have yet:**
-- FIPS 140-3 certification (all technical requirements implemented, see `docs/fips-gap-analysis.md`)
-- Third-party security audit (checklist prepared, see `docs/security-review-checklist.md`)
+- FIPS 140-3 validation — and the module is not yet ready to submit (see `docs/fips-gap-analysis.md`)
+- Completed remediation of the 2026-09 security audit (see CHANGELOG)
 - Years of production deployment history
 
 The codebase is open, the gaps are documented, and the architecture is designed for certification.
