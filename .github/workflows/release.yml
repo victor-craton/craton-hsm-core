@@ -199,7 +199,8 @@ jobs:
   package:
     name: Sign integrity, SBOM, notices, package
     needs: [verify-tag, build]
-    runs-on: ubuntu-latest
+    # Same image as the Linux build so the load smoke test uses the same glibc.
+    runs-on: ubuntu-24.04
     # Protected environment: required reviewers + tag rule; the only place the
     # integrity signing key is available.
     environment: release
