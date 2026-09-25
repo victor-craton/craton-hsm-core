@@ -260,7 +260,9 @@ impl HsmCore {
         if self.finalized.load(Ordering::Acquire) {
             return Err(HsmError::NotInitialized);
         }
-        Ok(())
+        // audit.fail_closed: refuse security-relevant operations once the
+        // audit trail can no longer be written (H3-11).
+        self.audit_log.check_healthy()
     }
 
     /// `C_InitToken` semantics for every front end (H1-01/H3-01/H3-14).
@@ -469,13 +471,40 @@ impl HsmCore {
     }
 
     /// Export the token objects of an initialised slot for backup.
-    pub fn export_token_objects(&self, slot_id: CK_SLOT_ID) -> HsmResult<ZeroizingObjects> {
+    ///
+    /// The slot must have been unlocked by a login (so persisted objects are
+    /// loaded). Unless `include_non_extractable` is set, secret and private
+    /// keys with `CKA_EXTRACTABLE=FALSE` are **not** exported, so the backup
+    /// path does not bypass the object export policy (A1-17); the number of
+    /// skipped keys is logged.
+    pub fn export_token_objects(
+        &self,
+        slot_id: CK_SLOT_ID,
+        include_non_extractable: bool,
+    ) -> HsmResult<ZeroizingObjects> {
         self.check_live()?;
         let token = self.slot_manager.get_token(slot_id)?;
         if !token.is_initialized() {
             return Err(HsmError::TokenNotInitialized);
         }
-        Ok(self.object_store.export_slot_objects(slot_id))
+        let all = self.object_store.export_slot_objects(slot_id).into_inner();
+        let total = all.len();
+        let kept: Vec<StoredObject> = all
+            .into_iter()
+            .filter(|o| {
+                include_non_extractable
+                    || !crate::store::object::is_secret_class(o.class)
+                    || o.extractable
+            })
+            .collect();
+        if kept.len() != total {
+            tracing::warn!(
+                "backup export: skipped {} non-extractable key(s) on slot {}",
+                total - kept.len(),
+                slot_id
+            );
+        }
+        Ok(ZeroizingObjects::new(kept))
     }
 
     /// Import restored objects into a slot as token objects with freshly

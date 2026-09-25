@@ -942,6 +942,21 @@ impl AuditLog {
         self.shared.tamper_flag.load(Ordering::Acquire)
     }
 
+    /// In fail-closed mode, returns an error once the log is unusable
+    /// (tamper detected or a previous write failed) so callers can refuse
+    /// security-relevant operations *before* performing them.
+    pub fn check_healthy(&self) -> HsmResult<()> {
+        if !self.shared.fail_closed {
+            return Ok(());
+        }
+        if self.shared.tamper_flag.load(Ordering::Acquire)
+            || self.shared.io_failed.load(Ordering::Acquire)
+        {
+            return Err(HsmError::DeviceError);
+        }
+        Ok(())
+    }
+
     /// Returns `true` if an event could not be written durably.
     pub fn has_io_failure(&self) -> bool {
         self.shared.io_failed.load(Ordering::Acquire)
@@ -1248,6 +1263,8 @@ impl AuditLog {
     /// privileges before exposing audit data. This method does not enforce
     /// authorization internally.
     pub fn entry_count(&self) -> usize {
+        // Read-your-writes: make every event recorded before this call visible.
+        self.flush();
         self.shared.state.read().entries.len()
     }
 
@@ -1258,6 +1275,8 @@ impl AuditLog {
     /// Callers must verify SO authorization. Prefer `get_entries_paginated()`
     /// for large logs to avoid cloning up to 100K entries at once.
     pub fn get_entries(&self) -> Vec<AuditEvent> {
+        // Read-your-writes: make every event recorded before this call visible.
+        self.flush();
         self.shared.state.read().entries.iter().cloned().collect()
     }
 
@@ -1267,6 +1286,8 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn get_recent_entries(&self, n: usize) -> Vec<AuditEvent> {
+        // Read-your-writes: make every event recorded before this call visible.
+        self.flush();
         let state = self.shared.state.read();
         let start = state.entries.len().saturating_sub(n);
         state.entries.iter().skip(start).cloned().collect()
@@ -1280,6 +1301,8 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn get_entries_paginated(&self, offset: usize, limit: usize) -> Vec<AuditEvent> {
+        // Read-your-writes: make every event recorded before this call visible.
+        self.flush();
         let state = self.shared.state.read();
         if offset >= state.entries.len() {
             return Vec::new();
@@ -1301,6 +1324,8 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn export_json(&self) -> String {
+        // Read-your-writes: make every event recorded before this call visible.
+        self.flush();
         let entries = self.shared.state.read().entries.clone();
         serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string())
     }
@@ -1313,6 +1338,8 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn export_ndjson(&self) -> String {
+        // Read-your-writes: make every event recorded before this call visible.
+        self.flush();
         let entries = self.shared.state.read().entries.clone();
         entries
             .iter()
@@ -1345,6 +1372,8 @@ impl AuditLog {
     ///
     /// Callers must verify SO authorization before exposing audit data.
     pub fn export_syslog(&self) -> Vec<String> {
+        // Read-your-writes: make every event recorded before this call visible.
+        self.flush();
         let entries = self.shared.state.read().entries.clone();
         entries
             .iter()
@@ -1400,6 +1429,8 @@ impl AuditLog {
     /// Returns `Ok(count)` if the chain is valid,
     /// `Err(index)` with the index of the first broken link.
     pub fn verify_chain(&self) -> Result<usize, usize> {
+        // Read-your-writes: make every event recorded before this call visible.
+        self.flush();
         let state = self.shared.state.read();
         let mut expected_hash = state.base_hash;
         let mut expected_seq: Option<u64> = None;

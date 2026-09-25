@@ -348,6 +348,10 @@ impl Token {
         Ok(())
     }
 
+    fn fresh_lockout_bytes() -> HsmResult<Vec<u8>> {
+        serde_json::to_vec(&LockoutData::default()).map_err(|_| HsmError::GeneralError)
+    }
+
     fn persist_record(&self, auth: &AuthState) -> HsmResult<()> {
         if let Some(store) = &self.store {
             let rec = TokenRecord {
@@ -748,6 +752,23 @@ impl Token {
         auth.token_id = token_id;
         auth.wrapped_dek_so = wrapped_so;
         auth.wrapped_dek_user = None;
+        // Write fresh (zeroed) lockout counters *before* the token record, so
+        // a crash in between never leaves an initialised token without a
+        // lockout record (which would be treated as locked at next start).
+        // Safe: the SO PIN has already been verified at this point.
+        let fresh = Self::fresh_lockout_bytes();
+        if let (Some(store), Ok(bytes)) = (&self.store, fresh) {
+            if let Err(e) = store.put_meta(&Self::lockout_key(self.slot_id), &bytes) {
+                *self.label.write() = old_label;
+                auth.initialized = prev.0;
+                auth.so_pin = prev.1;
+                auth.user_pin = prev.2;
+                auth.token_id = prev.3;
+                auth.wrapped_dek_so = prev.4;
+                auth.wrapped_dek_user = prev.5;
+                return Err(e);
+            }
+        }
         if let Err(e) = self.persist_record(&auth) {
             // Roll back the in-memory state: nothing was destroyed.
             *self.label.write() = old_label;

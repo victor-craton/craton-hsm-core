@@ -307,3 +307,59 @@ fn persistent_token_survives_restart() {
         hsm.close_session(s).unwrap();
     }
 }
+
+/// H3-08: a session opened concurrently with C_Logout must never stay
+/// authenticated after the logout completed.
+#[test]
+fn open_session_racing_logout_never_leaves_authenticated_session() {
+    use std::sync::Arc;
+    let mut cfg = HsmConfig::default();
+    cfg.audit.enabled = false;
+    cfg.audit.allow_disabled_insecure = true;
+    cfg.security.pbkdf2_iterations = 100_000;
+    cfg.token.max_sessions = 1000;
+    cfg.token.max_rw_sessions = 1000;
+    cfg.token.max_sessions_per_application = 1000;
+    let hsm = Arc::new(HsmCore::open(&cfg).unwrap());
+    hsm.init_token(0, SO_PIN, &label(b"Race")).unwrap();
+    let s0 = hsm
+        .open_process_session(0, CKF_RW_SESSION | CKF_SERIAL_SESSION)
+        .unwrap();
+    hsm.login(s0, CKU_SO, SO_PIN).unwrap();
+    hsm.init_pin(s0, USER_PIN).unwrap();
+    hsm.logout(s0).unwrap();
+
+    for _ in 0..5 {
+        hsm.login(s0, CKU_USER, USER_PIN).unwrap();
+        let opener = {
+            let hsm = hsm.clone();
+            std::thread::spawn(move || {
+                let mut v = Vec::new();
+                for _ in 0..50 {
+                    if let Ok(h) = hsm.open_process_session(0, CKF_SERIAL_SESSION) {
+                        v.push(h);
+                    }
+                }
+                v
+            })
+        };
+        hsm.logout(s0).unwrap();
+        let opened = opener.join().unwrap();
+        for h in &opened {
+            let st = hsm
+                .session_manager()
+                .get_session(*h)
+                .unwrap()
+                .read()
+                .state
+                .clone();
+            assert!(
+                !st.is_authenticated(),
+                "session {h} still authenticated after logout: {st:?}"
+            );
+        }
+        for h in opened {
+            hsm.close_session(h).unwrap();
+        }
+    }
+}

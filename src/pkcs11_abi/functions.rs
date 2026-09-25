@@ -936,18 +936,7 @@ pub extern "C" fn C_Logout(session: CK_SESSION_HANDLE) -> CK_RV {
             Err(rv) => return rv,
         };
 
-        let sess = match hsm.session_manager.get_session(session) {
-            Ok(s) => s,
-            Err(e) => return err_to_rv(e),
-        };
-        let slot_id = sess.read().slot_id;
-        let token = match hsm.slot_manager.get_token(slot_id) {
-            Ok(t) => t,
-            Err(e) => return err_to_rv(e),
-        };
-
-        drop(token);
-        let _ = slot_id;
+        // Token logout + logout of every session of the slot (audited).
         match hsm.logout(session) {
             Ok(()) => CKR_OK,
             Err(e) => err_to_rv(e),

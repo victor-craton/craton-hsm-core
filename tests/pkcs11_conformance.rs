@@ -1395,12 +1395,23 @@ fn test_login_lockout() {
     let wrong_pin = b"wrongpn1";
     let mut locked = false;
     for _attempt in 0..10 {
-        let rv = C_Login(
+        let mut rv = C_Login(
             session,
             CKU_USER,
             wrong_pin.as_ptr() as *mut _,
             wrong_pin.len() as CK_ULONG,
         );
+        // Per-account exponential backoff (max 5 s) rejects attempts that
+        // arrive too quickly with CKR_FUNCTION_FAILED; wait and retry.
+        if rv == CKR_FUNCTION_FAILED {
+            std::thread::sleep(std::time::Duration::from_millis(5100));
+            rv = C_Login(
+                session,
+                CKU_USER,
+                wrong_pin.as_ptr() as *mut _,
+                wrong_pin.len() as CK_ULONG,
+            );
+        }
         if rv == CKR_PIN_LOCKED {
             locked = true;
             break;

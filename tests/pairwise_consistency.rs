@@ -18,7 +18,7 @@ fn init_and_login() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"TestToken");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
+    let _ = functions::C_CloseAllSessions(0);
     let rv = functions::C_InitToken(
         0,
         so_pin.as_ptr() as *mut _,

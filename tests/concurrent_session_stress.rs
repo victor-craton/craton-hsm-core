@@ -328,7 +328,9 @@ fn test_concurrent_encrypt_different_sessions() {
         &mut key,
     );
     assert_eq!(rv, CKR_OK);
-    let _ = C_CloseSession(setup_session);
+    // The key is a session object: it is destroyed when `setup_session`
+    // closes (PKCS#11 §4.4, H3-07), so keep that session open until the
+    // worker threads are done.
 
     let num_threads = 5;
     let barrier = Arc::new(Barrier::new(num_threads));
@@ -397,6 +399,8 @@ fn test_concurrent_encrypt_different_sessions() {
         .into_iter()
         .map(|h| if h.join().unwrap() { 1 } else { 0 })
         .sum();
+
+    let _ = C_CloseSession(setup_session);
 
     // At least some threads should succeed
     assert!(
