@@ -12,6 +12,7 @@ pub mod keygen;
 pub mod mechanisms;
 pub mod mlock;
 pub mod pairwise_test;
+pub mod params;
 pub mod pqc;
 #[cfg(feature = "rustcrypto-backend")]
 pub mod rustcrypto_backend;
