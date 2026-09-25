@@ -127,7 +127,7 @@ injected programmatically with `HsmCore::new_with_backend()`.
 - **PIN security**: PBKDF2-HMAC-SHA-256 (600 000 iterations), constant-time comparison, configurable lockout
 - **Self-tests**: power-on self-tests run inside `C_Initialize` before any service is available; a failure puts the module in an error state
 - **Integrity**: released libraries verify an Ed25519 signature over their own file at every `C_Initialize`
-- **Audit trail**: security-relevant operations are logged with a chained SHA-256 hash
+- **Audit trail**: security-relevant operations are logged with a keyed HMAC-SHA256 hash chain
 - **Key lifecycle**: SP 800-57 states (pre-activation, active, deactivated, compromised)
 
 Known limitations are tracked in [FIPS Gap Analysis](docs/fips-gap-analysis.md)

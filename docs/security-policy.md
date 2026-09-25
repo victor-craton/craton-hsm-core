@@ -89,7 +89,7 @@ The complete services table with SSP access is in
 [fips-140-3-certification.md §3.2](fips-140-3-certification.md#32-services).
 
 **PIN policy (defaults):** 8–64 bytes; at least 3 distinct byte values; ASCII
-PINs need at least 2 character classes; lockout after 10 consecutive failures
+PINs need at least 2 character classes; lockout after 5 consecutive failures
 (`security.max_failed_logins`) with exponential back-off (100 ms doubling to
 5 s). **There is no default PIN**: a new token is uninitialised; the SO PIN
 is set by `C_InitToken` and the User PIN by the SO with `C_InitPIN`.

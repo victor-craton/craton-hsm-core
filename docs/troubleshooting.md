@@ -206,7 +206,9 @@ Configuration error: file has group/world-writable permissions
 
 **Fix (Unix)**:
 ```bash
-chmod 600 craton_hsm.toml
+chown root:root /etc/craton-hsm/craton_hsm.toml   # or the service user
+chmod 644 /etc/craton-hsm/craton_hsm.toml         # not group/world-writable
+chmod go-w /etc/craton-hsm                        # directory not writable by others
 ```
 
 **Fix (Windows)**: Remove Everyone and Users group write permissions via file properties or:

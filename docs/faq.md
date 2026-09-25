@@ -85,7 +85,7 @@ All randomness goes through an SP 800-90A HMAC_DRBG (HMAC-SHA256) with:
 
 Failed login attempts trigger exponential backoff:
 - Base delay: 100 ms, doubles per failure, capped at 5 seconds
-- After `max_failed_logins` failures (default: 10), the account is locked
+- After `max_failed_logins` failures (default: 5), the account is locked
 - A locked User PIN is reset by the SO (`C_InitPIN`); a locked SO PIN cannot be recovered through the API (the token must be re-created, destroying its keys)
 
 ### Does Craton HSM protect against side-channel attacks?

@@ -868,15 +868,18 @@ inventory instead of a number in this document.
 
 ## Appendix E: Configuration reference (security-relevant subset)
 
-Default builds read `craton_hsm.toml` from the working directory, or the
-relative path in `CRATON_HSM_CONFIG`; absolute paths and `..` are rejected.
+Default builds read the file named by `CRATON_HSM_CONFIG` or, if unset, the
+system-wide `/etc/craton-hsm/craton_hsm.toml`; they never read the working
+directory (H3-13). The file must be owned by the user or root and not be
+group/world-writable. Storage and audit paths should be absolute,
+service-owned directories (system directories and `..` are rejected).
 `fips` builds ignore configuration files entirely.
 
 ```toml
 [token]
 label = "Craton HSM Token 0"
-storage_path = "craton_hsm_store"   # relative path only
-persist_objects = false             # true = persist token objects (encrypted)
+storage_path = "/var/lib/craton-hsm/store"
+persist_objects = true              # false = ephemeral token (development only)
 max_sessions = 100
 max_rw_sessions = 10
 slot_count = 1
@@ -884,11 +887,11 @@ slot_count = 1
 [security]
 pin_min_length = 8
 pin_max_length = 64
-max_failed_logins = 10
+max_failed_logins = 5
 pbkdf2_iterations = 600000
 
 [algorithms]
-crypto_backend = "rustcrypto"       # or "awslc" (needs the awslc-backend feature)
+crypto_backend = "rustcrypto"       # or "awslc"; `fips` builds always use AWS-LC
 fips_approved_only = false          # advisory policy switch in default builds
 enable_pqc = true
 allow_weak_rsa = false
@@ -896,8 +899,10 @@ allow_sha1_signing = false
 
 [audit]
 enabled = true
-log_path = "craton_hsm_audit.jsonl"
-log_level = "all"
+log_path = "/var/log/craton-hsm/audit.jsonl"
+log_level = "all"                   # all | crypto | auth | admin
+key_path = "/var/lib/craton-hsm/audit.key"   # HMAC key of the keyed chain
+fail_closed = true                  # default in fips builds
 ```
 
 The gRPC daemon has its own configuration file (see

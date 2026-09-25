@@ -187,7 +187,7 @@ These are the areas where bugs actually hide in HSM implementations. Listed in o
 
 **Known mitigations:**
 - `subtle::ConstantTimeEq` for PIN comparison (via PBKDF2 hash comparison)
-- Configurable lockout threshold (default: 10 attempts)
+- Configurable lockout threshold (default: 5 attempts)
 - `C_InitPIN` (SO-only) resets user lockout
 - PBKDF2-HMAC-SHA256 with 600K iterations (expensive to brute-force)
 
