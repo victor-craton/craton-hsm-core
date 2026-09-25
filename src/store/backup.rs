@@ -300,50 +300,110 @@ pub fn restore_backup(
     Ok(objects)
 }
 
-/// Persistent replay guard — tracks consumed backup IDs across restarts.
+/// File-based persistent replay guard — tracks consumed backup IDs across
+/// restarts.
 ///
-/// The file (one hex ID per line) is created with mode 0600 and
-/// `O_NOFOLLOW`. [`check_and_record`](Self::check_and_record) re-reads the
-/// file under an exclusive lock, so two concurrent restores cannot both pass
-/// the check (H3-16). Deleting the file resets the guard — keep it on
-/// storage the operator cannot trivially rewrite, and record IDs only after
-/// the restored objects were committed.
+/// **Prefer [`crate::core::HsmCore::restore_backup`]**, which keeps the
+/// consumed IDs authenticated inside the single-writer encrypted store and
+/// records them in the same transaction as the restored objects (H5-06).
+///
+/// This guard is for embedders without a persistent core. The file (one ID
+/// per line) is opened with `O_NOFOLLOW`, created 0600 and ownership/mode
+/// are validated on the descriptor; [`check_and_record`](Self::check_and_record)
+/// takes an exclusive lock and re-reads the IDs **through the locked
+/// descriptor**, so load → check → append → fsync is atomic with respect to
+/// other guards. With [`with_key`](Self::with_key) every line carries an
+/// HMAC-SHA256 under a caller-supplied (token-bound) key and a line that fails
+/// verification makes the guard fail closed. Deleting the whole file still
+/// resets the guard — keep it on storage the operator cannot trivially
+/// rewrite, and record IDs only after the restored objects were committed.
 pub struct PersistentReplayGuard {
     ids: HashSet<String>,
     path: Option<std::path::PathBuf>,
+    key: Option<Zeroizing<[u8; 32]>>,
 }
 
 impl PersistentReplayGuard {
     /// Create a replay guard backed by a file at `path`.
     pub fn new(path: std::path::PathBuf) -> Self {
-        let ids = Self::read_ids(&path);
+        let ids = Self::read_ids(&path, None).unwrap_or_default();
         Self {
             ids,
             path: Some(path),
+            key: None,
         }
     }
 
-    fn read_ids(path: &std::path::Path) -> HashSet<String> {
+    /// Create a replay guard whose entries are authenticated with
+    /// HMAC-SHA256 under `key` (e.g. derived from the token's storage key).
+    /// Fails if an existing entry does not verify.
+    pub fn with_key(path: std::path::PathBuf, key: &[u8; 32]) -> HsmResult<Self> {
+        let key = Zeroizing::new(*key);
+        let ids = Self::read_ids(&path, Some(&key))?;
+        Ok(Self {
+            ids,
+            path: Some(path),
+            key: Some(key),
+        })
+    }
+
+    fn line_mac(key: &[u8; 32], id: &str) -> String {
+        use hmac::Mac;
+        let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key)
+            .expect("HMAC accepts any key length");
+        mac.update(b"craton-hsm/replay-guard/v1");
+        mac.update(id.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn parse_ids(content: &[u8], key: Option<&[u8; 32]>) -> HsmResult<HashSet<String>> {
         let mut ids = HashSet::new();
-        match crate::store::fs_util::read_private(path) {
-            Ok(Some(content)) => {
-                for line in String::from_utf8_lossy(&content).lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        ids.insert(trimmed.to_string());
+        for line in String::from_utf8_lossy(content).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match key {
+                None => {
+                    // Accept authenticated lines too (keyless reader).
+                    let id = line.split(':').next().unwrap_or(line);
+                    ids.insert(id.to_string());
+                }
+                Some(k) => {
+                    let (id, mac) = line.split_once(':').ok_or_else(|| {
+                        tracing::error!("replay guard entry without MAC — tampered?");
+                        HsmError::DeviceError
+                    })?;
+                    use subtle::ConstantTimeEq;
+                    let expected = Self::line_mac(k, id);
+                    if !bool::from(expected.as_bytes().ct_eq(mac.as_bytes())) {
+                        tracing::error!("replay guard entry failed authentication — tampered?");
+                        return Err(HsmError::DeviceError);
                     }
+                    ids.insert(id.to_string());
                 }
             }
-            Ok(None) => {}
+        }
+        Ok(ids)
+    }
+
+    fn read_ids(path: &std::path::Path, key: Option<&[u8; 32]>) -> HsmResult<HashSet<String>> {
+        match crate::store::fs_util::read_private(path) {
+            Ok(Some(content)) => Self::parse_ids(&content, key),
+            Ok(None) => Ok(HashSet::new()),
             Err(e) => {
                 tracing::warn!(
                     "Could not read replay guard file {}: {:?}",
                     path.display(),
                     e
                 );
+                if key.is_some() {
+                    Err(e)
+                } else {
+                    Ok(HashSet::new())
+                }
             }
         }
-        ids
     }
 
     /// Create an in-memory-only replay guard (no persistence).
@@ -351,6 +411,7 @@ impl PersistentReplayGuard {
         Self {
             ids: HashSet::new(),
             path: None,
+            key: None,
         }
     }
 
@@ -359,25 +420,38 @@ impl PersistentReplayGuard {
         self.ids.contains(id)
     }
 
-    /// Atomically check that `id` is unused and record it (exclusive file
-    /// lock held across re-read, check and append).
+    /// Atomically check that `id` is unused and record it: exclusive lock,
+    /// re-read through the locked descriptor, check, append, fsync.
     pub fn check_and_record(&mut self, id: &str) -> HsmResult<()> {
+        if id.is_empty() || id.contains(['\n', '\r', ':']) {
+            return Err(HsmError::ArgumentsBad);
+        }
         if let Some(path) = self.path.clone() {
             use fs2::FileExt;
-            use std::io::Write;
+            use std::io::{Read, Seek, Write};
             let mut file = crate::store::fs_util::open_private(&path, true)?;
             file.lock_exclusive().map_err(|e| {
                 tracing::error!("Failed to lock replay guard file {}: {}", path.display(), e);
                 HsmError::DeviceError
             })?;
-            self.ids.extend(Self::read_ids(&path));
+            let mut content = Vec::new();
+            file.seek(std::io::SeekFrom::Start(0))
+                .and_then(|_| file.read_to_end(&mut content))
+                .map_err(|_| HsmError::DeviceError)?;
+            let key = self.key.as_ref().map(|k| &**k);
+            self.ids.extend(Self::parse_ids(&content, key)?);
             if self.ids.contains(id) {
-                return Err(HsmError::DataInvalid);
+                return Err(HsmError::BackupRejected(BackupRejection::Replayed));
             }
-            writeln!(file, "{}", id).map_err(|_| HsmError::DeviceError)?;
+            let line = match key {
+                Some(k) => format!("{}:{}", id, Self::line_mac(k, id)),
+                None => id.to_string(),
+            };
+            writeln!(file, "{}", line).map_err(|_| HsmError::DeviceError)?;
             file.sync_all().map_err(|_| HsmError::DeviceError)?;
+            // Lock released when `file` is dropped.
         } else if self.ids.contains(id) {
-            return Err(HsmError::DataInvalid);
+            return Err(HsmError::BackupRejected(BackupRejection::Replayed));
         }
         self.ids.insert(id.to_string());
         Ok(())
@@ -386,7 +460,7 @@ impl PersistentReplayGuard {
     /// Record a backup ID as consumed. Persists to file immediately.
     pub fn record(&mut self, id: String) -> HsmResult<()> {
         match self.check_and_record(&id) {
-            Ok(()) | Err(HsmError::DataInvalid) => Ok(()),
+            Ok(()) | Err(HsmError::BackupRejected(BackupRejection::Replayed)) => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -665,5 +739,30 @@ mod tests {
             Some(&mut consumed),
         );
         assert!(result.is_err(), "Replay of same backup should be rejected");
+    }
+
+    /// H5-06: authenticated guard entries; tampering fails closed; replays
+    /// are rejected with a distinct reason.
+    #[test]
+    fn authenticated_replay_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard");
+        let key = [9u8; 32];
+        let mut g = PersistentReplayGuard::with_key(path.clone(), &key).unwrap();
+        g.check_and_record("abc").unwrap();
+        assert!(matches!(
+            g.check_and_record("abc"),
+            Err(HsmError::BackupRejected(BackupRejection::Replayed))
+        ));
+        // A second guard instance sees the persisted ID.
+        let mut g2 = PersistentReplayGuard::with_key(path.clone(), &key).unwrap();
+        assert!(g2.is_consumed("abc"));
+        assert!(g2.check_and_record("abc").is_err());
+        // Forged / edited entries fail closed.
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, content.replace("abc", "abd")).unwrap();
+        assert!(PersistentReplayGuard::with_key(path.clone(), &key).is_err());
+        assert!(PersistentReplayGuard::with_key(path, &[8u8; 32]).is_err());
+        assert!(g.check_and_record("bad:id").is_err());
     }
 }
