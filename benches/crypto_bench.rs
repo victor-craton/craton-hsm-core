@@ -331,7 +331,7 @@ fn bench_ml_kem_decap(c: &mut Criterion) {
 // ============================================================================
 //
 // These benchmarks run identical operations through the CryptoBackend trait.
-// The aws-lc-rs backend has moved to the craton_hsm-awslc crate (enterprise).
+// The AWS-LC backend lives in-tree (src/crypto/awslc_backend.rs).
 // To compare backends, build with `--features awslc-backend` (the in-tree
 // AWS-LC backend is then added to the backends vec below).
 
