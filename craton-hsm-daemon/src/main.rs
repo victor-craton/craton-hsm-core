@@ -29,8 +29,8 @@ pub mod proto {
 
 use proto::hsm_service_server::HsmServiceServer;
 
-/// (H4-27) `RUST_LOG=<level>` selects the level (the core library caps
-/// levels at INFO at compile time); `CRATON_HSM_LOG_FORMAT=json` emits
+/// (H4-27) `RUST_LOG=<level>` selects the level (the daemon binary is
+/// compiled with `tracing`'s `max_level_info`); `CRATON_HSM_LOG_FORMAT=json` emits
 /// structured JSON for SIEM ingestion.
 fn init_logging() {
     let level = std::env::var("RUST_LOG")

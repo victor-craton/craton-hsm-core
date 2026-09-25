@@ -335,14 +335,16 @@ impl HsmConfig {
     /// invalid or fails validation. Falls back to defaults only when no config
     /// file is present.
     pub fn load() -> Result<Self, HsmError> {
-        // In FIPS mode, use hardcoded secure defaults — never read from filesystem
-        // to prevent an attacker from planting a permissive config file.
+        // `fips` builds: approved mode is a build property. The configuration
+        // file is still read (so persistence, storage and audit locations
+        // are configurable, keeping FIPS deployments persistent and
+        // consistent with non-FIPS ones), but `enforce_build_policy` then
+        // forces every security-relevant setting (approved-only mode, AWS-LC
+        // backend, fail-closed audit, no weak algorithms) whatever the file
+        // says. Without a file, the hardened `fips_defaults()` apply.
         #[cfg(feature = "fips")]
         {
-            tracing::info!(
-                "FIPS mode active (compile-time) — using hardcoded secure defaults, ignoring config files"
-            );
-            return Ok(Self::fips_defaults());
+            tracing::info!("FIPS build: approved mode is enforced at compile time");
         }
 
         #[cfg(not(feature = "fips"))]
@@ -356,11 +358,8 @@ impl HsmConfig {
                 //   2. Set CRATON_HSM_CONFIG to load a permissive configuration.
                 //
                 // For certified FIPS 140-3 compliance, you MUST compile with
-                // `--features fips` which hardcodes secure defaults at compile time
+                // `--features fips` which enforces approved mode at compile time
                 // and cannot be bypassed at runtime.
-                //
-                // This env-var path exists only as a convenience for development and
-                // testing. Do NOT rely on it for production FIPS compliance.
                 tracing::warn!(
                     "FIPS mode activated via CRATON_HSM_FIPS env var. \
                      SECURITY: env-var FIPS is ADVISORY ONLY — an attacker who can modify \
@@ -369,34 +368,40 @@ impl HsmConfig {
                 );
                 return Ok(Self::fips_defaults());
             }
-
-            // H3-13: never load configuration from the (attacker-influenced)
-            // current working directory. Sources, in order:
-            //   1. $CRATON_HSM_CONFIG (validated, ownership-checked);
-            //   2. the system-wide SYSTEM_CONFIG_PATH;
-            //   3. built-in secure defaults.
-            if std::path::Path::new("craton_hsm.toml").exists() {
-                tracing::warn!(
-                    "./craton_hsm.toml is ignored (configuration is never read from the \
-                     working directory); set CRATON_HSM_CONFIG or use {}",
-                    SYSTEM_CONFIG_PATH
-                );
-            }
-            let config_path = match std::env::var("CRATON_HSM_CONFIG") {
-                Ok(p) => p,
-                Err(_) => {
-                    if std::path::Path::new(SYSTEM_CONFIG_PATH).exists() {
-                        SYSTEM_CONFIG_PATH.to_string()
-                    } else {
-                        tracing::info!("No configuration file — using secure defaults");
-                        return Ok(Self::default());
-                    }
-                }
-            };
-
-            Self::validate_config_path(&config_path)?;
-            Self::load_from_path(&config_path)
         }
+
+        // H3-13: never load configuration from the (attacker-influenced)
+        // current working directory. Sources, in order:
+        //   1. $CRATON_HSM_CONFIG (validated, ownership-checked);
+        //   2. the system-wide SYSTEM_CONFIG_PATH;
+        //   3. built-in secure defaults.
+        if std::path::Path::new("craton_hsm.toml").exists() {
+            tracing::warn!(
+                "./craton_hsm.toml is ignored (configuration is never read from the \
+                 working directory); set CRATON_HSM_CONFIG or use {}",
+                SYSTEM_CONFIG_PATH
+            );
+        }
+        let config_path = match std::env::var("CRATON_HSM_CONFIG") {
+            Ok(p) => p,
+            Err(_) => {
+                if std::path::Path::new(SYSTEM_CONFIG_PATH).exists() {
+                    SYSTEM_CONFIG_PATH.to_string()
+                } else {
+                    tracing::info!("No configuration file — using secure defaults");
+                    let mut cfg = if cfg!(feature = "fips") {
+                        Self::fips_defaults()
+                    } else {
+                        Self::default()
+                    };
+                    cfg.enforce_build_policy();
+                    return Ok(cfg);
+                }
+            }
+        };
+
+        Self::validate_config_path(&config_path)?;
+        Self::load_from_path(&config_path)
     }
 
     /// FIPS-hardened defaults: audit enabled, no weak algorithms, approved-only,
@@ -421,6 +426,18 @@ impl HsmConfig {
     /// no UNC paths, no null bytes, no symlinks, no sensitive directory targets.
     /// `label` is used in error messages (e.g. "config path", "storage_path").
     fn validate_path_safety(path: &std::path::Path, label: &str) -> Result<(), Vec<String>> {
+        Self::validate_path_safety_inner(path, label, true)
+    }
+
+    /// `reject_system_dirs`: state paths (storage, audit log, audit key)
+    /// must never live in system directories; the configuration file itself
+    /// legitimately lives in `/etc/craton-hsm` (its ownership, mode and
+    /// ancestor directories are checked on the open descriptor instead).
+    fn validate_path_safety_inner(
+        path: &std::path::Path,
+        label: &str,
+        reject_system_dirs: bool,
+    ) -> Result<(), Vec<String>> {
         let mut errors: Vec<String> = Vec::new();
         let path_str = path.to_string_lossy();
 
@@ -429,7 +446,7 @@ impl HsmConfig {
         // the host process's working directory (H3-12). System locations are
         // never acceptable.
         if path.is_absolute() {
-            for prefix in SYSTEM_PATH_PREFIXES {
+            for prefix in SYSTEM_PATH_PREFIXES.iter().filter(|_| reject_system_dirs) {
                 let p = std::path::Path::new(prefix);
                 if path.starts_with(p) {
                     errors.push(format!(
@@ -502,7 +519,7 @@ impl HsmConfig {
     /// Validate the config file path from CRATON_HSM_CONFIG env var.
     fn validate_config_path(path: &str) -> Result<(), HsmError> {
         let p = std::path::Path::new(path);
-        if let Err(errs) = Self::validate_path_safety(p, "config path") {
+        if let Err(errs) = Self::validate_path_safety_inner(p, "config path", false) {
             let msg = errs.join("; ");
             tracing::error!("Config path validation failed: {}", msg);
             return Err(HsmError::ConfigError(msg));
@@ -759,6 +776,7 @@ impl HsmConfig {
                 || self.algorithms.allow_rsa_pkcs1v15_decrypt
                 || !self.audit.enabled
                 || !self.audit.fail_closed
+                || self.audit.allow_start_with_broken_chain
                 || self.security.user_lockout_duration_secs != 0;
             if changed {
                 tracing::warn!(
@@ -774,6 +792,7 @@ impl HsmConfig {
             self.algorithms.allow_rsa_pkcs1v15_decrypt = false;
             self.audit.enabled = true;
             self.audit.fail_closed = true;
+            self.audit.allow_start_with_broken_chain = false;
             self.security.user_lockout_duration_secs = 0;
         }
     }
@@ -1007,6 +1026,42 @@ impl HsmConfig {
             let msg = errors.join("; ");
             tracing::error!("Configuration validation failed: {}", msg);
             Err(HsmError::ConfigError(msg))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// H3-13 regression: the system configuration file lives in /etc and
+    /// must be accepted, while state paths in system directories are not.
+    #[cfg(unix)]
+    #[test]
+    fn system_config_dir_is_allowed_for_the_config_file_only() {
+        assert!(HsmConfig::validate_config_path(SYSTEM_CONFIG_PATH).is_ok());
+        assert!(HsmConfig::validate_config_path("/etc/../tmp/x.toml").is_err());
+        let mut c = HsmConfig::default();
+        c.token.storage_path = PathBuf::from("/etc/craton-hsm/store");
+        assert!(c.validate().is_err());
+    }
+
+    /// A1-06/A1-24: `fips` builds force approved mode whatever the file says.
+    #[test]
+    fn build_policy() {
+        let mut c: HsmConfig = toml::from_str(
+            "[algorithms]\nfips_approved_only = false\nenable_pqc = true\n\
+             [audit]\nallow_start_with_broken_chain = true\n",
+        )
+        .unwrap();
+        c.enforce_build_policy();
+        if cfg!(feature = "fips") {
+            assert!(c.algorithms.fips_approved_only);
+            assert!(!c.algorithms.enable_pqc);
+            assert_eq!(c.algorithms.crypto_backend, "awslc");
+            assert!(!c.audit.allow_start_with_broken_chain);
+        } else {
+            assert!(!c.algorithms.fips_approved_only);
         }
     }
 }

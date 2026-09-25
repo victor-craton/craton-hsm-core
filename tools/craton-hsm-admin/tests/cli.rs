@@ -179,8 +179,8 @@ fn default_config_is_absolute_and_never_cwd() {
     // A craton_hsm.toml in the working directory must not be picked up.
     let o = run_in(env.dir.path(), &["--help"]);
     let help = String::from_utf8_lossy(&o.stdout);
-    assert!(help.contains("/etc/craton_hsm/craton_hsm.toml") || cfg!(windows));
-    if !Path::new("/etc/craton_hsm/craton_hsm.toml").exists() {
+    assert!(help.contains("/etc/craton-hsm/craton_hsm.toml") || cfg!(windows));
+    if !Path::new("/etc/craton-hsm/craton_hsm.toml").exists() {
         let o = run_in(env.dir.path(), &["status"]);
         assert_eq!(code(&o), EXIT_CONFIG, "{}", stderr(&o));
     }

@@ -90,11 +90,14 @@ FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57
 
 ARG IMAGE_VERSION=0.3.0
 LABEL org.opencontainers.image.title="Craton HSM daemon" \
-      org.opencontainers.image.description="PKCS#11 v3.0 Software HSM — gRPC daemon" \
+      org.opencontainers.image.description="PKCS#11 v2.40 software HSM — gRPC daemon" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.vendor="Craton Software Company" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="https://github.com/craton-co/craton-hsm-core"
+
+# (A3-12) Licence and attribution notices ship with the binaries.
+COPY --chmod=0444 LICENSE NOTICE /usr/share/doc/craton-hsm/
 
 COPY --from=builder /out/bin/craton-hsm-daemon /usr/local/bin/
 COPY --from=builder /out/bin/craton-hsm-admin  /usr/local/bin/

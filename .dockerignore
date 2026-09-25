@@ -70,5 +70,8 @@ docker-compose*.yml
 *.md
 **/*.md
 LICENSE*
+# (A3-12) The licence and NOTICE are copied into the runtime image.
+!LICENSE
+!NOTICE
 CHANGELOG*
 docs/

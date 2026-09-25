@@ -13,11 +13,9 @@ use crate::error::{CliError, CliResult};
 use craton_hsm::config::HsmConfig;
 use std::path::{Path, PathBuf};
 
-/// Absolute default configuration path (matches `docs/operator-runbook.md`).
-#[cfg(not(windows))]
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/craton_hsm/craton_hsm.toml";
-#[cfg(windows)]
-pub const DEFAULT_CONFIG_PATH: &str = r"C:\ProgramData\craton_hsm\craton_hsm.toml";
+/// Absolute default configuration path: the same system configuration the
+/// core library and the container image use (`SYSTEM_CONFIG_PATH`).
+pub const DEFAULT_CONFIG_PATH: &str = craton_hsm::config::config::SYSTEM_CONFIG_PATH;
 
 /// Upper bound on the config file size.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
