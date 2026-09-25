@@ -5,13 +5,28 @@ members = ["tools/craton-hsm-admin", "tools/pkcs11-spy", "craton-hsm-daemon"]
 name = "craton-hsm"
 version = "0.9.1"
 edition = "2021"
-description = "A production-grade PKCS#11 v3.0-compliant Software HSM written in Rust"
+description = "A PKCS#11 (Cryptoki) software HSM written in Rust (not FIPS 140-3 validated)"
 license = "Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/craton-co/craton-hsm-core"
 homepage = "https://github.com/craton-co/craton-hsm-core"
 keywords = ["pkcs11", "hsm", "cryptography", "security", "fips"]
 categories = ["cryptography", "api-bindings"]
-rust-version = "1.75"
+# MSRV: the locked dependency graph requires Rust 1.89 (redb 3.1.1). The
+# development/release toolchain is pinned separately in rust-toolchain.toml.
+rust-version = "1.89"
+# Only ship what is needed to build the library. Everything else (docs/*.pdf,
+# deploy/, kreya/, fuzz/, tests/ fixtures, CI config, local agent settings) is
+# kept out of the crates.io package (A3-01, A3-23).
+include = [
+    "/src/**/*.rs",
+    "/build.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/NOTICE",
+    "/README.md",
+]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

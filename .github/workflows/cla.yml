@@ -1,24 +1,37 @@
 name: CLA Assistant
 
+# SECURITY NOTE (A3-10): this workflow runs on `pull_request_target`, i.e. with
+# a privileged token in the context of the base repository. It is safe only
+# because it NEVER checks out or executes code from the pull request. Do not
+# add `actions/checkout` (or any step that reads PR-controlled files) here.
+# The third-party action is pinned by commit SHA, and CLA_TOKEN must be a
+# fine-grained PAT scoped to the craton-co/cla-signatures repository only
+# (contents: read/write), never a classic PAT.
 on:
   issue_comment:
     types: [created]
   pull_request_target:
     types: [opened, closed, synchronize]
 
-permissions:
-  actions: write
-  contents: read
-  pull-requests: write
-  statuses: write
+# No default token permissions; the job below requests exactly what it needs.
+permissions: {}
 
 jobs:
   cla-check:
     runs-on: ubuntu-latest
+    permissions:
+      actions: write        # re-run the check after a signature comment
+      contents: read
+      pull-requests: write  # post the CLA comment
+      statuses: write       # set the CLA commit status
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+        (github.event.comment.body == 'recheck' ||
+         github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
     steps:
       - name: CLA Assistant
-        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
-        uses: contributor-assistant/github-action@v2.6.1
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_TOKEN }}

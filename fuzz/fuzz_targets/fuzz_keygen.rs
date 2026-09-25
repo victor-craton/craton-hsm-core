@@ -13,56 +13,16 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use std::sync::Once;
 
 use craton_hsm::pkcs11_abi::constants::*;
 use craton_hsm::pkcs11_abi::functions;
 use craton_hsm::pkcs11_abi::types::*;
 
-static INIT: Once = Once::new();
-
-fn ensure_init() {
-    INIT.call_once(|| {
-        let rv = functions::C_Initialize(std::ptr::null_mut());
-        assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
-    });
-}
+mod common;
+use common::ensure_init;
 
 fn cleanup_sessions() {
     let _ = functions::C_CloseAllSessions(0);
-}
-
-/// FIX #3: Extract a fuzz-derived PIN from data.
-fn extract_fuzz_pin(data: &[u8]) -> (*mut u8, CK_ULONG, usize) {
-    if data.is_empty() {
-        return (std::ptr::null_mut(), 0, 0);
-    }
-    let pin_len = (data[0] as usize) % 65;
-    let consumed = 1 + pin_len.min(data.len() - 1);
-    let actual_pin = &data[1..consumed];
-    if actual_pin.is_empty() {
-        (std::ptr::null_mut(), 0, consumed)
-    } else {
-        (actual_pin.as_ptr() as *mut u8, actual_pin.len() as CK_ULONG, consumed)
-    }
-}
-
-/// Open an RW session with fuzz-derived PIN for authentication.
-fn open_rw_session_with_pin(data: &[u8]) -> (Option<CK_SESSION_HANDLE>, usize) {
-    let mut session: CK_SESSION_HANDLE = 0;
-    let rv = functions::C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION | CKF_RW_SESSION,
-        std::ptr::null_mut(),
-        None,
-        &mut session,
-    );
-    if rv != CKR_OK {
-        return (None, 0);
-    }
-    let (pin_ptr, pin_len, consumed) = extract_fuzz_pin(data);
-    let _ = functions::C_Login(session, CKU_USER, pin_ptr, pin_len);
-    (Some(session), consumed)
 }
 
 fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
@@ -77,8 +37,12 @@ fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
     if rv != CKR_OK {
         return None;
     }
-    let pin = b"1234";
-    let _ = functions::C_Login(session, CKU_USER, pin.as_ptr() as *mut _, pin.len() as CK_ULONG);
+    // Log in with the policy-compliant User PIN provisioned by
+    // `common::ensure_init` (A3-13).
+    if common::login_user(session) != CKR_OK {
+        let _ = functions::C_CloseSession(session);
+        return None;
+    }
     Some(session)
 }
 
@@ -98,7 +62,7 @@ fuzz_target!(|data: &[u8]| {
     let payload = &data[1..];
 
     match selector {
-        // FIX #3: Use fuzz PIN for targets that need authenticated sessions
+        // Authenticated paths use the User PIN provisioned by common::ensure_init.
         0 => fuzz_aes_keygen(payload),
         1 => fuzz_ec_keygen_random_params(payload),
         2 => fuzz_keygen_random_mechanism(payload),
@@ -269,19 +233,16 @@ fn fuzz_keygen_random_mechanism(data: &[u8]) {
     };
 
     let mech_type = u64::from_le_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7],
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]) as CK_MECHANISM_TYPE;
 
     let true_val: CK_BBOOL = CK_TRUE;
 
-    let mut template = [
-        CK_ATTRIBUTE {
-            attr_type: CKA_TOKEN,
-            p_value: &true_val as *const _ as *mut _,
-            value_len: 1,
-        },
-    ];
+    let mut template = [CK_ATTRIBUTE {
+        attr_type: CKA_TOKEN,
+        p_value: &true_val as *const _ as *mut _,
+        value_len: 1,
+    }];
 
     let mut mechanism = CK_MECHANISM {
         mechanism: mech_type,
@@ -353,13 +314,23 @@ fn fuzz_keygen_conflicting_attrs(data: &[u8]) {
 
     // Fuzz-controlled boolean attributes
     let bool_attrs = [
-        CKA_ENCRYPT, CKA_DECRYPT, CKA_SIGN, CKA_VERIFY,
-        CKA_WRAP, CKA_UNWRAP, CKA_DERIVE, CKA_TOKEN,
+        CKA_ENCRYPT,
+        CKA_DECRYPT,
+        CKA_SIGN,
+        CKA_VERIFY,
+        CKA_WRAP,
+        CKA_UNWRAP,
+        CKA_DERIVE,
+        CKA_TOKEN,
     ];
 
     for (i, &attr_type) in bool_attrs.iter().enumerate() {
         if i < data.len() {
-            let val = if data[i] % 2 == 0 { &true_val } else { &false_val };
+            let val = if data[i] % 2 == 0 {
+                &true_val
+            } else {
+                &false_val
+            };
             attrs.push(CK_ATTRIBUTE {
                 attr_type,
                 p_value: val as *const _ as *mut _,
@@ -419,7 +390,10 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
                 5,
                 &mut key,
             );
-            assert!(rv != CKR_OK, "C_GenerateKey succeeded with null template + non-zero count");
+            assert!(
+                rv != CKR_OK,
+                "C_GenerateKey succeeded with null template + non-zero count"
+            );
         }
         1 => {
             // Null output handle
@@ -436,7 +410,10 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
                 1,
                 std::ptr::null_mut(),
             );
-            assert!(rv != CKR_OK, "C_GenerateKey succeeded with null output handle");
+            assert!(
+                rv != CKR_OK,
+                "C_GenerateKey succeeded with null output handle"
+            );
         }
         2 => {
             // Null mechanism pointer
@@ -463,7 +440,10 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
-            assert!(rv != CKR_OK, "C_GenerateKeyPair succeeded with null output handles");
+            assert!(
+                rv != CKR_OK,
+                "C_GenerateKeyPair succeeded with null output handles"
+            );
         }
         _ => {}
     }

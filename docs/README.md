@@ -20,14 +20,14 @@
 
 ## FIPS 140-3
 
-- [FIPS Gap Analysis](fips-gap-analysis.md) — certification readiness assessment
-- [FIPS Mode Guide](fips-mode-guide.md) — deploying in FIPS-approved mode
-- [FIPS 140-3 Certification](fips-140-3-certification.md) — detailed security policy and certification document
-- [Security Policy](security-policy.md) — FIPS 140-3 security policy with CSP table
+- [FIPS Gap Analysis](fips-gap-analysis.md) — readiness status (not ready) and tracking of open items
+- [FIPS Mode Guide](fips-mode-guide.md) — the approved-only (`fips`) build and its limits
+- [FIPS 140-3 Certification](fips-140-3-certification.md) — draft security policy (normative boundary, services, SSP table, self-tests)
+- [Security Policy](security-policy.md) — operator summary of the draft security policy
 
 ## Audit & Testing
 
-- [Audit Scope](audit-scope.md) — algorithm inventory, POST coverage, test suites
+- [Audit Scope](audit-scope.md) — boundary, algorithm inventory, self-tests, fuzzing
 - [Security Review Checklist](security-review-checklist.md) — pre-audit self-assessment
 - [Benchmarks](benchmarks.md) — performance measurements and SoftHSMv2 comparison
 - [Tested Platforms](tested-platforms.md) — platform support matrix, CI pipeline
@@ -36,7 +36,7 @@
 
 - [Operator Runbook](operator-runbook.md) — day-to-day operations
 - [Troubleshooting](troubleshooting.md) — common errors, build issues, runtime problems
-- [Release Signing](release-signing.md) — GPG, cosign, Authenticode binary verification
+- [Release Signing](release-signing.md) — release artefacts, cosign/provenance verification, integrity signature
 - [Future Work Guide](future-work-guide.md) — PQC upgrades, rand_core unification, FIPS certification, clustering, KMIP
 
 ## Presentations & Testing

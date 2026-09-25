@@ -10,7 +10,7 @@ When a `C_*` function fails, it returns a `CK_RV` error code. Below are the most
 |-------|----------|-------|-----|
 | 257 | `CKR_CRYPTOKI_NOT_INITIALIZED` | Called a function before `C_Initialize` | Call `C_Initialize(NULL)` first |
 | 258 | `CKR_CRYPTOKI_ALREADY_INITIALIZED` | `C_Initialize` called twice | Call `C_Finalize` before re-initializing |
-| 5 | `CKR_GENERAL_ERROR` | Power-on self-test (POST) failed | Check binary integrity; the library may be corrupted. Rebuild from source. |
+| 5 | `CKR_GENERAL_ERROR` | A self-test failed; the module is in the error state | See [Self-test failure](#self-test-failure-on-startup-ckr_general_error-from-every-function) below |
 
 ### Session Errors
 
@@ -85,13 +85,19 @@ LINK : fatal error LNK1181: cannot open input file 'craton_hsm.lib'
 rustup default stable-x86_64-pc-windows-msvc
 ```
 
-### `cargo test` fails with `craton_hsm-awslc` not found
+### Building the AWS-LC backend
 
-```
-error: failed to load manifest for dependency `craton_hsm-awslc`
+The AWS-LC backend is part of this repository (`awslc-backend` feature,
+`src/crypto/awslc_backend.rs`); no other repository is needed. Building it
+requires CMake, Clang/libclang and Go for `aws-lc-fips-sys`:
+
+```bash
+cargo build --locked --features awslc-backend
 ```
 
-**Fix**: The FIPS backend is in a separate private repository. For open-source builds, this dev-dependency is commented out by default. If you need the FIPS backend, clone [craton_hsm-enterprise](https://github.com/craton-co/craton-hsm-core-enterprise) alongside this repo and uncomment the dependency in `Cargo.toml`.
+If you see `failed to load manifest for dependency craton_hsm-awslc`, you
+uncommented the optional enterprise dev-dependency in `Cargo.toml`; comment it
+out again — it is not required.
 
 ### Tests must run single-threaded
 
@@ -105,15 +111,25 @@ Multi-threaded test execution will cause intermittent failures due to shared glo
 
 ## Runtime Issues
 
-### POST failure on startup (`CKR_GENERAL_ERROR` from every function)
+### Self-test failure on startup (`CKR_GENERAL_ERROR` from every function)
 
-The Power-On Self-Test (POST) runs during `C_Initialize`. If any self-test fails, the library enters a degraded state where all subsequent `C_*` calls return `CKR_GENERAL_ERROR`.
+The pre-operational self-tests run during `C_Initialize`. If any test fails,
+the module enters the error state and every call that reaches module state
+returns `CKR_GENERAL_ERROR`. The log names the failing test.
 
 **Common causes**:
-- Binary was modified after build (integrity check failure)
-- Corrupted download or incomplete deployment
+- The library file differs from the one its `.sig` sidecar was made for
+  (modified, corrupted, or the `.sig` belongs to another build)
+- A `fips` build without its `.sig` sidecar, or built without an embedded
+  integrity key
+- A `fips` build configured with a backend other than AWS-LC
+- An entropy-source or DRBG health-test failure on the host
 
-**Fix**: Rebuild from source or re-download the binary. Verify with SHA-256 checksum.
+**Fix**: Verify the release artefact (`SHA256SUMS` and cosign bundle, see
+[release-signing.md](release-signing.md)), reinstall the library **together
+with its `.sig`**, then call `C_Finalize` + `C_Initialize` or restart the
+process. Do not "fix" an integrity failure by deleting the `.sig` or by
+rebuilding on the production host.
 
 ### Audit log permission denied
 
@@ -134,7 +150,7 @@ chmod 600 craton_hsm_audit.jsonl
 ### Token persistence not working (objects lost on restart)
 
 **Check**:
-1. `storage_path` is set in `[token]` config section
+1. `persist_objects = true` in the `[token]` section (persistence is off by default) and `storage_path` is a relative path
 2. The path is writable and not a symlink
 3. No other process holds an exclusive lock on the `.redb` file
 

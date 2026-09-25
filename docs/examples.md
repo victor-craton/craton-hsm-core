@@ -11,17 +11,22 @@ cargo build --release
 # List available slots
 pkcs11-tool --module target/release/libcraton_hsm.so --list-slots
 
-# Initialize a token
-pkcs11-tool --module target/release/libcraton_hsm.so --init-token --label "MyToken" --so-pin 12345678
+# pkcs11-tool prompts for any PIN you do not pass on the command line.
+# Never put PINs in arguments (shell history, `ps`). The default policy needs
+# 8-64 characters with at least two character classes, so short numeric PINs
+# are rejected.
 
-# Initialize the User PIN
-pkcs11-tool --module target/release/libcraton_hsm.so --init-pin --pin 87654321 --so-pin 12345678
+# Initialize a token (prompts for the new SO PIN)
+pkcs11-tool --module target/release/libcraton_hsm.so --init-token --label "MyToken"
 
-# Generate an RSA key pair
-pkcs11-tool --module target/release/libcraton_hsm.so --keypairgen --key-type rsa:2048 --label "mykey" --pin 87654321
+# Initialize the User PIN (log in as SO; prompts for the SO PIN and the new User PIN)
+pkcs11-tool --module target/release/libcraton_hsm.so --login --login-type so --init-pin
 
-# Sign a file
-pkcs11-tool --module target/release/libcraton_hsm.so --sign --mechanism SHA256-RSA-PKCS --label "mykey" --pin 87654321 --input-file data.txt --output-file data.sig
+# Generate an RSA key pair (prompts for the User PIN)
+pkcs11-tool --module target/release/libcraton_hsm.so --login --keypairgen --key-type rsa:2048 --label "mykey"
+
+# Sign a file (prompts for the User PIN)
+pkcs11-tool --module target/release/libcraton_hsm.so --login --sign --mechanism SHA256-RSA-PKCS --label "mykey" --input-file data.txt --output-file data.sig
 
 # Generate random bytes
 pkcs11-tool --module target/release/libcraton_hsm.so --generate-random 32 | xxd
@@ -52,8 +57,9 @@ print(f"Available slots: {slots}")
 # Open a session
 session = lib.openSession(slots[0], PyKCS11.CKF_RW_SESSION | PyKCS11.CKF_SERIAL_SESSION)
 
-# Login
-session.login("87654321")
+# Login (read the PIN without echo; never hard-code it)
+import getpass
+session.login(getpass.getpass("User PIN: "))
 
 # Generate an AES key
 template = [
@@ -85,7 +91,9 @@ Provider provider = new SunPKCS11("pkcs11.cfg");
 Security.addProvider(provider);
 
 KeyStore ks = KeyStore.getInstance("PKCS11", provider);
-ks.load(null, "87654321".toCharArray());
+char[] pin = System.console().readPassword("User PIN: ");
+ks.load(null, pin);
+java.util.Arrays.fill(pin, '\0');
 ```
 
 ## Using the gRPC Daemon

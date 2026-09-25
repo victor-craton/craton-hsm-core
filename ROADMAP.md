@@ -3,13 +3,13 @@
 ## Completed Phases
 
 ### Phase 1: Core PKCS#11 Foundation (26 tasks)
-HsmCore, SessionManager, ObjectStore, Token/PIN management, basic crypto (AES, RSA, ECDSA, Ed25519), C ABI layer with 70+ exported functions, error mapping, and initial test suite.
+HsmCore, SessionManager, ObjectStore, Token/PIN management, basic crypto (AES, RSA, ECDSA, Ed25519), C ABI layer (the 68 PKCS#11 v2.40 entry points), error mapping, and initial test suite.
 
 ### Phase 2: Advanced Crypto & Key Management (15/16 tasks)
 Multi-part operations (sign/verify/encrypt/decrypt/digest), key wrapping (C_WrapKey/C_UnwrapKey), key derivation (ECDH), OAEP/PSS padding, mechanism validation. 1 task deferred.
 
 ### Phase 3: Post-Quantum Cryptography (10/11 tasks)
-ML-KEM (CRYSTALS-Kyber), ML-DSA (CRYSTALS-Dilithium), SLH-DSA (SPHINCS+), hybrid key exchange, PQC key generation and encapsulation through C ABI. 1 task deferred.
+ML-KEM (CRYSTALS-Kyber), ML-DSA (CRYSTALS-Dilithium), SLH-DSA (SPHINCS+), PQC key generation and encapsulation through C ABI. 1 task deferred.
 
 ### Phase 4: Production Tooling (8 tasks)
 gRPC daemon (tonic + rustls), admin CLI (clap), PKCS#11 spy wrapper (libloading), Docker multi-stage build, Helm chart, Criterion benchmarks.
@@ -21,7 +21,7 @@ gRPC daemon (tonic + rustls), admin CLI (clap), PKCS#11 spy wrapper (libloading)
 FIPS backend (aws-lc-rs), storage overhaul (sled to redb), memory hardening (mlock/VirtualLock), cargo-fuzz targets, multi-process fork safety, audit documentation, FIPS POST KATs.
 
 ### Phase 7: PKCS#11 Completeness (22 tasks)
-Full PKCS#11 v3.0 function coverage, FIPS approved mode, pairwise consistency tests, software integrity verification, algorithm indicators, intermediate zeroization.
+PKCS#11 v2.40 function coverage (the v3.0-only functions were not implemented; v3.0 interface discovery `C_GetInterfaceList`/`C_GetInterface` was added in the 2026-09 remediation), approved-only policy, pairwise consistency tests, software integrity verification, algorithm indicators, intermediate zeroization.
 
 ### Phase 8: Interop & Benchmarking (7 tasks)
 ABI benchmarks with SoftHSMv2 comparison, Java SunPKCS11 interop tests, OpenSSL 3.x provider interop tests, CI benchmark job.
@@ -30,7 +30,7 @@ ABI benchmarks with SoftHSMv2 comparison, Java SunPKCS11 interop tests, OpenSSL 
 cargo-audit + cargo-deny CI, Miri CI, additional fuzz targets, security review checklist, release signing guide, constant-time analysis documentation.
 
 ### Phase 10: Code Hardening & Roadmap Gaps (8 tasks)
-HsmCore field encapsulation (pub(crate)), #[must_use] on HsmError, #![forbid(unsafe_code)] on safe modules, removed unused dependencies, multi-slot support, C_GetOperationState/C_SetOperationState, encrypted backup/restore.
+HsmCore field encapsulation (pub(crate)), #[must_use] on HsmError, `#![forbid(unsafe_code)]` on the audit, config, session and token modules (`#![deny(unsafe_code)]` on store), removed unused dependencies, multi-slot support, C_GetOperationState/C_SetOperationState, encrypted backup/restore.
 
 ### Phase 11: Test Coverage Doubling
 Doubled test coverage from 286 to 547 tests across 11 new comprehensive test suites.
@@ -44,8 +44,9 @@ Audit log export (JSON, NDJSON, syslog RFC 5424), audit chain verification, admi
 ## Current Status
 
 - **126/130 tasks complete** (2 interop tests deferred, 2 Phase 2/3 items deferred)
-- **717+ tests** passing
-- **v0.9.1** released
+- Test inventory: `cargo test -- --list` (35 integration test files, all run in CI)
+- **v0.9.1** is the current version. The public repository history starts at the open-sourcing commit; there are no tags for earlier versions.
+- A security and FIPS-readiness audit (2026-09-24) found the module **not ready** for FIPS 140-3 submission; remediation status is tracked in [docs/fips-gap-analysis.md](docs/fips-gap-analysis.md).
 
 ## Future Directions
 
@@ -62,14 +63,15 @@ Audit log export (JSON, NDJSON, syslog RFC 5424), audit chain verification, admi
     - [ ] **Stack-allocate signature buffers**: ECDSA/Ed25519 signatures fit in ≤144 bytes; use `ArrayVec<u8, 512>` instead of heap `Vec<u8>` in sign functions
     - [ ] **Pass output buffer from C ABI to backend**: PKCS#11 callers already provide output buffers; thread them through to crypto backend to eliminate intermediate allocations
   - *Build & CI*
-    - [x] **CI test split**: Parallel-safe crypto tests (92 tests, `--test-threads=8`) vs serial PKCS#11 ABI tests (625 tests, `--test-threads=1`)
+    - [x] **CI test split**: Parallel-safe crypto tests (`--test-threads=8`) vs serial PKCS#11 ABI tests (`--test-threads=1`)
     - [ ] **`cargo-nextest` evaluation**: Per-process test isolation would eliminate `--test-threads=1` requirement entirely
     - [ ] **`[profile.test] opt-level = 1`**: Faster crypto-heavy test execution
 - **Stable PQC crates**: Upgrade ml-kem, ml-dsa, slh-dsa from RC to stable when released
 - **Unified rand_core**: Consolidate dual rand_core versions (0.6 + 0.10) when PQC ecosystem unifies
 
 ### Medium-Term
-- **FIPS 140-3 certification**: Submit for CMVP validation with aws-lc-rs FIPS backend
+- **FIPS 140-3 certification**: close the blockers in [docs/fips-gap-analysis.md](docs/fips-gap-analysis.md) (route every approved service through the validated AWS-LC module, entropy source validation, API-visible approved-service indicator, ACVP on the tested OEs), then engage a CST laboratory
+- **Remaining PKCS#11 v3.0 functions**: `C_LoginUser`, `C_SessionCancel` and the message-based API (not implemented)
 - **HSM clustering**: Multi-node key replication for high availability
 - **KMIP support**: Key Management Interoperability Protocol alongside PKCS#11
 

@@ -1,13 +1,42 @@
 /target
+/target-*/
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts
+/fuzz/coverage
 *.redb
 *.redb.lock
 craton_hsm_store
-craton_hsm_audit.jsonl
+craton_hsm_audit.jsonl*
 rusthsm_store
 rusthsm_audit.jsonl
+lockout_state.json
+.craton_hsm_replay_guard
+*.rhbk
+
+# Key material and signing artefacts — never commit these (H5-23).
+# Integrity/release signing keys, TLS keys/certs generated for local testing,
+# and the integrity signature sidecar produced by tools/sign-integrity.sh.
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*-signing-key*
+*.sig
+*.hmac
+# Deliberate, non-secret test fixtures may be force-added (git add -f) under
+# tests/fixtures/ with a README stating they are test-only material.
+
+# Release / supply-chain outputs generated locally
+*.cdx.json
+*.spdx.json
+SHA256SUMS
+THIRD-PARTY-LICENSES*
+
+# Local agent / tool settings (per-developer, never shared)
+.claude/settings.local.json
+.claude/*.local.json
 
 # IDE / editor config
 .idea/

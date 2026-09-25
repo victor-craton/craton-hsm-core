@@ -2,6 +2,12 @@
 
 This runbook covers day-to-day operations for Craton HSM administrators: token setup, PIN management, key lifecycle, audit, daemon operations, and troubleshooting.
 
+> The admin CLI prompts for every PIN and passphrase; never pass them as
+> arguments. The subcommands below match `craton-hsm-admin --help`; run
+> `craton-hsm-admin <command> --help` for all options. The admin CLI links the
+> library directly and is outside the module's cryptographic boundary; it
+> records its administrative actions in the audit log.
+
 ## Token Initialization
 
 ### First-time setup
@@ -9,30 +15,30 @@ This runbook covers day-to-day operations for Craton HSM administrators: token s
 ```bash
 # 1. Initialize the token with a Security Officer (SO) PIN
 craton-hsm-admin token init --label "Production HSM"
-# Prompts: Enter SO PIN (4-64 characters, not echoed)
-# Prompts: Confirm SO PIN
+# Prompts for the new SO PIN (8-64 characters, at least two character classes)
 
-# 2. Verify initialization
+# 2. Set the User PIN (SO authentication required)
+craton-hsm-admin pin reset
+
+# 3. Verify
 craton-hsm-admin token info
-# Output:
-#   Token Label:    Production HSM
-#   Initialized:    true
-#   Login State:    Public
-#   Objects:        0
-#   Sessions:       0/100
-
-# 3. Machine-readable output
-craton-hsm-admin status --json
+craton-hsm-admin status
 ```
+
+The same can be done through any PKCS#11 tool, e.g.
+`pkcs11-tool --module /path/to/libcraton_hsm.so --init-token --label "Production HSM"`
+followed by `pkcs11-tool --module ... --login --login-type so --init-pin`
+(both prompt for PINs).
 
 ### Re-initialization
 
-Re-initializing a token destroys all stored objects and resets PINs.
+Re-initializing a token destroys all objects of that token and its PINs.
+It requires the current SO PIN and fails with `CKR_SESSION_EXISTS` while
+sessions are open on the slot.
 
 ```bash
 craton-hsm-admin token init --label "Production HSM"
-# WARNING: This will destroy all objects in the token.
-# Enter SO PIN to confirm.
+# Asks for typed confirmation and the current SO PIN
 ```
 
 ## PIN Management
@@ -41,86 +47,74 @@ craton-hsm-admin token init --label "Production HSM"
 
 | Property | Default | Config key |
 |----------|---------|------------|
-| Minimum length | 4 | `security.pin_min_length` |
+| Minimum length | 8 | `security.pin_min_length` |
 | Maximum length | 64 | `security.pin_max_length` |
-| Lockout threshold | 10 failed attempts | `security.max_failed_logins` |
-| Hash algorithm | PBKDF2-HMAC-SHA256 | Not configurable |
+| Composition | at least 3 distinct characters; ASCII PINs need at least 2 character classes (lower, upper, digit, other) | not configurable |
+| Lockout threshold | 10 consecutive failed attempts | `security.max_failed_logins` |
+| Back-off | exponential after each failure, 100 ms doubling to at most 5 s | not configurable |
+| Hash algorithm | PBKDF2-HMAC-SHA256 | not configurable |
 | Hash iterations | 600,000 | `security.pbkdf2_iterations` |
+
+There is no default PIN.
 
 ### Change SO PIN
 
 ```bash
-craton-hsm-admin pin change --user-type SO
-# Prompts: Current SO PIN
-# Prompts: New SO PIN
-# Prompts: Confirm new SO PIN
+craton-hsm-admin pin change --user-type so
+# Prompts: current SO PIN, new SO PIN, confirmation
 ```
 
 ### Change User PIN
 
 ```bash
-craton-hsm-admin pin change --user-type USER
-# Prompts: Current User PIN
-# Prompts: New User PIN
-# Prompts: Confirm new User PIN
+craton-hsm-admin pin change --user-type user
+# Prompts: current User PIN, new User PIN, confirmation
 ```
 
 ### Reset a locked User PIN (SO action)
 
-After `max_failed_logins` consecutive failures, the user PIN is locked. Only the SO can unlock it.
+After `max_failed_logins` consecutive failures, the User PIN is locked. Only
+the SO can set a new one.
 
 ```bash
 craton-hsm-admin pin reset
-# Prompts: SO PIN (authenticates as SO)
-# Prompts: New User PIN
-# Prompts: Confirm new User PIN
+# Prompts: SO PIN, new User PIN, confirmation
 ```
 
 ### PIN lockout recovery
 
-1. Identify the lockout: application receives `CKR_PIN_LOCKED`
-2. SO authenticates: `craton-hsm-admin pin reset`
-3. Set a new user PIN
-4. Communicate the new PIN to the user through a secure channel
+1. Identify the lockout: the application receives `CKR_PIN_LOCKED`
+2. The SO sets a new User PIN: `craton-hsm-admin pin reset` (or `C_InitPIN` from any PKCS#11 tool)
+3. Communicate the new PIN to the user through a secure channel
+
+A locked **SO** PIN cannot be reset through the PKCS#11 API. The token's
+persistent storage must be removed by the system administrator (destroying
+all of its keys) and the token re-initialised.
 
 ## Key Management
 
-### List all keys
+### List keys
 
 ```bash
-craton-hsm-admin key list
-# Output:
-#   Handle  Type    Label               Size
-#   ------  ----    -----               ----
-#   1       RSA     App Signing Key     2048
-#   2       EC      TLS ECDSA Key       256
-#   3       AES     Data Encryption     256
-
-craton-hsm-admin key list --json
+craton-hsm-admin key list                 # as the User (default)
+craton-hsm-admin key list --role so       # objects visible to the SO
 ```
 
 ### Import a key
 
+The admin CLI imports raw AES keys (16, 24 or 32 bytes) as sensitive token
+objects. Import other key types through a PKCS#11 application
+(`C_CreateObject` / `C_UnwrapKey`), preferably wrapped.
+
 ```bash
-# RSA private key (PEM or DER)
-craton-hsm-admin key import --file private.pem --label "App Signing Key" --type RSA
-
-# EC private key
-craton-hsm-admin key import --file ec-key.pem --label "TLS Key" --type EC
-
-# AES symmetric key (raw bytes)
-craton-hsm-admin key import --file aes.key --label "Data Encryption" --type AES
+craton-hsm-admin key import --file aes.key --label "Data Encryption" --type aes
 ```
 
 ### Delete a key
 
 ```bash
-# Interactive confirmation
-craton-hsm-admin key delete --handle 42
-# Are you sure you want to delete object 42? [y/N]
-
-# Skip confirmation (for automation)
-craton-hsm-admin key delete --handle 42 --force
+craton-hsm-admin key delete --handle 42 --role user
+# Asks for typed confirmation
 ```
 
 ### Key lifecycle states (SP 800-57)
@@ -158,11 +152,16 @@ Set lifecycle dates at key creation:
 ### View audit entries
 
 ```bash
-# Last 100 entries
+# Last 100 entries (SO login required)
 craton-hsm-admin audit dump --last 100
 
-# JSON output for processing
-craton-hsm-admin audit dump --last 50 --json
+# Verify the hash chain of the persisted log (and rotated generations)
+craton-hsm-admin audit verify-chain
+
+# Export for processing / SIEM ingestion
+craton-hsm-admin audit export-json
+craton-hsm-admin audit export-ndjson
+craton-hsm-admin audit export-syslog
 ```
 
 ### Audit log structure
@@ -177,7 +176,7 @@ Each entry contains:
 
 ### Integrity verification
 
-The audit log uses chained SHA-256 hashes. Each entry's `previous_hash` equals `SHA-256(previous_entry)`. A broken chain means the log has been tampered with.
+The audit log uses chained SHA-256 hashes. Each entry's `previous_hash` equals `SHA-256(previous_entry)`. A broken chain means the log was modified or corrupted. The chain is **unkeyed**: someone who can rewrite the whole file can also recompute the chain, so it detects accidental corruption and partial edits, not a capable attacker with write access. Forward the log to a separate, append-only system (SIEM) if you need stronger guarantees.
 
 To verify integrity programmatically:
 1. Read all entries in order
@@ -190,11 +189,10 @@ To verify integrity programmatically:
 ### Start the daemon
 
 ```bash
-# With config file
+# The configuration file path is the first argument (default: ./craton_hsm.toml).
+# The file must exist and contain a [daemon] section; a missing or invalid
+# configuration is fatal.
 craton-hsm-daemon /etc/craton_hsm/craton_hsm.toml
-
-# With default config
-craton-hsm-daemon
 ```
 
 ### Configuration (`[daemon]` section)
@@ -268,51 +266,62 @@ journalctl -u craton_hsm -f
 ### Deploy
 
 ```bash
-helm install my-hsm deploy/helm/craton_hsm/ \
-  --set image.repository=registry.example.com/craton_hsm \
+# Chart: deploy/helm/craton-hsm (TLS and mTLS are required by default; see install.md)
+helm install my-hsm deploy/helm/craton-hsm/ \
+  --set image.repository=registry.example.com/craton-hsm \
   --set image.tag=0.9.1 \
-  --set tls.enabled=true \
-  --set tls.secretName=craton_hsm-tls
+  --set tls.secretName=craton-hsm-tls \
+  --set tls.clientCaSecretName=craton-hsm-client-ca
 ```
 
 ### Monitor
 
 ```bash
 # Logs
-kubectl logs -l app=craton_hsm -f
+kubectl logs -l app.kubernetes.io/instance=my-hsm -f
 
 # Status
-kubectl get pods -l app=craton_hsm
+kubectl get pods -l app.kubernetes.io/instance=my-hsm
 ```
 
 ### Upgrade
 
 ```bash
-helm upgrade my-hsm deploy/helm/craton_hsm/ \
-  --set image.tag=0.9.1
+helm upgrade my-hsm deploy/helm/craton-hsm/ \
+  --reuse-values --set image.tag=0.9.1
 ```
 
 ## Troubleshooting
 
-### FIPS POST failure
+### Self-test failure (module error state)
 
-**Symptom**: All PKCS#11 calls return `CKR_GENERAL_ERROR` immediately.
+**Symptom**: `C_Initialize` fails, or all PKCS#11 calls return `CKR_GENERAL_ERROR`.
 
-**Cause**: One of the 17 power-on self-tests failed during `C_Initialize`. This indicates binary corruption or a broken cryptographic dependency.
+**Cause**: A pre-operational or conditional self-test failed (software
+integrity test, an algorithm self-test, a pair-wise consistency test, or an
+entropy/DRBG health test). The log names the failing test.
 
-**Actions**:
-1. Check binary integrity (checksum against known good build)
-2. Rebuild from source: `cargo build --release`
-3. Run self-test directly: `cargo test --release -- crypto::self_test`
-4. If running in Docker, rebuild the image
+**Actions** (do **not** rebuild from source on the production host — that
+produces an unsigned library whose integrity test is skipped):
+1. Integrity failure: verify the installed library against the release
+   `SHA256SUMS` / cosign bundle (see `docs/release-signing.md`) and make sure
+   the matching `.sig` sidecar sits next to it. Reinstall the signed release
+   artefact if they differ, and treat an unexplained modification as a
+   security incident.
+2. Algorithm or health-test failure: reinstall the signed release artefact;
+   if it persists on that host, suspect the platform (hardware, OS RNG) and
+   report it to the maintainers.
+3. Recover by calling `C_Finalize` and then `C_Initialize` (or restarting the
+   process); the module leaves the error state only if all self-tests pass.
 
 ### PIN locked
 
 **Symptom**: `CKR_PIN_LOCKED` on `C_Login`.
 
-**Action**: Have the SO reset the user PIN:
+**Action**: Have the SO set a new User PIN (`C_InitPIN`), for example:
 ```bash
-craton-hsm-admin pin reset
+pkcs11-tool --module /path/to/libcraton_hsm.so --login --login-type so --init-pin
+# prompts for the SO PIN and the new User PIN
 ```
 
 ### Session exhaustion

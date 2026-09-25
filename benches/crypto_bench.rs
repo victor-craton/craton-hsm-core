@@ -331,9 +331,9 @@ fn bench_ml_kem_decap(c: &mut Criterion) {
 // ============================================================================
 //
 // These benchmarks run identical operations through the CryptoBackend trait.
-// The aws-lc-rs backend has moved to the craton_hsm-awslc crate (enterprise).
-// To compare backends, add craton_hsm-awslc as a dev-dependency and push
-// its AwsLcBackend into the backends vec below.
+// The AWS-LC backend lives in-tree (src/crypto/awslc_backend.rs).
+// To compare backends, build with `--features awslc-backend` (the in-tree
+// AWS-LC backend is then added to the backends vec below).
 
 fn get_backends() -> Vec<(&'static str, Arc<dyn CryptoBackend>)> {
     let mut backends: Vec<(&'static str, Arc<dyn CryptoBackend>)> = Vec::new();
@@ -344,8 +344,9 @@ fn get_backends() -> Vec<(&'static str, Arc<dyn CryptoBackend>)> {
         backends.push(("RustCrypto", Arc::new(RustCryptoBackend)));
     }
 
+    #[cfg(feature = "awslc-backend")]
     {
-        use craton_hsm_awslc::AwsLcBackend;
+        use craton_hsm::crypto::awslc_backend::AwsLcBackend;
         backends.push(("AwsLc", Arc::new(AwsLcBackend)));
     }
 

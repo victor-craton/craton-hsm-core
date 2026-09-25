@@ -84,16 +84,19 @@ This dual-version situation exists because the PQC crates adopted `rand_core 0.1
 
 ## 3. FIPS 140-3 Certification Submission
 
-**Current state:** Craton HSM has significant FIPS 140-3 readiness:
-- Algorithm indicators (IG 2.4.C) on all crypto operations
-- FIPS POST with 17 tests: integrity + 16 KATs (SP 800-140E)
-- Continuous RNG health test (SP 800-90B)
-- Approved algorithm enforcement mode
-- `aws-lc-rs` FIPS backend option (FIPS 140-3 validated module)
-- Zeroization of key material
-- Tamper-evident audit log
-- Gap analysis document: `docs/fips-gap-analysis.md`
-- Certification guide: `docs/fips-140-3-certification.md`
+**Current state:** NOT READY (2026-09 readiness audit). What exists:
+- Pre-operational self-tests: Ed25519 integrity test plus fixed-vector CASTs
+- Entropy-input health tests and DRBG health tests
+- An approved-only build (`fips` feature) and an advisory approved-only policy
+- An in-tree AWS-LC backend linking the AWS-LC FIPS module (not all services use it yet)
+- Zeroization of key material; hash-chained audit log
+- Tracking list of blockers: `docs/fips-gap-analysis.md`
+- Draft security policy: `docs/fips-140-3-certification.md`
+
+Still missing (see the gap analysis): validated implementations for every
+approved service, an ESV-validated entropy source, an API-visible
+approved-service indicator (IG 2.4.C), and ACVP testing on the claimed
+operational environments.
 
 **What cannot be done in code — requires external action:**
 
@@ -104,10 +107,10 @@ Contact one of the NVLAP-accredited Cryptographic and Security Testing (CST) lab
 
 ### Step 2: Prepare documentation package
 The lab will require:
-- **Security Policy** — `docs/security-policy.md` (draft exists, needs formal formatting)
+- **Security Policy** — `docs/fips-140-3-certification.md` (draft written against the code; needs the SP 800-140B template)
 - **Finite State Model** — formal state machine diagram of HSM states
 - **Design documentation** — `docs/architecture.md` (exists, may need expansion)
-- **Entropy source justification** — document the DRBG and OS entropy sources
+- **Entropy source** — an ESV certificate for the entropy source, or reliance on a validated one (none today)
 - **Algorithm validation certificates** — submit algorithm implementations to ACVP (Automated Cryptographic Validation Protocol) at https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program
 
 ### Step 3: ACVP Algorithm Validation
@@ -185,7 +188,7 @@ After lab approval, NIST/CCCS reviews the submission. Additional timeline: 3-12 
 
 ## 5. KMIP (Key Management Interoperability Protocol) Support
 
-**Current state:** Craton HSM only supports the PKCS#11 v3.0 API. No KMIP support exists.
+**Current state:** Craton HSM only supports the PKCS#11 API (v2.40 function set plus v3.0 interface discovery). No KMIP support exists.
 
 **What is KMIP:** OASIS standard for key management operations. Used by enterprise KMS products (e.g., HashiCorp Vault, Thales, Gemalto). Defined in OASIS KMIP Specification v2.1.
 

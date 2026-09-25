@@ -17,11 +17,11 @@ Craton HSM is a software HSM. Unlike hardware HSMs, it does not protect against 
 | Database corruption from concurrent processes | Exclusive file lock on persistent store |
 | Unauthorized key extraction | `CKA_SENSITIVE=true` and `CKA_EXTRACTABLE=false` enforced |
 | Unauthorized operations | Session state machine enforces login before private object access |
-| Audit log tampering | Chained SHA-256 hashes; any modification breaks the chain |
-| Panic-induced undefined behavior at FFI boundary | `catch_unwind` wraps every `extern "C"` export |
+| Accidental audit-log corruption | Chained SHA-256 hashes; a partial modification breaks the chain. The chain is unkeyed: an attacker who can rewrite the whole file can recompute it (forward logs to an append-only store) |
+| Panic-induced undefined behavior at FFI boundary | `catch_unwind` wraps every `extern "C"` export that touches module state |
 | Use of weak algorithms | `allow_weak_rsa=false`, `allow_sha1_signing=false` by default |
-| Corrupted binary / supply-chain | FIPS POST: 17 self-tests (integrity + 16 KATs) + continuous RNG health check run before any crypto operation |
-| AES-GCM nonce reuse (per key) | Per-key encryption counters with 2^31 limit; all-zero IV rejection at C_EncryptInit |
+| Corrupted or tampered library | Ed25519 software-integrity self-test at `C_Initialize` (in force for signed release builds; mandatory in `fips` builds) plus distribution signatures (cosign, SHA256SUMS, provenance). The known-answer self-tests detect broken algorithms, not tampering |
+| AES-GCM nonce reuse (per key) | Module-generated random IVs in approved mode, per-key invocation limit (2^32, SP 800-38D §8.3) and rejection of recently seen (key, IV) pairs; CTR counter-range overlap detection |
 | Config path traversal | UNC path, `..` traversal, and absolute path rejection in config validation |
 | Key misuse after expiry | SP 800-57 key lifecycle: date-based deactivation blocks signing/encryption |
 
@@ -45,7 +45,7 @@ Craton HSM implements software-level side-channel countermeasures for timing att
 |-----------|---------------|---------------------|
 | PIN comparison | PBKDF2-HMAC-SHA256 + `subtle::ConstantTimeEq` | Timing-safe: compare time independent of correct/incorrect PIN bytes |
 | HMAC verification | `subtle::ConstantTimeEq` on HMAC tags | Prevents byte-by-byte timing leakage of MAC values |
-| RSA signing (RustCrypto) | `rsa` crate with blinding by default | Montgomery multiplication with randomized blinding factor |
+| RSA private-key operations (RustCrypto) | `rsa` crate | **Not constant time.** Affected by the Marvin attack (RUSTSEC-2023-0071, no fixed release). Blinding does not prevent it. Decryption with `CKM_RSA_PKCS_OAEP` and all RSA signing on this backend are exposed. |
 | RSA signing (aws-lc-rs) | AWS-LC (BoringSSL fork) | Constant-time bignum arithmetic, same as Google/AWS production |
 | ECDSA signing (RustCrypto) | `p256`/`p384` crates | Field arithmetic in constant time (no branching on secret scalars) |
 | ECDSA signing (aws-lc-rs) | AWS-LC P-256/P-384 | Assembly-optimized constant-time point multiplication |
@@ -54,9 +54,9 @@ Craton HSM implements software-level side-channel countermeasures for timing att
 
 **Backend-specific notes:**
 
-- **RustCrypto backend** (default): Pure Rust implementations. RSA uses randomized blinding. ECC uses projective coordinates with complete addition formulas. AES uses AES-NI when available, falling back to a bitsliced implementation that avoids timing-leaky S-box table lookups.
+- **RustCrypto backend** (default): Pure Rust implementations. RSA private-key operations are **not** timing-safe (see above); use the AWS-LC backend where timing attacks are in scope. ECC uses projective coordinates with complete addition formulas. AES uses AES-NI when available, falling back to a bitsliced implementation that avoids timing-leaky S-box table lookups.
 
-- **aws-lc-rs backend** (FIPS): Assembly-optimized constant-time implementations from AWS-LC/BoringSSL. Battle-tested in AWS production. RSA uses constant-time modular exponentiation. ECC uses optimized P-256 and P-384 assembly with constant-time scalar multiplication. This is the same cryptographic core used by AWS KMS.
+- **aws-lc-rs backend** (`awslc-backend`): Assembly-optimized constant-time implementations from AWS-LC/BoringSSL. Battle-tested in AWS production. RSA uses constant-time modular exponentiation. ECC uses optimized P-256 and P-384 assembly with constant-time scalar multiplication. This is the same cryptographic core used by AWS KMS.
 
 **What we do NOT claim:**
 - Protection against cache-timing attacks on systems without AES-NI (extremely rare on modern hardware)
@@ -116,7 +116,7 @@ PKCS#11 objects have three levels of protection:
 2. **CKA_SENSITIVE**: If `true`, `CKA_VALUE` (key bytes) cannot be read via `C_GetAttributeValue`
 3. **CKA_EXTRACTABLE**: If `false`, key material cannot be exported
 
-Default for generated keys: `PRIVATE=true, SENSITIVE=true, EXTRACTABLE=false` (maximum protection).
+Rules: `CKA_VALUE` is never returned in plaintext when `CKA_SENSITIVE=true` **or** `CKA_EXTRACTABLE=false`; only extractable keys can be wrapped. Default for generated keys: `PRIVATE=true, SENSITIVE=true, EXTRACTABLE=false` (maximum protection). Key-usage operations require the User role; an SO session cannot use keys.
 
 ### PIN security
 
@@ -124,9 +124,9 @@ Default for generated keys: `PRIVATE=true, SENSITIVE=true, EXTRACTABLE=false` (m
 |----------|---------------|
 | Hash algorithm | PBKDF2-HMAC-SHA256 |
 | Iterations | 600,000 (configurable) |
-| Salt | 32 bytes from `OsRng` (per-PIN, stored with hash) |
+| Salt | 32 bytes from the module DRBG (per PIN, stored with the hash) |
 | Comparison | `subtle::ConstantTimeEq` |
-| Lockout | Configurable threshold (default: 10 failures) |
+| Lockout | Configurable threshold (default: 10 failures), exponential back-off, lockout counters persisted per slot; `C_InitToken` SO-PIN checks count as well |
 | PIN storage | Hash stored in `Zeroizing<Vec<u8>>` (zeroed on drop) |
 | PIN in transit | Never logged; CLI uses `rpassword` (no terminal echo) |
 
@@ -142,7 +142,7 @@ Entry[2].previous_hash = SHA-256(serialize(Entry[1]))
 ```
 
 Properties:
-- **Tamper-evident**: modifying, deleting, or reordering any entry breaks the hash chain
+- **Tamper-evident (limited)**: modifying, deleting, or reordering an entry breaks the hash chain, unless the whole remainder of the file is rewritten — the chain is not keyed, so it is not proof against an attacker with write access
 - **Synchronous**: event is recorded before the PKCS#11 function returns (not fire-and-forget)
 - **Non-repudiable**: each entry includes session handle, operation type, timestamp, and result
 
@@ -150,25 +150,25 @@ Audited operations: Initialize, Finalize, Login, Logout, GenerateKey, GenerateKe
 
 ## Algorithm Selection
 
-### Approved algorithms
+### Supported algorithms
+
+"Standard" names the specification; it does not mean the implementation is validated (see [fips-gap-analysis.md](fips-gap-analysis.md)). The PQC implementations are pre-release crates.
 
 | Category | Algorithms | Standard |
 |----------|-----------|----------|
-| Symmetric encryption | AES-256-GCM, AES-256-CBC, AES-256-CTR | SP 800-38A/D |
-| Key wrapping | AES Key Wrap | SP 800-38F (RFC 3394) |
+| Symmetric encryption | AES-128/192/256 GCM, CBC, CBC-PAD, CTR | SP 800-38A/D |
+| Key wrapping | AES Key Wrap (KW) and Key Wrap with Padding (KWP) | SP 800-38F (RFC 3394 / RFC 5649) |
 | RSA signing | PKCS#1 v1.5, PSS (SHA-256/384/512) | FIPS 186-5 |
-| RSA encryption | OAEP (SHA-256) | PKCS#1 v2.2 |
+| RSA encryption | OAEP | PKCS#1 v2.2 / SP 800-56B |
 | Elliptic curve | ECDSA P-256, P-384 | FIPS 186-5 |
-| Edwards curve | Ed25519 | RFC 8032 |
-| Key agreement | ECDH P-256, P-384 | SP 800-56A |
+| Edwards curve | Ed25519 | FIPS 186-5 / RFC 8032 |
+| Key agreement | ECDH P-256, P-384 with SP 800-56C KDF | SP 800-56A / 56C |
 | Hash | SHA-256, SHA-384, SHA-512 | FIPS 180-4 |
 | Hash (SHA-3) | SHA3-256, SHA3-384, SHA3-512 | FIPS 202 |
-| MAC | HMAC-SHA256/384/512 | FIPS 198-1 |
-| KDF | PBKDF2-HMAC-SHA256 | SP 800-132 |
+| KDF | PBKDF2-HMAC-SHA256 (PIN verification, PIN-derived storage keys only) | SP 800-132 |
 | PQC signing | ML-DSA-44/65/87 | FIPS 204 |
 | PQC KEM | ML-KEM-512/768/1024 | FIPS 203 |
 | PQC signing | SLH-DSA (SHA2-128s, SHA2-256s) | FIPS 205 |
-| Hybrid | ML-DSA-65 + ECDSA-P256 | Composite |
 
 ### Restricted by default
 
@@ -181,11 +181,11 @@ Audited operations: Initialize, Finalize, Login, Logout, GenerateKey, GenerateKe
 
 ### Power-On Self-Tests (POST)
 
-Run during `C_Initialize`. If any test fails, the module sets `POST_FAILED=true` and all subsequent calls return `CKR_GENERAL_ERROR`. On re-initialization (after `C_Finalize`), `POST_FAILED` is reset and POST re-runs. See `docs/audit-scope.md` for the full POST table (17 tests: integrity check + 16 KATs).
+Run during `C_Initialize`: SHA-2 and Ed25519 self-tests, the Ed25519 software-integrity test, then fixed-vector known-answer tests for every algorithm family (through the selected backend). If any test fails, the module enters the error state and every call that reaches module state returns `CKR_GENERAL_ERROR`; `C_Finalize` + `C_Initialize` re-runs the tests. Full list: [fips-140-3-certification.md §9](fips-140-3-certification.md#9-self-tests).
 
 ### SP 800-90A DRBG
 
-All cryptographic random number generation — including key generation for RSA, EC, and Ed25519 — is routed through an HMAC_DRBG (HMAC-SHA256) per SP 800-90A via a `DrbgRng` wrapper implementing `rand::CryptoRng`. The DRBG is seeded from the OS CSPRNG with prediction resistance (fresh entropy on every call). A continuous health test (SP 800-90B) detects stuck output.
+All module randomness — key generation and `C_GenerateRandom` — comes from one process-wide HMAC_DRBG (HMAC-SHA256, SP 800-90A) with prediction resistance (AWS-LC's DRBG serves `C_GenerateRandom` with the AWS-LC backend). Entropy input from the OS passes repetition-count and adaptive-proportion health tests; a continuous test runs on DRBG output. The OS entropy source is not ESV-validated.
 
 ### SP 800-57 Key Lifecycle
 
@@ -198,25 +198,25 @@ Craton HSM supports two crypto backends, selectable via `algorithms.crypto_backe
 | Backend | Feature Flag | FIPS Status |
 |---------|-------------|-------------|
 | RustCrypto (default) | `rustcrypto-backend` | Not FIPS-certified |
-| AWS-LC (aws-lc-rs) | `awslc-backend` | FIPS 140-3 validated module |
+| AWS-LC (aws-lc-rs) | `awslc-backend` | Links the AWS-LC FIPS module; Craton HSM itself is not validated |
 
-With `--features awslc-backend` and `crypto_backend = "awslc"`, all classical crypto operations use the FIPS-validated AWS-LC library.
+With `--features awslc-backend` and `crypto_backend = "awslc"`, the classical primitives of the `CryptoBackend` trait run on AWS-LC. Multi-part sign/verify, PBKDF2, HKDF, PQC and the integrity test still use RustCrypto code.
 
 ### Remaining gaps for formal FIPS certification
 
-See `docs/fips-gap-analysis.md` for the full analysis. The major gaps (DRBG, key lifecycle, POST KATs) have been resolved. Remaining items are documentation and formal certification process.
+The module is **not ready** for submission. See `docs/fips-gap-analysis.md`: blocking items include validated implementations for every approved service, an ESV-validated entropy source, an API-visible approved-service indicator and ACVP testing on the claimed operational environments.
 
 ## Security Invariants
 
 These 10 properties are verified at every development phase and must never be violated:
 
-1. **No panic crosses FFI boundary** — `catch_unwind` on all `extern "C"` functions
+1. **No panic crosses FFI boundary** — `catch_unwind` on every `extern "C"` function that touches module state
 2. **No key bytes in logs** — custom `Debug` impls with `[REDACTED]`
-3. **No key bytes returned** for `CKA_SENSITIVE=true, CKA_EXTRACTABLE=false` objects
+3. **No key bytes returned** in plaintext for objects with `CKA_SENSITIVE=true` or `CKA_EXTRACTABLE=false`
 4. **Constant-time PIN/HMAC comparison** — `subtle::ConstantTimeEq` everywhere
-5. **All key material zeroized on drop** — `ZeroizeOnDrop` derive on all key types
+5. **Key material zeroized on drop** — `RawKeyMaterial` and other key containers zeroize on drop; all volatile SSPs are released at `C_Finalize`
 6. **Session state machine is authoritative** — check state, not just login flag
 7. **Audit log written before operation returns** — not fire-and-forget async
-8. **DRBG for all key material** — SP 800-90A HMAC_DRBG (via `DrbgRng` adapter) for RSA, EC, Ed25519, AES key generation; never `OsRng` directly or `rand::random()` for keys
-9. **No unsafe in crypto paths** — all unsafe blocks confined to ABI layer and mlock.rs, none in crypto engine
+8. **DRBG for all key material and random output** — SP 800-90A HMAC_DRBG for key generation and `C_GenerateRandom`; never `OsRng` directly or `rand::random()`
+9. **Minimal, documented `unsafe`** — confined to the ABI layer, `mlock.rs`, module-path discovery in `integrity.rs`, digest zeroization in `digest.rs` and Windows ACL calls; every block carries a `// SAFETY:` comment
 10. **Generic errors to callers** — never leak internal state via error messages

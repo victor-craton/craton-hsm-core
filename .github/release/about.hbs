@@ -1,0 +1,25 @@
+THIRD-PARTY SOFTWARE NOTICES AND LICENSES
+=========================================
+
+This file is generated at release time by cargo-about from Cargo.lock and
+lists the licenses of every third-party Rust crate compiled into the Craton
+HSM release artifacts (library, daemon, admin CLI and pkcs11-spy).
+See also the NOTICE file.
+
+Overview
+--------
+{{#each overview}}
+{{{name}}} ({{id}}): {{count}} crate(s)
+{{/each}}
+
+{{#each licenses}}
+------------------------------------------------------------------------------
+{{{name}}} ({{id}})
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}} <{{crate.repository}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

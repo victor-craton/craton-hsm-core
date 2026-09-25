@@ -4,7 +4,7 @@
 
 ### Is Craton HSM FIPS 140-3 certified?
 
-**No.** Craton HSM implements FIPS 140-3 Level 1 technical requirements (POST self-tests, approved-only mode, HMAC_DRBG, pairwise consistency tests, module integrity checks), but it has **not** undergone CMVP validation by an accredited laboratory. Do not rely on it for FIPS compliance without independent certification. See [FIPS Gap Analysis](fips-gap-analysis.md) for details.
+**No.** Craton HSM implements several FIPS 140-3 Level 1 mechanisms (self-tests, an approved-only build, an SP 800-90A DRBG, pair-wise consistency tests, an Ed25519 module-integrity check), but it has **not** undergone CMVP validation, and the 2026-09 readiness audit found blocking gaps (no validated algorithm implementations in use, no validated entropy source, no API-visible approved-service indicator). Do not rely on it where a validated module is required. See [FIPS Gap Analysis](fips-gap-analysis.md).
 
 ### Can I use Craton HSM in production?
 
@@ -12,7 +12,8 @@ Craton HSM is designed for production use as a software PKCS#11 provider. It inc
 
 - It is a **software** HSM (FIPS Level 1) — it does not provide physical tamper resistance
 - The PQC dependencies are at release candidate versions
-- It has not undergone formal third-party security audit (yet)
+- A third-party-style security audit (2026-09) found issues that are being remediated; check [FIPS Gap Analysis](fips-gap-analysis.md) and the CHANGELOG
+- RSA private-key operations on the default RustCrypto backend are exposed to the Marvin timing side channel (RUSTSEC-2023-0071); use the AWS-LC backend if that matters for you
 
 Evaluate your threat model and compliance requirements before deploying.
 
@@ -22,19 +23,19 @@ Evaluate your threat model and compliance requirements before deploying.
 |---------|---------|-----------|
 | Language | Rust (memory-safe) | C++ |
 | Post-quantum crypto | ML-KEM, ML-DSA, SLH-DSA | No |
-| FIPS self-tests | 17 POST KATs | No |
-| Audit logging | Chained SHA-256 tamper-evident | No |
+| FIPS-style self-tests | Integrity test + known-answer self-tests at `C_Initialize` | No |
+| Audit logging | Chained SHA-256 (unkeyed; detects accidental corruption) | No |
 | Key lifecycle (SP 800-57) | Yes | No |
 | HMAC_DRBG (SP 800-90A) | Yes (prediction resistance) | No |
 | Memory hardening | mlock + ZeroizeOnDrop | Partial |
 | Multi-slot | Yes (up to 256) | Yes |
-| Encrypted persistence | AES-256-GCM + PBKDF2 | SQLite + AES |
+| Encrypted persistence | per-object AES-256-GCM, key wrapped under PBKDF2-derived keys | SQLite + AES |
 
 See [Benchmarks](benchmarks.md) for performance comparisons.
 
 ### What PKCS#11 version does Craton HSM implement?
 
-PKCS#11 v3.0 (OASIS Standard). The library exports 70+ functions covering initialization, session management, object management, key generation, signing, verification, encryption, decryption, digesting, key wrapping, key derivation, and random number generation.
+The PKCS#11 **v2.40** function set (68 functions via `C_GetFunctionList`) plus the v3.0 interface-discovery functions `C_GetInterfaceList` and `C_GetInterface`. The other v3.0 additions (`C_LoginUser`, `C_SessionCancel`, the message-based API) are not implemented, and a few v2.40 functions return `CKR_FUNCTION_NOT_SUPPORTED` (sign/verify-recover, dual-function updates, `C_WaitForSlotEvent`). See [API Reference](api-reference.md).
 
 ## Cryptography
 
@@ -44,10 +45,10 @@ PKCS#11 v3.0 (OASIS Standard). The library exports 70+ functions covering initia
 - RSA: 2048/3072/4096-bit (PKCS#1 v1.5, PSS, OAEP)
 - ECDSA: P-256, P-384
 - EdDSA: Ed25519
-- AES: 128/192/256-bit (GCM, CBC, CTR, Key Wrap)
+- AES: 128/192/256-bit (GCM, CBC, CBC-PAD, CTR, Key Wrap KW/KWP)
 - Digest: SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-384, SHA3-512
-- HMAC: SHA-256, SHA-384, SHA-512
-- KDF: ECDH (P-256/P-384) with internal HKDF-SHA256 per SP 800-56C
+- Key agreement: ECDH (P-256/P-384) with a KDF per SP 800-56C
+- No HMAC mechanism is offered to applications (HMAC is used internally)
 
 **Post-Quantum** (NIST standards, RC crate versions):
 - ML-KEM: 512, 768, 1024 (FIPS 203)
@@ -65,17 +66,18 @@ SHA-1 is available for digest operations (`C_Digest`) and signature verification
 ### How is randomness generated?
 
 All randomness goes through an SP 800-90A HMAC_DRBG (HMAC-SHA256) with:
-- **Prediction resistance**: Reseeds from OS entropy on every `generate()` call
-- **Continuous health test**: Rejects identical consecutive outputs (SP 800-90B)
-- **Monotonic reseed counter**: Limits calls to 2^48 before mandatory reseed
-- No key generation or crypto operation uses `OsRng` directly
+- **One process-wide instance** serving key generation and `C_GenerateRandom` (AWS-LC's own DRBG when the AWS-LC backend is selected)
+- **Prediction resistance**: fresh entropy input on every generate request
+- **Entropy health tests**: repetition-count and adaptive-proportion tests on the OS entropy input
+- **Continuous test** on DRBG output and a known-answer test at start-up
+- The OS entropy source itself is not SP 800-90B / ESV validated
 
 ## Security
 
 ### How is key material protected?
 
 1. **In memory**: Wrapped in `RawKeyMaterial` (`Vec<u8>` with mlock), locked to physical RAM via `mlock`/`VirtualLock`, zeroed on drop via `ZeroizeOnDrop`
-2. **At rest**: Encrypted with AES-256-GCM using a PBKDF2-derived key (600,000 iterations, configurable)
+2. **At rest** (only with `persist_objects = true`): each object encrypted with AES-256-GCM under a random per-slot key, which is stored only wrapped under keys derived from the SO/User PINs with PBKDF2 (600,000 iterations)
 3. **In logs**: Never appears — `Debug` impl returns `[REDACTED]`
 4. **In backups**: Encrypted with PIN-derived key (PBKDF2 + AES-256-GCM)
 
@@ -84,7 +86,7 @@ All randomness goes through an SP 800-90A HMAC_DRBG (HMAC-SHA256) with:
 Failed login attempts trigger exponential backoff:
 - Base delay: 100 ms, doubles per failure, capped at 5 seconds
 - After `max_failed_logins` failures (default: 10), the account is locked
-- Locked accounts require token re-initialization (`C_InitToken`) by the SO
+- A locked User PIN is reset by the SO (`C_InitPIN`); a locked SO PIN cannot be recovered through the API (the token must be re-created, destroying its keys)
 
 ### Does Craton HSM protect against side-channel attacks?
 
@@ -93,7 +95,7 @@ At the software level:
 - **Constant-time template matching** using bitwise accumulators (no early returns)
 - **No secret-dependent branching** in the HSM logic layer
 
-The underlying crypto libraries (RustCrypto, aws-lc-rs) have their own side-channel resistance properties. See [Security Model](security-model.md) for details.
+The underlying crypto libraries (RustCrypto, aws-lc-rs) have their own side-channel properties. Known gap: the RustCrypto `rsa` crate is affected by the Marvin timing attack (RUSTSEC-2023-0071) and has no fix; RSA decryption and signing on the default backend are exposed. See [Security Model](security-model.md).
 
 ## Operations
 
@@ -104,18 +106,20 @@ Not directly — the persistent store uses exclusive file locking. For multi-pro
 ### How do I back up token data?
 
 ```bash
-# Export encrypted backup
-craton-hsm-admin backup --pin <SO_PIN> --output backup.enc
+# Export an encrypted backup (prompts for the SO PIN and a backup passphrase)
+craton-hsm-admin backup --output backup.enc
 
-# Restore from backup
-craton-hsm-admin restore --pin <SO_PIN> --input backup.enc
+# Restore from backup (prompts; --verify-only checks a backup without restoring)
+craton-hsm-admin restore --input backup.enc
 ```
 
-Backups are encrypted with the SO PIN via PBKDF2 + AES-256-GCM. See [Operator Runbook](operator-runbook.md).
+Backups are protected with a passphrase-derived key (PBKDF2 + AES-256-GCM).
+The admin CLI is outside the module boundary. See `craton-hsm-admin --help`
+and [Operator Runbook](operator-runbook.md).
 
 ### How do I run in a container?
 
-A production Dockerfile is provided at `deploy/Dockerfile` using a distroless runtime image (no shell, non-root). A Helm chart is available at `deploy/helm/craton_hsm/`. See [Installation Guide](install.md) for details.
+A production Dockerfile is provided at `deploy/Dockerfile` using a distroless runtime image (no shell, non-root). A Helm chart is available at `deploy/helm/craton-hsm/`. See [Installation Guide](install.md) for details.
 
 ## Development
 

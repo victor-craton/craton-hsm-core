@@ -1,62 +1,134 @@
 name: Security Audit
 
-# Run weekly and when dependency files change on main.
-# Advisory databases don't change with code, so this doesn't need to run on every PR.
+# Supply-chain gate (A3-05, A3-06). Runs on every pull request, on main, weekly
+# (new advisories are published independently of code changes) and as a
+# mandatory gate of the release workflow (workflow_call).
+#
+# deny.toml is the single source of truth for advisory suppressions; the
+# `cargo audit --ignore` flags are generated from it.
 on:
-  schedule:
-    - cron: '17 8 * * 1'  # Monday 8:17 AM UTC
+  pull_request:
   push:
     branches: [main, master]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'deny.toml'
-      - '**/Cargo.toml'
-  workflow_dispatch:  # Allow manual trigger
+  schedule:
+    - cron: '17 8 * * 1'  # Monday 08:17 UTC
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.94.1"
 
 jobs:
-  security-audit:
-    name: Security Audit
+  advisory-policy:
+    name: Advisory-ignore policy (reason + expiry)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check advisory-ignore expiry
+        # Every [advisories].ignore entry in deny.toml must be a table with an
+        # `id` and a `reason` containing "expires YYYY-MM-DD" no more than
+        # 120 days ahead. Expired entries fail the build, forcing re-review.
+        shell: python3 {0}
+        run: |
+          import datetime, re, sys, tomllib
+          cfg = tomllib.load(open("deny.toml", "rb"))
+          today = datetime.date.today()
+          ok = True
+          for entry in cfg.get("advisories", {}).get("ignore", []):
+              if not isinstance(entry, dict) or "id" not in entry or "reason" not in entry:
+                  print(f"::error file=deny.toml::ignore entry {entry!r} must be {{ id = ..., reason = ... }}")
+                  ok = False
+                  continue
+              m = re.search(r"expires (\d{4}-\d{2}-\d{2})", entry["reason"])
+              if not m:
+                  print(f"::error file=deny.toml::{entry['id']}: reason must contain 'expires YYYY-MM-DD'")
+                  ok = False
+                  continue
+              expires = datetime.date.fromisoformat(m.group(1))
+              if expires < today:
+                  print(f"::error file=deny.toml::{entry['id']}: suppression expired on {expires}; re-review it")
+                  ok = False
+              elif (expires - today).days > 120:
+                  print(f"::error file=deny.toml::{entry['id']}: expiry {expires} is more than 120 days ahead")
+                  ok = False
+              else:
+                  print(f"{entry['id']}: suppressed until {expires}")
+          sys.exit(0 if ok else 1)
+
+  cargo-deny:
+    name: cargo-deny (advisories, bans, licenses, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable branch; version set by `toolchain`
         with:
-          toolchain: stable
-
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@37461a1de4134bec92ef79ff5d032a53de2c4e85 # v2
-        with:
-          tool: cargo-audit
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@37461a1de4134bec92ef79ff5d032a53de2c4e85 # v2
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
           tool: cargo-deny
 
-      - name: Run cargo-audit (CVE check)
-        # Ignored advisories — review quarterly (last reviewed 2026-03-21):
-        # RUSTSEC-2023-0071: rsa crate Marvin Attack — no fix available yet
-        # RUSTSEC-2026-0042: aws-lc-fips-sys — optional FIPS backend, update pending
-        # RUSTSEC-2026-004[4-8]: aws-lc-sys — transitive via optional aws-lc-rs
-        # RUSTSEC-2026-0049: rustls-webpki — daemon TLS dep, update pending
-        # RUSTSEC-2025-0134: rustls-pemfile — daemon TLS dep, update pending
-        run: >-
-          cargo audit
-          --ignore RUSTSEC-2023-0071
-          --ignore RUSTSEC-2026-0042
-          --ignore RUSTSEC-2026-0044
-          --ignore RUSTSEC-2026-0045
-          --ignore RUSTSEC-2026-0046
-          --ignore RUSTSEC-2026-0047
-          --ignore RUSTSEC-2026-0048
-          --ignore RUSTSEC-2026-0049
-          --ignore RUSTSEC-2025-0134
+      - name: cargo deny check (all sections, whole workspace)
+        # `--workspace` is required: the root manifest has a [package], so by
+        # default cargo-deny would only check the root crate and miss the
+        # daemon's TLS stack.
+        run: cargo deny --workspace --all-features --locked check advisories bans licenses sources
 
-      - name: Run cargo-deny (license + advisory)
-        run: cargo deny check advisories licenses
+  cargo-audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-audit
+
+      - name: Derive ignore list from deny.toml
+        id: ignores
+        shell: python3 {0}
+        run: |
+          import os, tomllib
+          cfg = tomllib.load(open("deny.toml", "rb"))
+          ids = [e["id"] if isinstance(e, dict) else e for e in cfg.get("advisories", {}).get("ignore", [])]
+          flags = " ".join(f"--ignore {i}" for i in ids)
+          print(f"ignoring: {ids}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"flags={flags}\n")
+
+      - name: cargo audit (workspace lockfile)
+        run: cargo audit --deny warnings ${{ steps.ignores.outputs.flags }}
+
+      - name: cargo audit (fuzz lockfile)
+        run: cargo audit --deny warnings --file fuzz/Cargo.lock ${{ steps.ignores.outputs.flags }}
+
+  secret-scan:
+    name: Secret scan (trufflehog)
+    # Diff-based scan of new commits (A3-01); not meaningful for tag/schedule runs.
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan for verified and unknown secrets
+        uses: trufflesecurity/trufflehog@4dd8831c5f12599465d4d45c3c447b4018a34c85 # v3.97.9
+        with:
+          extra_args: --results=verified,unknown

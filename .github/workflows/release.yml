@@ -1,122 +1,438 @@
 name: Release
 
+# Release pipeline (A3-03, A3-04, A3-11, A3-12, A1-05, A1-20).
+#
+#   verify-tag ─┐
+#   ci ─────────┼─> build (4 targets + Linux FIPS-mode flavour, --locked)
+#   audit ──────┘        │  (integrity public key embedded at build time)
+#                        v
+#                package (environment `release`: Ed25519 integrity .sig,
+#                         THIRD-PARTY-LICENSES, CycloneDX SBOMs, deterministic
+#                         tarballs, SHA256SUMS, load/tamper smoke test)
+#                        │
+#                        v
+#                github-release (cosign keyless bundles + SLSA provenance)
+#                        │
+#                        v
+#                publish-crate (environment `crates-io`, trusted publishing)
+#
+# Repository configuration required (see docs/release-signing.md):
+#   * variable  CRATON_HSM_INTEGRITY_PUBLIC_KEY   64 hex chars (Ed25519 public key)
+#   * environment `release` with required reviewers + tag rule `v*`, holding
+#     secret CRATON_HSM_INTEGRITY_SIGNING_KEY    (Ed25519 private key, PEM)
+#     secret CRATON_HSM_INTEGRITY_SIGNING_KEY_PASSPHRASE (optional, if the PEM is encrypted)
+#   * environment `crates-io` with required reviewers; crates.io trusted
+#     publishing configured for this repository/workflow/environment.
 on:
   push:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.94.1"
+  PROTOC_VERSION: "36.2"
 
 jobs:
+  # ── Gate 1: the tag must match the crate version and have a CHANGELOG entry ──
+  verify-tag:
+    name: Verify tag / version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Tag matches Cargo.toml version
+        id: v
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          crate=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | head -1)
+          if [ "$version" != "$crate" ]; then
+            echo "::error::tag $tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          if ! grep -qE "^## \[${version//./\\.}\]" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::no '## [$version]' section in CHANGELOG.md"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # ── Gate 2: the full CI suite must pass on the tagged commit ──
+  ci:
+    name: CI gate
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # ── Gate 3: cargo-deny / cargo-audit / advisory policy must pass ──
+  audit:
+    name: Security audit gate
+    uses: ./.github/workflows/security-audit.yml
+
   build:
-    name: Build (${{ matrix.target }})
+    name: Build (${{ matrix.target }}${{ matrix.flavor }})
+    needs: [verify-tag, ci, audit]
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             lib: libcraton_hsm.so
+            spy: libpkcs11_spy.so
+            exe: ""
+            flavor: ""
+            features: ""
+          # FIPS-mode flavour: `fips` feature (integrity test mandatory,
+          # approved-only policy compiled in) + AWS-LC backend. NOT a
+          # FIPS 140-3 validated module — see docs/fips-mode-guide.md.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            lib: libcraton_hsm.so
+            spy: libpkcs11_spy.so
+            exe: ""
+            flavor: "-fips"
+            features: "craton-hsm/fips,craton-hsm/awslc-backend"
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: windows-2025
             lib: craton_hsm.dll
+            spy: pkcs11_spy.dll
+            exe: ".exe"
+            flavor: ""
+            features: ""
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15
             lib: libcraton_hsm.dylib
+            spy: libpkcs11_spy.dylib
+            exe: ""
+            flavor: ""
+            features: ""
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-15
             lib: libcraton_hsm.dylib
-
+            spy: libpkcs11_spy.dylib
+            exe: ""
+            flavor: ""
+            features: ""
+    env:
+      # Ed25519 integrity-verification PUBLIC key, embedded at compile time by
+      # src/crypto/integrity.rs (A3-04). Public, so a repository variable.
+      CRATON_HSM_INTEGRITY_PUBLIC_KEY: ${{ vars.CRATON_HSM_INTEGRITY_PUBLIC_KEY }}
+      VERSION: ${{ needs.verify-tag.outputs.version }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable branch; version set by `toolchain`
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Require the integrity public key
+        shell: bash
+        run: |
+          if ! [[ "${CRATON_HSM_INTEGRITY_PUBLIC_KEY}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "::error::repository variable CRATON_HSM_INTEGRITY_PUBLIC_KEY is missing or not 64 hex chars; releases must embed the integrity key (A3-04)"
+            exit 1
+          fi
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Reproducibility settings
+        shell: bash
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          # Strip runner-specific paths from panic messages / debug info.
+          echo "RUSTFLAGS=--remap-path-prefix=${GITHUB_WORKSPACE}=/build" >> "$GITHUB_ENV"
+
+      - name: Build release binaries (library, admin CLI, daemon, pkcs11-spy)
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(build --release --locked --target "${{ matrix.target }}"
+                -p craton-hsm -p craton-hsm-admin -p craton-hsm-daemon -p pkcs11-spy)
+          if [ -n "${{ matrix.features }}" ]; then
+            args+=(--features "${{ matrix.features }}")
+          fi
+          cargo "${args[@]}"
+
+      - name: Stage release directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/${{ matrix.target }}/release"
+          name="craton-hsm-${VERSION}-${{ matrix.target }}${{ matrix.flavor }}"
+          mkdir -p "dist/$name"
+          # Every file below MUST exist — a missing binary fails the release.
+          for f in "${{ matrix.lib }}" "${{ matrix.spy }}" \
+                   "craton-hsm-admin${{ matrix.exe }}" "craton-hsm-daemon${{ matrix.exe }}"; do
+            cp "$out/$f" "dist/$name/"
+          done
+          cp LICENSE NOTICE README.md "dist/$name/"
+
+      - name: Upload staged (unsigned) artefacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: craton_hsm-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/${{ matrix.lib }}
-            target/${{ matrix.target }}/release/craton-hsm-admin*
-            target/${{ matrix.target }}/release/craton-hsm-daemon*
+          name: stage-${{ matrix.target }}${{ matrix.flavor }}
+          path: dist/
+          if-no-files-found: error
           retention-days: 5
 
-  publish-crate:
-    name: Publish to crates.io
-    runs-on: ubuntu-latest
-    needs: build
+  package:
+    name: Sign integrity, SBOM, notices, package
+    needs: [verify-tag, build]
+    # Same image as the Linux build so the load smoke test uses the same glibc.
+    runs-on: ubuntu-24.04
+    # Protected environment: required reviewers + tag rule; the only place the
+    # integrity signing key is available.
+    environment: release
+    env:
+      VERSION: ${{ needs.verify-tag.outputs.version }}
+      CRATON_HSM_INTEGRITY_PUBLIC_KEY: ${{ vars.CRATON_HSM_INTEGRITY_PUBLIC_KEY }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download staged artefacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: stage-*
+          path: dist
+          merge-multiple: true
+
+      - name: Sign module binaries (Ed25519 software-integrity signature)
+        env:
+          SIGNING_KEY_PEM: ${{ secrets.CRATON_HSM_INTEGRITY_SIGNING_KEY }}
+          # Optional: passphrase of an encrypted PEM key (the default output of
+          # tools/generate-integrity-keypair.sh).
+          SIGNING_KEY_PASSPHRASE: ${{ secrets.CRATON_HSM_INTEGRITY_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          command -v xxd >/dev/null || sudo apt-get install -y xxd
+          if [ -z "${SIGNING_KEY_PEM}" ]; then
+            echo "::error::secret CRATON_HSM_INTEGRITY_SIGNING_KEY is not set in the 'release' environment"
+            exit 1
+          fi
+          unhex() { python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))'; }
+          umask 077
+          key="$RUNNER_TEMP/integrity-signing-key.pem"
+          pass="$RUNNER_TEMP/integrity-signing-key.pass"
+          trap 'shred -u "$key" "$pass" 2>/dev/null || rm -f "$key" "$pass"' EXIT
+          printf '%s\n' "$SIGNING_KEY_PEM" > "$key"
+          passin=()
+          if [ -n "${SIGNING_KEY_PASSPHRASE}" ]; then
+            printf '%s' "$SIGNING_KEY_PASSPHRASE" > "$pass"
+            export CRATON_HSM_SIGNING_KEY_PASS_FILE="$pass"
+            passin=(-passin "file:$pass")
+          fi
+          # The private key must match the public key embedded in the binaries.
+          derived=$(openssl pkey -in "$key" ${passin[@]+"${passin[@]}"} -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          expected=$(printf '%s' "$CRATON_HSM_INTEGRITY_PUBLIC_KEY" | tr 'A-F' 'a-f')
+          if [ "$derived" != "$expected" ]; then
+            echo "::error::signing key does not match CRATON_HSM_INTEGRITY_PUBLIC_KEY"
+            exit 1
+          fi
+          openssl pkey -in "$key" ${passin[@]+"${passin[@]}"} -pubout -out "$RUNNER_TEMP/integrity-public.pem"
+          for lib in dist/*/libcraton_hsm.so dist/*/libcraton_hsm.dylib dist/*/craton_hsm.dll; do
+            [ -f "$lib" ] || continue
+            bash tools/sign-integrity.sh "$lib" "$key"
+            sig="${lib%.*}.sig"
+            chmod 644 "$sig"
+            # Independent verification of what the module will check at POST:
+            # Ed25519 over SHA-256(module file), hex-encoded in <stem>.sig.
+            sha256sum "$lib" | awk '{print $1}' | unhex > "$RUNNER_TEMP/digest.bin"
+            unhex < "$sig" > "$RUNNER_TEMP/sig.bin"
+            openssl pkeyutl -verify -pubin -inkey "$RUNNER_TEMP/integrity-public.pem" -rawin \
+              -in "$RUNNER_TEMP/digest.bin" -sigfile "$RUNNER_TEMP/sig.bin"
+          done
+          count=$(find dist -name '*.sig' | wc -l)
+          if [ "$count" -ne 5 ]; then
+            echo "::error::expected 5 integrity signatures, produced $count"
+            exit 1
+          fi
+
+      - name: Smoke test — integrity self-test runs and detects tampering (Linux)
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/init.py" <<'PY'
+          import ctypes, sys
+          lib = ctypes.CDLL(sys.argv[1])
+          lib.C_Initialize.restype = ctypes.c_ulong
+          lib.C_Initialize.argtypes = [ctypes.c_void_p]
+          rv = lib.C_Initialize(None)
+          print(f"C_Initialize({sys.argv[1]}) = 0x{rv:08x}")
+          sys.exit(0 if rv == 0 else 1)
+          PY
+          for dir in dist/*-x86_64-unknown-linux-gnu*; do
+            work=$(mktemp -d)
+            cp "$dir/libcraton_hsm.so" "$dir/libcraton_hsm.sig" "$work/"
+            (cd "$work" && python3 "$RUNNER_TEMP/init.py" "$work/libcraton_hsm.so")
+            tampered=$(mktemp -d)
+            cp "$dir/libcraton_hsm.so" "$dir/libcraton_hsm.sig" "$tampered/"
+            printf '\0' >> "$tampered/libcraton_hsm.so"
+            if (cd "$tampered" && python3 "$RUNNER_TEMP/init.py" "$tampered/libcraton_hsm.so"); then
+              echo "::error::$dir: tampered module initialised — integrity self-test did not run"
+              exit 1
+            fi
+            echo "$dir: integrity self-test verified (good module OK, tampered module rejected)"
+          done
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable branch; version set by `toolchain`
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - name: Publish
-        run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Install cargo-about and cargo-cyclonedx
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-about,cargo-cyclonedx
+
+      - name: Third-party licence notices (A3-12)
+        run: >-
+          cargo about generate --locked --all-features
+          -c .github/release/about.toml .github/release/about.hbs
+          -o THIRD-PARTY-LICENSES.txt
+
+      - name: CycloneDX SBOMs (A3-11)
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --format json --all-features
+          mkdir -p sbom
+          find . -name '*.cdx.json' -not -path './target/*' -not -path './sbom/*' \
+            -exec cp {} sbom/ \;
+          ls -l sbom
+          test -f sbom/craton-hsm.cdx.json
+
+      - name: Deterministic tarballs + SHA256SUMS
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          mkdir -p assets
+          for dir in dist/*/; do
+            name=$(basename "$dir")
+            cp THIRD-PARTY-LICENSES.txt "$dir"
+            mkdir -p "$dir/sbom"
+            cp sbom/*.cdx.json "$dir/sbom/"
+            tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" \
+                --owner=0 --group=0 --numeric-owner \
+                -C dist -cf - "$name" | gzip -9n > "assets/${name}.tar.gz"
+          done
+          for f in sbom/*.cdx.json; do
+            cp "$f" "assets/craton-hsm-${VERSION}-$(basename "$f")"
+          done
+          cp THIRD-PARTY-LICENSES.txt "assets/craton-hsm-${VERSION}-THIRD-PARTY-LICENSES.txt"
+          (cd assets && sha256sum -- * > SHA256SUMS)
+          cat assets/SHA256SUMS
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: assets/
+          if-no-files-found: error
+          retention-days: 5
 
   github-release:
     name: Create GitHub Release
+    needs: package
     runs-on: ubuntu-latest
-    needs: build
     permissions:
-      contents: write
-      id-token: write  # Required for sigstore cosign keyless signing
-      attestations: write  # Required for provenance attestation
+      contents: write      # create the release
+      id-token: write      # Sigstore keyless signing + attestations
+      attestations: write  # build provenance attestation
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
-          path: artifacts
+          egress-policy: audit
 
-      - name: Create tarballs and checksums
-        run: |
-          cd artifacts
-          for dir in craton_hsm-*; do
-            tar czf "${dir}.tar.gz" -C "$dir" .
-            sha256sum "${dir}.tar.gz" >> checksums-sha256.txt
-          done
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: assets
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v3
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
-      - name: Sign release artifacts with cosign (keyless / Sigstore)
+      - name: Sign release assets with cosign (keyless / Sigstore bundles)
         run: |
-          cd artifacts
-          for f in *.tar.gz checksums-sha256.txt; do
-            cosign sign-blob --yes "$f" \
-              --output-signature "${f}.sig" \
-              --output-certificate "${f}.pem"
+          set -euo pipefail
+          cd assets
+          for f in *; do
+            cosign sign-blob --yes --bundle "${f}.sigstore.json" "$f"
           done
 
-      - name: Generate provenance attestation
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-path: |
-            artifacts/*.tar.gz
-            artifacts/checksums-sha256.txt
+          subject-checksums: assets/SHA256SUMS
 
       - name: Create release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            artifacts/*.tar.gz
-            artifacts/checksums-sha256.txt
-            artifacts/*.sig
-            artifacts/*.pem
+            assets/*.tar.gz
+            assets/*.cdx.json
+            assets/*-THIRD-PARTY-LICENSES.txt
+            assets/SHA256SUMS
+            assets/*.sigstore.json
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: [verify-tag, github-release]
+    runs-on: ubuntu-latest
+    # Protected environment with required reviewers (A3-03).
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write  # crates.io trusted publishing (OIDC), no long-lived token
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable branch; version set by `toolchain`
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Obtain short-lived crates.io token (trusted publishing)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish
+        run: cargo publish --locked -p craton-hsm
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

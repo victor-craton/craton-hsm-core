@@ -6,12 +6,15 @@ Thank you for your interest in contributing to Craton HSM! This document covers 
 
 ### Prerequisites
 
-- Rust 1.75+ (install via [rustup](https://rustup.rs/))
+- [rustup](https://rustup.rs/). The toolchain is pinned in
+  `rust-toolchain.toml` (currently 1.94.1) and installed automatically on
+  first use. The minimum supported Rust version (MSRV) is **1.89**
+  (`rust-version` in `Cargo.toml`, checked by the `msrv` CI job).
 - Git
 
 Optional (for full workspace build):
-- protoc 3.x+ (for gRPC daemon)
-- CMake 3.x+ (for aws-lc-rs backend)
+- protoc (for the gRPC daemon; CI pins the version in `ci.yml`)
+- CMake, Clang and Go (for the `awslc-backend` feature)
 
 ### Building
 
@@ -20,10 +23,10 @@ git clone https://github.com/craton-co/craton-hsm-core.git
 cd craton-hsm-core
 
 # Build the core library
-cargo build
+cargo build --locked
 
 # Build the full workspace (requires protoc)
-cargo build --workspace
+cargo build --locked --workspace
 ```
 
 ### Running Tests
@@ -32,16 +35,25 @@ cargo build --workspace
 
 ```bash
 # Full test suite
-cargo test -- --test-threads=1
-
+cargo test --locked -- --test-threads=1
 ```
+
+CI runs every file in `tests/` explicitly (see `.github/workflows/ci.yml`).
+When you add a new integration test file, add it to one of the two lists in
+the `build-and-test` job — the `fmt-check` job fails otherwise.
 
 ### Linting
 
+The same checks CI runs (`correctness` and `suspicious` clippy lints are
+errors; other categories are warnings being cleaned up):
+
 ```bash
-cargo fmt --check
-cargo clippy -- -D warnings
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -A deprecated
+cargo deny --workspace --all-features check      # needs cargo-deny
 ```
+
+Please do not add new clippy warnings in the code you touch.
 
 ## How to Contribute
 
@@ -57,26 +69,26 @@ Open a [GitHub issue](https://github.com/craton-co/craton-hsm-core/issues) with:
 
 ### Feature Requests
 
-Open an issue describing the use case and proposed solution. For PKCS#11 compliance features, reference the relevant section of the PKCS#11 v3.0 specification.
+Open an issue describing the use case and proposed solution. For PKCS#11 compliance features, reference the relevant section of the PKCS#11 specification (the module implements the v2.40 function set plus v3.0 interface discovery).
 
 ### Pull Requests
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b my-feature`)
 3. Make your changes
-4. Ensure all tests pass: `cargo test -- --test-threads=1`
-5. Ensure lints pass: `cargo clippy -- -D warnings && cargo fmt --check`
+4. Ensure all tests pass: `cargo test --locked -- --test-threads=1`
+5. Ensure lints pass (commands in [Linting](#linting))
 6. Commit with a clear message
 7. Push and open a PR against `main`
 
 ### PR Checklist
 
 - [ ] [CLA signed](CLA.md) (the bot will prompt you on your first PR)
-- [ ] Tests pass (`cargo test -- --test-threads=1`)
-- [ ] No clippy warnings (`cargo clippy -- -D warnings`)
-- [ ] Code is formatted (`cargo fmt`)
+- [ ] Tests pass (`cargo test --locked -- --test-threads=1`)
+- [ ] Clippy passes with the CI flags and adds no new warnings
+- [ ] Code is formatted (`cargo fmt --all`)
 - [ ] New functionality has tests
-- [ ] `unsafe` code is documented with a safety comment
+- [ ] Every `unsafe` block has a `// SAFETY:` comment
 - [ ] No key material in logs or debug output (use `[REDACTED]`)
 - [ ] CHANGELOG.md updated (for user-facing changes)
 
@@ -89,8 +101,9 @@ This is a cryptographic module. Extra care is required:
 - **No key bytes in logs**: Use custom `Debug` impls that print `[REDACTED]`
 - **Zeroize on drop**: All key material must use `RawKeyMaterial` (which provides mlock + ZeroizeOnDrop)
 - **Constant-time comparison**: Use `subtle::ConstantTimeEq` for any secret comparison
-- **`catch_unwind`**: All `extern "C"` functions must wrap their body in `catch_unwind`
-- **No `unsafe` in crypto paths**: All `unsafe` code is confined to the ABI layer and mlock
+- **`catch_unwind`**: every `extern "C"` function that dereferences caller pointers or touches module state must wrap its body in `catch_unwind` (functions that only return a constant need not)
+- **Minimise `unsafe`**: `unsafe` code currently exists in the FFI layer (`src/pkcs11_abi/functions.rs`), memory locking (`src/crypto/mlock.rs`), module-path discovery for the integrity test (`src/crypto/integrity.rs`), digest-state zeroization (`src/crypto/digest.rs`) and Windows ACL calls. Do not add more without a strong reason; every block needs a `// SAFETY:` comment, and new `unsafe` in `src/crypto/` needs crypto-reviewer approval
+- **Advisory suppressions**: only in `deny.toml`, with a reason and an `expires YYYY-MM-DD` date no more than 120 days ahead (CI enforces this)
 
 ### Style
 
@@ -125,7 +138,7 @@ The CLA ensures that Craton Software Company has the necessary rights to distrib
 
 ## Why is `Cargo.lock` committed?
 
-Craton HSM ships both as a library (`rlib`) and a shared library (`cdylib`). Since the cdylib is a final build artifact loaded by PKCS#11 consumers, we commit `Cargo.lock` to ensure reproducible builds. This is consistent with the [Cargo FAQ](https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control) recommendation for binary/artifact projects.
+Craton HSM ships both as a library (`rlib`) and a shared library (`cdylib`). Since the cdylib is a final build artifact loaded by PKCS#11 consumers, we commit `Cargo.lock`, and CI and the release workflow build with `--locked` so that the dependency versions that were audited are the ones that ship. This is consistent with the [Cargo FAQ](https://doc.rust-lang.org/cargo/faq.html#why-have-cargolock-in-version-control) recommendation for binary/artifact projects.
 
 ## License
 
