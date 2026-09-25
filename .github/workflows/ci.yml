@@ -195,10 +195,13 @@ jobs:
         include:
           - name: awslc-backend
             flags: --features awslc-backend
+            sign: false
           - name: fips
             flags: --features fips
+            sign: true
           - name: fips only (release flavour)
             flags: --no-default-features --features fips
+            sign: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -214,13 +217,41 @@ jobs:
         with:
           key: features-${{ matrix.name }}
 
+      - name: Ephemeral integrity key (fips builds fail closed without a valid .sig)
+        # `fips` builds refuse to start with the placeholder key or without a
+        # `.sig` sidecar next to the module (A1-05). The test executables are
+        # the "module" here, so they are signed with a throw-away key that is
+        # embedded at build time. Release builds use the real key (release.yml).
+        if: matrix.sign
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl genpkey -algorithm Ed25519 -out "$RUNNER_TEMP/ci-integrity.pem"
+          pub=$(openssl pkey -in "$RUNNER_TEMP/ci-integrity.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          echo "CRATON_HSM_INTEGRITY_PUBLIC_KEY=$pub" >> "$GITHUB_ENV"
+
       - name: Build library, tests, benches and examples
         # aws-lc-fips-sys needs cmake, Go and a C compiler (preinstalled on
         # the ubuntu-24.04 runner image).
         run: cargo build --locked -p craton-hsm ${{ matrix.flags }} --all-targets
 
-      - name: Library unit tests (CASTs, DRBG, AWS-LC differential tests)
-        run: cargo test --locked -p craton-hsm ${{ matrix.flags }} --lib -- --test-threads=4
+      - name: Build (and for fips, sign) the test executables
+        run: |
+          set -euo pipefail
+          cargo test --locked -p craton-hsm ${{ matrix.flags }} \
+            --lib --test fips_approved_mode --test crypto_vectors \
+            --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable' \
+            > "$RUNNER_TEMP/test-executables.txt"
+          cat "$RUNNER_TEMP/test-executables.txt"
+          if [ "${{ matrix.sign }}" = "true" ]; then
+            while read -r exe; do
+              bash tools/sign-integrity.sh "$exe" "$RUNNER_TEMP/ci-integrity.pem"
+            done < "$RUNNER_TEMP/test-executables.txt"
+          fi
+
+      - name: Library unit tests (POST/CASTs, integrity, DRBG, AWS-LC differential tests)
+        run: cargo test --locked -p craton-hsm ${{ matrix.flags }} --lib -- --test-threads=1
 
       - name: Approved-mode ABI tests (serial)
         run: >-
