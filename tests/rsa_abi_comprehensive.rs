@@ -11,6 +11,29 @@ use craton_hsm::pkcs11_abi::functions::*;
 use craton_hsm::pkcs11_abi::types::*;
 use std::ptr;
 
+/// `CK_RSA_PKCS_OAEP_PARAMS` (PKCS#11 requires it for `CKM_RSA_PKCS_OAEP`).
+#[cfg_attr(target_os = "windows", repr(C, packed))]
+#[cfg_attr(not(target_os = "windows"), repr(C))]
+struct CkRsaPkcsOaepParams {
+    hash_alg: CK_ULONG,
+    mgf: CK_ULONG,
+    source: CK_ULONG,
+    p_source_data: *const u8,
+    ul_source_data_len: CK_ULONG,
+}
+
+// SAFETY: the struct only holds a null pointer; it is never dereferenced.
+unsafe impl Sync for CkRsaPkcsOaepParams {}
+
+/// SHA-256 / MGF1-SHA-256, empty label (CKG_MGF1_SHA256 = 2).
+static OAEP_SHA256_PARAMS: CkRsaPkcsOaepParams = CkRsaPkcsOaepParams {
+    hash_alg: CKM_SHA256,
+    mgf: 2,
+    source: 0,
+    p_source_data: std::ptr::null(),
+    ul_source_data_len: 0,
+};
+
 fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
     val.to_ne_bytes().to_vec()
 }
@@ -309,8 +332,8 @@ fn test_rsa_2048_oaep_encrypt_decrypt() {
     // Decrypt via C ABI with private key
     let mut dec_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS_OAEP,
-        p_parameter: ptr::null_mut(),
-        parameter_len: 0,
+        p_parameter: &OAEP_SHA256_PARAMS as *const _ as CK_VOID_PTR,
+        parameter_len: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
     };
     let rv = C_DecryptInit(session, &mut dec_mechanism, priv_key);
     assert_eq!(rv, CKR_OK, "DecryptInit failed: 0x{:08X}", rv);
@@ -483,8 +506,8 @@ fn test_rsa_oaep_wrong_key_decrypt_fails() {
     // Decrypt with priv_B via C ABI -- should fail
     let mut dec_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS_OAEP,
-        p_parameter: ptr::null_mut(),
-        parameter_len: 0,
+        p_parameter: &OAEP_SHA256_PARAMS as *const _ as CK_VOID_PTR,
+        parameter_len: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
     };
     let rv = C_DecryptInit(session, &mut dec_mechanism, priv_b);
     assert_eq!(rv, CKR_OK);
@@ -521,8 +544,8 @@ fn test_rsa_oaep_tampered_ciphertext_fails() {
     // Decrypt via C ABI should fail
     let mut dec_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS_OAEP,
-        p_parameter: ptr::null_mut(),
-        parameter_len: 0,
+        p_parameter: &OAEP_SHA256_PARAMS as *const _ as CK_VOID_PTR,
+        parameter_len: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
     };
     let rv = C_DecryptInit(session, &mut dec_mechanism, priv_key);
     assert_eq!(rv, CKR_OK);
@@ -621,8 +644,8 @@ fn test_rsa_decrypt_null_output_gets_size() {
     // DecryptInit
     let mut dec_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS_OAEP,
-        p_parameter: ptr::null_mut(),
-        parameter_len: 0,
+        p_parameter: &OAEP_SHA256_PARAMS as *const _ as CK_VOID_PTR,
+        parameter_len: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
     };
     let rv = C_DecryptInit(session, &mut dec_mechanism, priv_key);
     assert_eq!(rv, CKR_OK);

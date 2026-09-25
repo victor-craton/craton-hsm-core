@@ -1109,8 +1109,8 @@ fn test_pqc_mechanism_in_mechanism_list() {
         "Mechanism list should include CKM_SLH_DSA_SHA2_256S"
     );
     assert!(
-        mechs.contains(&CKM_HYBRID_ML_DSA_ECDSA),
-        "Mechanism list should include CKM_HYBRID_ML_DSA_ECDSA"
+        !mechs.contains(&CKM_HYBRID_ML_DSA_ECDSA),
+        "CKM_HYBRID_ML_DSA_ECDSA was removed (H2-19) and must not be listed"
     );
 }
 

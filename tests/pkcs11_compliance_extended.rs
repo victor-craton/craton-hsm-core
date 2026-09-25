@@ -36,9 +36,11 @@ fn test_extended_pkcs11_compliance() {
     let mut mech_count: CK_ULONG = 0;
     let rv = C_GetMechanismList(0, ptr::null_mut(), &mut mech_count);
     assert_eq!(rv, CKR_OK);
+    // 39 = full list after removing the hybrid ML-DSA+ECDSA mechanism and the
+    // (not yet parameter-capable) generic CKM_RSA_PKCS_PSS (H2-19 / A2-13).
     assert!(
-        mech_count >= 40,
-        "Should have 40+ mechanisms including PQC, got {}",
+        mech_count >= 39,
+        "Should have 39+ mechanisms including PQC, got {}",
         mech_count
     );
 
@@ -56,8 +58,8 @@ fn test_extended_pkcs11_compliance() {
         "Missing CKM_SLH_DSA_SHA2_128S"
     );
     assert!(
-        mech_list.contains(&CKM_HYBRID_ML_DSA_ECDSA),
-        "Missing CKM_HYBRID_ML_DSA_ECDSA"
+        !mech_list.contains(&CKM_HYBRID_ML_DSA_ECDSA),
+        "CKM_HYBRID_ML_DSA_ECDSA was removed (H2-19) and must not be listed"
     );
 
     // ========================================================================
