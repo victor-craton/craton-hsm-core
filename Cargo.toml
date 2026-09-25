@@ -93,7 +93,10 @@ dashmap = "6"
 # Config and logging
 toml = "1"
 serde = { version = "1", features = ["derive"] }
-tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
+# No compile-time level caps on the library: Cargo feature unification would
+# impose them on every consumer (A3-26). The shipped binaries (daemon, admin
+# CLI) set `max_level_info` / `release_max_level_info` themselves.
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 
 # Randomness
@@ -125,9 +128,10 @@ tempfile = "3"
 hex = "0.4"
 criterion = { version = "0.8", features = ["html_reports"] }
 libloading = "0.9"
-# craton_hsm-awslc: only available with the enterprise repo; see docs/fips-mode-guide.md
-# To run FIPS backend tests locally, clone craton_hsm-enterprise alongside this repo and uncomment:
-# craton_hsm-awslc = { path = "../craton_hsm-enterprise/craton_hsm-awslc" }
+# The AWS-LC backend is in-tree (src/crypto/awslc_backend.rs, feature
+# `awslc-backend`; implied by `fips`). Its tests and the cross-backend
+# differential test run with `cargo test --features awslc-backend`
+# (needs cmake, Go and a C compiler); see docs/fips-mode-guide.md.
 
 [[bench]]
 name = "crypto_bench"

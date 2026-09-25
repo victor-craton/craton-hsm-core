@@ -25,7 +25,8 @@ toml = "1"
 fs2 = "0.4"
 rand = "0.8"
 rpassword = "7"
-tracing = "0.1"
+# Compile-time log level caps belong to the binary, not the library (A3-26).
+tracing = { version = "0.1", features = ["max_level_info", "release_max_level_info"] }
 tracing-subscriber = "0.3"
 zeroize = { version = "1", features = ["derive"] }
 
