@@ -755,16 +755,18 @@ exist; they are not security functions in the FIPS sense:
 |---|---|
 | Constant-time PIN comparison | `subtle::ConstantTimeEq` |
 | Best-effort memory locking and zeroization | see §8.5–8.6 |
-| Hash-chained audit log | unkeyed SHA-256 chain: detects accidental corruption, **not** a capable attacker who can rewrite the file (A1-31) |
+| Hash-chained audit log | keyed HMAC-SHA256 chain with a MAC-protected anchor (H3-10): detects modification, truncation and deletion by a party without the audit key; not a security function in the FIPS sense (A1-31) |
 | Fork detection | the child must call `C_Initialize` again |
 | AES-NI / hardware AES | used when available by the RustCrypto `aes` crate and AWS-LC |
 
 **Known weakness:** RSA private-key operations on the RustCrypto backend
 (`C_Decrypt` with `CKM_RSA_PKCS_OAEP`, all RSA signing) use the `rsa` crate,
 which is affected by the Marvin timing side channel (RUSTSEC-2023-0071) and
-has no fixed release. No blinding-based mitigation is claimed. Use the AWS-LC
-backend for RSA private-key operations where timing attacks are in scope
-(A1-26).
+has no fixed release. Base blinding is applied to every private-key
+operation and there is no PKCS#1 v1.5 decryption service, but the bignum
+arithmetic is not constant time, so no mitigation of the timing side channel
+is claimed. `fips` builds use the AWS-LC backend; use it for RSA private-key
+operations wherever timing attacks are in scope (A1-26, H2-03).
 
 ---
 

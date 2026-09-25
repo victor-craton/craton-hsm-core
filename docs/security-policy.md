@@ -200,8 +200,9 @@ performed on them.
 ## 9. Mitigation of other attacks
 
 None claimed. Voluntary measures: constant-time PIN comparison, best-effort
-memory locking and zeroization, fork detection, and a hash-chained audit log
-(unkeyed; detects accidental corruption only). The RustCrypto `rsa` crate is
-affected by the Marvin timing side channel (RUSTSEC-2023-0071); this is **not**
-mitigated — use the AWS-LC backend for RSA private-key operations where timing
-attacks are in scope.
+memory locking and zeroization, fork detection, and a keyed (HMAC-SHA256)
+hash-chained audit log with a MAC-protected anchor. The RustCrypto `rsa` crate
+is affected by the Marvin timing side channel (RUSTSEC-2023-0071); base
+blinding reduces but does **not** remove the exposure. `fips` builds use the
+AWS-LC backend; use it for RSA private-key operations where timing attacks are
+in scope.

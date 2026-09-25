@@ -8,6 +8,21 @@ This runbook covers day-to-day operations for Craton HSM administrators: token s
 > library directly and is outside the module's cryptographic boundary; it
 > records its administrative actions in the audit log.
 
+### Before using the admin CLI
+
+- Point it at the **same configuration file** as the service it administers
+  (`--config`, default `/etc/craton_hsm/craton_hsm.toml` on Unix). Relative
+  paths in that file are resolved against the file's directory.
+- The token must be **persistent** (`[token] persist_objects = true`, see
+  [configuration-reference.md](configuration-reference.md#persistent-storage)).
+  With an ephemeral token the CLI refuses every command that would have no
+  lasting effect (exit code 5, "not supported in standalone mode").
+- The persistent store and the audit log are **single-writer**: stop the
+  daemon (or any application that has the library loaded with that store)
+  before running mutating commands (`token init`, `pin`, `key`, `backup`,
+  `restore`). The CLI fails instead of waiting if the store is locked.
+- Exit codes are listed at the end of `craton-hsm-admin --help`.
+
 ## Token Initialization
 
 ### First-time setup
@@ -50,7 +65,7 @@ craton-hsm-admin token init --label "Production HSM"
 | Minimum length | 8 | `security.pin_min_length` |
 | Maximum length | 64 | `security.pin_max_length` |
 | Composition | at least 3 distinct characters; ASCII PINs need at least 2 character classes (lower, upper, digit, other) | not configurable |
-| Lockout threshold | 10 consecutive failed attempts | `security.max_failed_logins` |
+| Lockout threshold | 5 consecutive failed attempts (User and SO PIN separately, per slot; persisted) | `security.max_failed_logins` |
 | Back-off | exponential after each failure, 100 ms doubling to at most 5 s | not configurable |
 | Hash algorithm | PBKDF2-HMAC-SHA256 | not configurable |
 | Hash iterations | 600,000 | `security.pbkdf2_iterations` |
@@ -87,9 +102,12 @@ craton-hsm-admin pin reset
 2. The SO sets a new User PIN: `craton-hsm-admin pin reset` (or `C_InitPIN` from any PKCS#11 tool)
 3. Communicate the new PIN to the user through a secure channel
 
-A locked **SO** PIN cannot be reset through the PKCS#11 API. The token's
-persistent storage must be removed by the system administrator (destroying
-all of its keys) and the token re-initialised.
+A locked **SO** PIN cannot be reset through the PKCS#11 API, and it also
+blocks `C_InitToken` (SO-PIN guesses through InitToken count toward the SO
+lockout). Recovery is out of band: with the service stopped, an operator with
+file-system access removes that slot's persistent store (`storage_path`),
+which destroys all of its keys, and initialises the token again. Restore keys
+from a backup afterwards.
 
 ## Key Management
 
@@ -147,6 +165,29 @@ Set lifecycle dates at key creation:
 5. **Audit key operations**: check audit log for unexpected create/destroy events
 6. **Back up before deletion**: export public key before destroying key pair
 
+## Backup and Restore
+
+Backups are encrypted with a key derived from a passphrase you are prompted
+for (PBKDF2, iteration count from `security.pbkdf2_iterations`, stored in the
+authenticated header). They contain the token objects of the slot; by
+default **non-extractable keys are not exported**. A backup is bound to the
+token's random identity, and every backup ID can be restored only once
+(replay guard `.craton_hsm_replay_guard` in the store directory).
+
+```bash
+# Create (SO login; refuses to overwrite unless --force)
+craton-hsm-admin backup --output /secure/backups/hsm-2026-09-25.rhbk
+
+# Check a backup without restoring it (nothing is consumed)
+craton-hsm-admin restore --input /secure/backups/hsm-2026-09-25.rhbk --verify-only
+
+# Restore (SO login; objects get fresh handles)
+craton-hsm-admin restore --input /secure/backups/hsm-2026-09-25.rhbk
+```
+
+Store backup files and passphrases separately. Older (v1) backup files are
+rejected.
+
 ## Audit Log
 
 ### View audit entries
@@ -166,99 +207,138 @@ craton-hsm-admin audit export-syslog
 
 ### Audit log structure
 
-Each entry contains:
+The log (`audit.log_path`) is NDJSON; each entry contains:
+- **seq**: monotonic sequence number
 - **timestamp**: Unix epoch (seconds)
 - **session_handle**: which session performed the operation
-- **operation**: what was done (Login, GenerateKey, Sign, etc.)
-- **key_id**: which key was involved (if applicable)
-- **result**: Success or Failure with CK_RV code
-- **previous_hash**: SHA-256 of the prior entry (tamper detection)
+- **operation**: what was done (Login, GenerateKey, Sign, InitToken, ...)
+- **key_id**: the key involved, if any (the daemon and admin CLI prefix the
+  client identity / admin action here)
+- **result**: Success or Failure with the CK_RV code
+- **previous_hash**: chain value of the previous entry
 
 ### Integrity verification
 
-The audit log uses chained SHA-256 hashes. Each entry's `previous_hash` equals `SHA-256(previous_entry)`. A broken chain means the log was modified or corrupted. The chain is **unkeyed**: someone who can rewrite the whole file can also recompute the chain, so it detects accidental corruption and partial edits, not a capable attacker with write access. Forward the log to a separate, append-only system (SIEM) if you need stronger guarantees.
+The log is a **keyed** chain: `H_n = HMAC-SHA256(K, H_{n-1} || entry_n)` with
+the key `K` in `audit.key_path` (default `<log_path>.key`, mode 0600, never
+written to the log). A MAC-protected anchor file `<log_path>.anchor` records
+the last sequence number and chain value, so truncation or deletion is
+detected. The module verifies the chain at start-up and refuses to start on a
+broken chain unless `audit.allow_start_with_broken_chain = true`.
 
-To verify integrity programmatically:
-1. Read all entries in order
-2. For each entry after the first, compute `SHA-256(entry[n-1])`
-3. Compare with `entry[n].previous_hash`
-4. Any mismatch indicates tampering
+- Verify offline with `craton-hsm-admin audit verify-chain` (needs read
+  access to the key file; run it where the key is available, not next to a
+  running writer).
+- Keep the key file readable only by the service account and the auditor who
+  verifies; anyone with both the key and write access to the log can
+  recompute the chain. Forward the events to an off-host append-only system
+  (syslog/SIEM) for stronger guarantees.
+- Rotated generations (`<log_path>.1`, ...) are chained to each other and are
+  verified oldest to newest.
 
 ## Daemon Operations
 
 ### Start the daemon
 
 ```bash
-# The configuration file path is the first argument (default: ./craton_hsm.toml).
-# The file must exist and contain a [daemon] section; a missing or invalid
-# configuration is fatal.
-craton-hsm-daemon /etc/craton_hsm/craton_hsm.toml
+# The configuration file path is the first argument (default: craton_hsm.toml
+# in the working directory; /etc/craton-hsm/craton_hsm.toml in the container).
+# The file must exist, be owned by the service user or root, and must not be
+# group/world-writable. Unknown keys are fatal.
+craton-hsm-daemon /etc/craton-hsm/craton_hsm.toml
 ```
+
+Start-up order: strict config parse and validation → self-tests (POST) →
+open the (persistent) core → TLS set-up → listen. `SIGTERM`/`SIGINT` stop
+accepting connections, drain in-flight requests, close sessions and flush the
+audit log before exiting.
 
 ### Configuration (`[daemon]` section)
 
+Minimal production configuration (TLS 1.3 + mutual TLS; all keys are
+documented in [configuration-reference.md](configuration-reference.md#daemon-grpc-server-craton-hsm-daemon-only)):
+
 ```toml
+[token]
+persist_objects = true
+storage_path = "/var/lib/craton-hsm/store"
+
+[audit]
+log_path = "/var/log/craton-hsm/audit.jsonl"
+
 [daemon]
-bind = "127.0.0.1:5696"     # Listen address
-tls_cert = "tls.crt"        # PEM certificate path
-tls_key = "tls.key"          # PEM private key path
+bind = "0.0.0.0:5696"
+tls_cert = "/etc/craton-hsm-tls/tls.crt"
+tls_key = "/etc/craton-hsm-tls/tls.key"
+tls_client_ca = "/etc/craton-hsm-client-ca/ca.crt"
+# Administrator certificates (InitToken, InitPin, SO login):
+admin_client_cert_sha256 = ["<sha256 of the admin client certificate DER>"]
+health_bind = "127.0.0.1:5697"
 ```
 
 ### Health check
 
 ```bash
-# gRPC health probe (requires grpcurl)
-grpcurl -plaintext localhost:5696 craton_hsm.HsmService/GetTokenInfo
+# Plaintext grpc.health.v1 endpoint on health_bind (serves nothing else)
+grpc_health_probe -addr=127.0.0.1:5697
+grpcurl -plaintext 127.0.0.1:5697 grpc.health.v1.Health/Check
 
-# TCP connectivity check
-nc -z localhost 5696
+# The service port itself requires a client certificate
+grpcurl -cacert ca.crt -cert client.crt -key client.key \
+  hsm.example.com:5696 craton_hsm.HsmService/GetTokenInfo
 ```
 
-### TLS setup
+### TLS setup (testing)
 
 ```bash
-# Generate self-signed certificate (for testing)
+# Server certificate
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
-  -keyout tls.key -out tls.crt -days 365 -nodes \
-  -subj "/CN=craton_hsm"
-
-# Reference in config
-# [daemon]
-# tls_cert = "tls.crt"
-# tls_key = "tls.key"
+  -keyout tls.key -out tls.crt -days 365 -nodes -subj "/CN=craton-hsm"
+# Client CA + a client certificate signed by it (one per client identity)
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -keyout client-ca.key -out client-ca.crt -days 365 -nodes -subj "/CN=craton-hsm-client-ca"
+# Fingerprint for admin_client_cert_sha256
+openssl x509 -in admin.crt -outform DER | sha256sum
 ```
+
+Each client certificate is a separate identity: sessions, login state, session
+and object quotas are per identity. Revoke client certificates with
+`tls_client_crl` (reloaded every `tls_client_crl_reload_secs`).
 
 ### Daemon as systemd service
 
 ```ini
-# /etc/systemd/system/craton_hsm.service
+# /etc/systemd/system/craton-hsm.service
 [Unit]
 Description=Craton HSM gRPC Daemon
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/craton-hsm-daemon /etc/craton_hsm/craton_hsm.toml
-User=craton_hsm
-Group=craton_hsm
+ExecStart=/usr/local/bin/craton-hsm-daemon /etc/craton-hsm/craton_hsm.toml
+User=craton-hsm
+Group=craton-hsm
 Restart=on-failure
 RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=45
 
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/craton_hsm
+ReadWritePaths=/var/lib/craton-hsm /var/log/craton-hsm
 PrivateTmp=true
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl enable --now craton_hsm
-sudo systemctl status craton_hsm
-journalctl -u craton_hsm -f
+sudo systemctl enable --now craton-hsm
+sudo systemctl status craton-hsm
+journalctl -u craton-hsm -f
 ```
 
 ## Kubernetes Operations
@@ -269,15 +349,24 @@ journalctl -u craton_hsm -f
 # Chart: deploy/helm/craton-hsm (TLS and mTLS are required by default; see install.md)
 helm install my-hsm deploy/helm/craton-hsm/ \
   --set image.repository=registry.example.com/craton-hsm \
-  --set image.tag=0.9.1 \
+  --set image.digest=sha256:<digest> \
   --set tls.secretName=craton-hsm-tls \
-  --set tls.clientCaSecretName=craton-hsm-client-ca
+  --set tls.clientCaSecretName=craton-hsm-client-ca \
+  --set 'tls.adminCertSha256={<admin cert sha256>}'
 ```
+
+The chart renders a single `craton_hsm.toml` (ConfigMap, mounted at
+`/etc/craton-hsm/craton_hsm.toml`); the `[security]` values are part of it
+(there is no separate `security.toml`). The working directory is the PVC at
+`/data` (relative `storage_path`/`log_path` live there); the pod runs as UID
+65532; the plaintext health port is 5697 (`daemon.healthPort`); the
+deployment strategy is `Recreate` because the store is single-writer. CI
+checks that the rendered configuration is accepted by the daemon.
 
 ### Monitor
 
 ```bash
-# Logs
+# Logs (JSON by default in the chart: daemon.logFormat)
 kubectl logs -l app.kubernetes.io/instance=my-hsm -f
 
 # Status
@@ -288,7 +377,7 @@ kubectl get pods -l app.kubernetes.io/instance=my-hsm
 
 ```bash
 helm upgrade my-hsm deploy/helm/craton-hsm/ \
-  --reuse-values --set image.tag=0.9.1
+  --reuse-values --set image.digest=sha256:<new digest>
 ```
 
 ## Troubleshooting
@@ -359,15 +448,19 @@ craton-hsm-admin token init --label "My Token"
 
 ### Object store empty after restart
 
-**Expected behavior** in in-memory mode: state is volatile.
-
-**Solution**: Enable the encrypted persistent store:
-```toml
-[token]
-storage_path = "/var/lib/craton_hsm/store"
-```
-
-Or re-import keys after restart.
+**Causes**:
+1. The token is ephemeral (`persist_objects = false`, the default): all
+   state is lost when the process exits. Enable persistence:
+   ```toml
+   [token]
+   persist_objects = true
+   storage_path = "/var/lib/craton-hsm/store"
+   ```
+2. Persistent token, but nobody has logged in yet: token objects of a slot
+   (also public ones) are loaded only after the first successful login on
+   that slot after start-up (the slot's storage key is wrapped under the PINs).
+3. Records that are not listed in the authenticated manifest are quarantined
+   (logged as "replay/resurrection"); investigate before doing anything else.
 
 ### Slow RSA key generation
 

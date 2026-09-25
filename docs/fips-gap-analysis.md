@@ -64,7 +64,7 @@ Status legend used below:
 | A1-28 | Integrity check reads the file on disk | Documented | Accepted at Level 1; operator guidance added. |
 | A1-29 | POST/PBKDF2 performance | Open (observation) | Fixed-key CASTs removed key generation from POST. |
 | A1-30 | Key-type / mechanism consistency | Open (verify) | `*Init` should return `CKR_KEY_TYPE_INCONSISTENT` for wrong key types. |
-| A1-31 | Audit log is not a security function | Documented | Unkeyed hash chain; not the IG 2.4.C indicator. |
+| A1-31 | Audit log is not a security function | Documented | Keyed HMAC chain + anchor since the H3-10 fix; still not a security function and not the IG 2.4.C indicator. |
 | A1-32 | Stale line citations | Documented | FIPS documents cite files/functions only. |
 
 ## Pre-release post-quantum dependencies (A3-07)

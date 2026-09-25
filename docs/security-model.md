@@ -17,12 +17,12 @@ Craton HSM is a software HSM. Unlike hardware HSMs, it does not protect against 
 | Database corruption from concurrent processes | Exclusive file lock on persistent store |
 | Unauthorized key extraction | `CKA_SENSITIVE=true` and `CKA_EXTRACTABLE=false` enforced |
 | Unauthorized operations | Session state machine enforces login before private object access |
-| Accidental audit-log corruption | Chained SHA-256 hashes; a partial modification breaks the chain. The chain is unkeyed: an attacker who can rewrite the whole file can recompute it (forward logs to an append-only store) |
+| Audit-log tampering | Keyed chain (HMAC-SHA256 under a separate 0600 key file) with a MAC-protected anchor: modification, reordering, truncation or deletion is detected at the next start; the module refuses to start on a broken chain unless explicitly allowed. Whoever can read the key file *and* write the log can still rewrite it, so forward events off-host |
 | Panic-induced undefined behavior at FFI boundary | `catch_unwind` wraps every `extern "C"` export that touches module state |
 | Use of weak algorithms | `allow_weak_rsa=false`, `allow_sha1_signing=false` by default |
 | Corrupted or tampered library | Ed25519 software-integrity self-test at `C_Initialize` (in force for signed release builds; mandatory in `fips` builds) plus distribution signatures (cosign, SHA256SUMS, provenance). The known-answer self-tests detect broken algorithms, not tampering |
 | AES-GCM nonce reuse (per key) | Module-generated random IVs in approved mode, per-key invocation limit (2^32, SP 800-38D §8.3) and rejection of recently seen (key, IV) pairs; CTR counter-range overlap detection |
-| Config path traversal | UNC path, `..` traversal, and absolute path rejection in config validation |
+| Configuration planting / path traversal | Configuration is never read from the working directory; config files must be owned by the user or root and not group/world-writable; `..`, UNC, symlink, sensitive-directory and system-directory paths are rejected |
 | Key misuse after expiry | SP 800-57 key lifecycle: date-based deactivation blocks signing/encryption |
 
 ### Out of scope (threats requiring hardware HSM or OS hardening)
@@ -45,7 +45,7 @@ Craton HSM implements software-level side-channel countermeasures for timing att
 |-----------|---------------|---------------------|
 | PIN comparison | PBKDF2-HMAC-SHA256 + `subtle::ConstantTimeEq` | Timing-safe: compare time independent of correct/incorrect PIN bytes |
 | HMAC verification | `subtle::ConstantTimeEq` on HMAC tags | Prevents byte-by-byte timing leakage of MAC values |
-| RSA private-key operations (RustCrypto) | `rsa` crate | **Not constant time.** Affected by the Marvin attack (RUSTSEC-2023-0071, no fixed release). Blinding does not prevent it. Decryption with `CKM_RSA_PKCS_OAEP` and all RSA signing on this backend are exposed. |
+| RSA private-key operations (RustCrypto) | `rsa` crate | **Not constant time.** Affected by the Marvin attack (RUSTSEC-2023-0071, no fixed release; expected in `rsa` 0.10). Every private-key operation is base-blinded (`sign_with_rng`, `Pss::new_blinded`, `decrypt_blinded`) and there is no PKCS#1 v1.5 decryption service, which reduces but does **not** remove the exposure: the bignum arithmetic still leaks timing. `CKM_RSA_PKCS_OAEP` decryption and RSA signing on this backend remain exposed. `fips` builds use AWS-LC instead. |
 | RSA signing (aws-lc-rs) | AWS-LC (BoringSSL fork) | Constant-time bignum arithmetic, same as Google/AWS production |
 | ECDSA signing (RustCrypto) | `p256`/`p384` crates | Field arithmetic in constant time (no branching on secret scalars) |
 | ECDSA signing (aws-lc-rs) | AWS-LC P-256/P-384 | Assembly-optimized constant-time point multiplication |
@@ -126,27 +126,39 @@ Rules: `CKA_VALUE` is never returned in plaintext when `CKA_SENSITIVE=true` **or
 | Iterations | 600,000 (configurable) |
 | Salt | 32 bytes from the module DRBG (per PIN, stored with the hash) |
 | Comparison | `subtle::ConstantTimeEq` |
-| Lockout | Configurable threshold (default: 10 failures), exponential back-off, lockout counters persisted per slot; `C_InitToken` SO-PIN checks count as well |
+| Lockout | Configurable threshold (default: 5 failures), exponential back-off, lockout counters persisted per slot; `C_InitToken` SO-PIN checks count as well |
 | PIN storage | Hash stored in `Zeroizing<Vec<u8>>` (zeroed on drop) |
 | PIN in transit | Never logged; CLI uses `rpassword` (no terminal echo) |
 
 ## Audit Integrity
 
-The audit log is append-only with chained SHA-256 hashes:
+The audit log (`audit.log_path`, NDJSON) is a **keyed** hash chain
+(src/audit/log.rs, H3-10/H3-11):
 
 ```
-Entry[0].previous_hash = [0; 32]  (genesis)
-Entry[1].previous_hash = SHA-256(serialize(Entry[0]))
-Entry[2].previous_hash = SHA-256(serialize(Entry[1]))
-...
+H_n = HMAC-SHA256(K, H_{n-1} || serialize(payload_n))    payload_n includes seq = n
 ```
 
-Properties:
-- **Tamper-evident (limited)**: modifying, deleting, or reordering an entry breaks the hash chain, unless the whole remainder of the file is rewritten — the chain is not keyed, so it is not proof against an attacker with write access
-- **Synchronous**: event is recorded before the PKCS#11 function returns (not fire-and-forget)
-- **Non-repudiable**: each entry includes session handle, operation type, timestamp, and result
+- `K` is a random 256-bit key in a separate file (`audit.key_path`, default
+  `<log_path>.key`, mode 0600) that is never written to the log.
+- After every durable write a MAC-protected **anchor** (`<log_path>.anchor`:
+  last sequence number and chain value) is replaced atomically, so tail
+  truncation and deletion are detected on the next start.
+- Rotation starts each generation with a `LogRotated` event chained to the
+  previous generation.
+- At start-up the chain is verified; on failure the module refuses to start
+  unless `audit.allow_start_with_broken_chain = true`.
+- Events go through a bounded queue with group-commit `fsync`;
+  authentication and key-management events are recorded synchronously
+  (`record_sync`). With `audit.fail_closed = true` (default in `fips`
+  builds) a write failure makes further audited operations fail with
+  `CKR_DEVICE_ERROR`.
+- A single process may write a given log (`<log_path>.lock`).
 
-Audited operations: Initialize, Finalize, Login, Logout, GenerateKey, GenerateKeyPair, Sign, Verify, Encrypt, Decrypt, CreateObject, DestroyObject, GenerateRandom.
+Limits: whoever can read the key file **and** write the log can recompute the
+chain, and restoring an older copy of log + anchor + key is a rollback that
+needs an external monotonic counter to detect. Forward events off-host
+(syslog/SIEM) for stronger guarantees.
 
 ## Algorithm Selection
 
@@ -169,6 +181,22 @@ Audited operations: Initialize, Finalize, Login, Logout, GenerateKey, GenerateKe
 | PQC signing | ML-DSA-44/65/87 | FIPS 204 |
 | PQC KEM | ML-KEM-512/768/1024 | FIPS 203 |
 | PQC signing | SLH-DSA (SHA2-128s, SHA2-256s) | FIPS 205 |
+
+### Pre-release post-quantum crates
+
+ML-KEM, ML-DSA and SLH-DSA are implemented by the RustCrypto `ml-kem`
+(`=0.3.0-rc.0`), `ml-dsa` (`=0.1.0-rc.7`) and `slh-dsa` (`=0.2.0-rc.4`)
+crates. These are **release candidates without an independent audit
+history**; they pull pre-release versions of `sha2`, `sha3`, `hmac` and the
+RustCrypto trait crates that are not covered by the module's own SHA/HMAC
+known-answer tests. Risks: undiscovered correctness or side-channel defects,
+and API/encoding changes between release candidates (keys and signatures
+created with one version might not be accepted by the next). Mitigations:
+exact version pins (`=`) in `Cargo.toml`, Dependabot/cargo-deny review of
+every bump, PQC CASTs in the POST (ML-KEM, ML-DSA; SLH-DSA verification only) and
+pairwise consistency tests at key generation, vendor-defined mechanism
+codes, and PQC is **blocked** in approved-only mode and in `fips` builds.
+Set `algorithms.enable_pqc = false` if these risks are not acceptable.
 
 ### Restricted by default
 

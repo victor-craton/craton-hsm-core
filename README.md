@@ -40,7 +40,7 @@ v2.40 functions that return `CKR_FUNCTION_NOT_SUPPORTED`.
 - **Power-on self-tests**: Ed25519 software-integrity test plus known-answer self-tests (see [FIPS 140-3 document §9](docs/fips-140-3-certification.md#9-self-tests) for the exact list); pairwise-consistency tests on every key-pair generation
 - **SP 800-57 key lifecycle**: date-based activation/deactivation
 - **Memory hardening**: mlock/VirtualLock for key material (best effort), zeroize-on-drop, constant-time PIN comparison
-- **Audit log** with a chained SHA-256 hash (tamper-*evident* against accidental corruption; the chain is unkeyed)
+- **Audit log** with a keyed HMAC-SHA256 hash chain and a MAC-protected anchor (tamper-evident against anyone without the audit key; forward it off-host for stronger guarantees)
 - **Crypto backends**: RustCrypto (default) and an in-tree AWS-LC backend (`awslc-backend` feature, Apache-2.0, in this repository); not every service is routed through AWS-LC yet
 - **Encrypted persistent storage** of token objects (`persist_objects = true`): redb + per-object AES-256-GCM
 - **gRPC daemon** (`craton-hsm-daemon`) with mutual TLS and per-client authorization — *outside* the module's cryptographic boundary

@@ -24,7 +24,7 @@ Evaluate your threat model and compliance requirements before deploying.
 | Language | Rust (memory-safe) | C++ |
 | Post-quantum crypto | ML-KEM, ML-DSA, SLH-DSA | No |
 | FIPS-style self-tests | Integrity test + known-answer self-tests at `C_Initialize` | No |
-| Audit logging | Chained SHA-256 (unkeyed; detects accidental corruption) | No |
+| Audit logging | Keyed HMAC-SHA256 chain with a MAC-protected anchor (detects modification, truncation and deletion; forward off-host against an attacker holding the key) | No |
 | Key lifecycle (SP 800-57) | Yes | No |
 | HMAC_DRBG (SP 800-90A) | Yes (prediction resistance) | No |
 | Memory hardening | mlock + ZeroizeOnDrop | Partial |
