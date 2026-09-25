@@ -5,6 +5,11 @@ edition = "2021"
 description = "Admin CLI for Craton HSM — token init, key management, PIN operations"
 license = "Apache-2.0"
 repository = "https://github.com/craton-co/craton-hsm-core"
+# Same MSRV as the craton-hsm library it links (A3-08).
+rust-version = "1.89"
+# Distributed only as release binaries / container image, never on crates.io
+# (also required by cargo-deny `wildcards = "deny"` for the path dependency).
+publish = false
 
 [[bin]]
 name = "craton-hsm-admin"

@@ -88,14 +88,12 @@ skip = [
     # the stable generation. Owner: crypto maintainers; revisit when the PQC
     # crates reach a stable release.
     { crate = "block-buffer", reason = "RustCrypto generation split (PQC release candidates)" },
-    { crate = "cipher", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "const-oid", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "cpufeatures", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "crypto-common", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "der", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "digest", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "hmac", reason = "RustCrypto generation split (slh-dsa uses hmac 0.13 pre-release)" },
-    { crate = "inout", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "keccak", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "pkcs8", reason = "RustCrypto generation split (PQC release candidates)" },
     { crate = "sha2", reason = "RustCrypto generation split (slh-dsa uses sha2 0.11 pre-release, not covered by the POST KATs)" },
