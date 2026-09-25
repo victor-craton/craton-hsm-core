@@ -10,11 +10,19 @@
 //! pipeline and never distributed — an attacker who modifies the binary
 //! cannot forge a valid signature without it.
 //!
-//! In development mode (no `.sig` sidecar file present), the check logs a
-//! warning and passes.  If the file is present but the signature doesn't
-//! verify, the check fails and the module enters error state.
+//! Behaviour (A1-05, H2-16, H2-17):
+//! - `fips` builds fail closed: the check fails when the module path cannot
+//!   be resolved, when the `.sig` sidecar is missing, or when the embedded
+//!   public key is the all-zero placeholder.
+//! - Non-FIPS builds treat a missing `.sig` sidecar or the placeholder key as
+//!   "integrity test disabled" (logged); a present `.sig` must verify.
+//! - Verification is strict (`verify_strict`), rejecting small-order keys.
+//! - The SHA-256 and Ed25519 algorithms used here pass their known-answer
+//!   tests in POST *before* this check runs (IG 10.3.B).
+//! - The file on disk is hashed (not the mapped image); see the handoff for
+//!   the TOCTOU note (A1-28).
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
@@ -85,11 +93,22 @@ pub fn check_integrity() -> Result<(), String> {
     let module_path = match get_module_path() {
         Some(p) => p,
         None => {
-            // Cannot determine module path — skip integrity check.
-            // This is normal for test binaries, statically linked executables,
-            // and some platform configurations.
-            tracing::warn!("Software integrity test: could not determine module path — skipping");
-            return Ok(());
+            // FIPS builds must fail closed: an unresolvable module path
+            // would otherwise silently disable the integrity test (A1-05).
+            #[cfg(feature = "fips")]
+            {
+                return Err(
+                    "Software integrity test: could not determine module path — required in FIPS mode"
+                        .to_string(),
+                );
+            }
+            #[cfg(not(feature = "fips"))]
+            {
+                tracing::warn!(
+                    "Software integrity test: could not determine module path — skipping (non-FIPS build)"
+                );
+                return Ok(());
+            }
         }
     };
 
@@ -142,12 +161,15 @@ pub fn check_integrity() -> Result<(), String> {
         }
     }
 
-    // In non-FIPS mode, warn if placeholder key is used with a .sig file present
+    // Non-FIPS build with the placeholder key: the all-zero key decodes to
+    // a small-order point, so "verifying" against it gives no security.
+    // Treat integrity checking as disabled instead (H2-16).
     if is_placeholder_key() {
         tracing::warn!(
-            "Software integrity test: INTEGRITY_PUBLIC_KEY is the all-zeros placeholder. \
-             Signature verification will fail. Set CRATON_HSM_INTEGRITY_PUBLIC_KEY at build time."
+            "Software integrity test DISABLED: INTEGRITY_PUBLIC_KEY is the all-zeros placeholder. \
+             Set CRATON_HSM_INTEGRITY_PUBLIC_KEY at build time to enable it."
         );
+        return Ok(());
     }
 
     // Read the expected signature from the sidecar file (hex-encoded, 128 chars = 64 bytes)
@@ -211,7 +233,7 @@ pub fn check_integrity() -> Result<(), String> {
 
     // Verify the Ed25519 signature over the SHA-256 hash.
     // Ed25519 verification is inherently constant-time.
-    if verifying_key.verify(&hash, &signature).is_err() {
+    if verifying_key.is_weak() || verifying_key.verify_strict(&hash, &signature).is_err() {
         tracing::error!(
             "Software integrity test FAILED: Ed25519 signature verification failed for {}",
             module_path.display()
@@ -372,7 +394,7 @@ mod tests {
 
     #[test]
     fn test_signature_verification_roundtrip() {
-        use ed25519_dalek::{Signer, SigningKey};
+        use ed25519_dalek::{Signer, SigningKey, Verifier};
 
         // Generate a test keypair
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);

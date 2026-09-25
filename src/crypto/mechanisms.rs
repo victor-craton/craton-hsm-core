@@ -4,7 +4,14 @@ use crate::config::config::AlgorithmConfig;
 use crate::pkcs11_abi::constants::*;
 use crate::pkcs11_abi::types::{CK_MECHANISM_TYPE, CK_RV};
 
-/// Check if a mechanism is supported for signing
+/// Check if a mechanism is supported for signing.
+///
+/// Not supported (and therefore not advertised):
+/// - `CKM_RSA_PKCS_PSS` (generic PSS): requires `CK_RSA_PKCS_PSS_PARAMS` to be
+///   carried from `C_SignInit` to `C_Sign`, which the session layer does not
+///   yet store (A2-13; see handoff). The hash-specific PSS mechanisms work.
+/// - `CKM_HYBRID_ML_DSA_ECDSA`: removed (H2-19 / A2-18) — it used the public
+///   `CKA_EC_POINT` as the ECDSA private key and had no domain separation.
 pub fn is_sign_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
     matches!(
         mechanism,
@@ -12,7 +19,6 @@ pub fn is_sign_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_SHA256_RSA_PKCS
             | CKM_SHA384_RSA_PKCS
             | CKM_SHA512_RSA_PKCS
-            | CKM_RSA_PKCS_PSS
             | CKM_SHA256_RSA_PKCS_PSS
             | CKM_SHA384_RSA_PKCS_PSS
             | CKM_SHA512_RSA_PKCS_PSS
@@ -26,7 +32,6 @@ pub fn is_sign_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_ML_DSA_87
             | CKM_SLH_DSA_SHA2_128S
             | CKM_SLH_DSA_SHA2_256S
-            | CKM_HYBRID_ML_DSA_ECDSA
     )
 }
 
@@ -99,7 +104,6 @@ pub fn supported_mechanisms() -> Vec<CK_MECHANISM_TYPE> {
         CKM_SHA256_RSA_PKCS,
         CKM_SHA384_RSA_PKCS,
         CKM_SHA512_RSA_PKCS,
-        CKM_RSA_PKCS_PSS,
         CKM_SHA256_RSA_PKCS_PSS,
         CKM_SHA384_RSA_PKCS_PSS,
         CKM_SHA512_RSA_PKCS_PSS,
@@ -139,7 +143,6 @@ pub fn supported_mechanisms() -> Vec<CK_MECHANISM_TYPE> {
         CKM_ML_DSA_87,
         CKM_SLH_DSA_SHA2_128S,
         CKM_SLH_DSA_SHA2_256S,
-        CKM_HYBRID_ML_DSA_ECDSA,
     ]
 }
 
@@ -149,18 +152,25 @@ pub fn supported_mechanisms() -> Vec<CK_MECHANISM_TYPE> {
 
 /// Classify whether a mechanism is FIPS 140-3 approved.
 ///
-/// FIPS-approved mechanisms (per NIST SP 800-131A Rev 2, FIPS 186-5, SP 800-38D, etc.):
-/// - RSA (≥2048): key generation, PKCS#1v15, PSS, OAEP
+/// This is the *algorithm-level* table (H2-21). Whether a service is actually
+/// approved also depends on the implementation: FIPS builds must use the
+/// validated AWS-LC backend (`fips` feature), see `self_test::run_backend_post`.
+///
+/// FIPS-approved mechanisms (SP 800-131A Rev 2, FIPS 186-5, SP 800-38A/D/F,
+/// SP 800-56A r3):
+/// - RSA (>= 2048): key generation, PKCS#1 v1.5, PSS, OAEP
 /// - ECDSA (P-256, P-384): key generation, sign, verify
-/// - AES (128/192/256): GCM, CBC, CTR, key wrap
+/// - EdDSA (Ed25519, pure): FIPS 186-5
+/// - AES (128/192/256 — AES-128 is approved): GCM, CBC, CTR, KW, KWP
 /// - SHA-2 family: SHA-256, SHA-384, SHA-512
 /// - SHA-3 family: SHA3-256, SHA3-384, SHA3-512
-/// - ECDH (P-256, P-384): key derivation (SP 800-56A)
+/// - ECDH (P-256, P-384) with an approved KDF (SP 800-56A/56C). `CKD_NULL`
+///   is refused separately in approved mode.
 ///
-/// NOT FIPS-approved:
-/// - EdDSA / Ed25519 (not in FIPS 186-5 as of this implementation)
+/// NOT FIPS-approved here:
 /// - SHA-1 (deprecated for signing per SP 800-131A)
-/// - All PQC mechanisms (vendor-defined, not yet FIPS-standardized for CMVP)
+/// - All PQC mechanisms (vendor-defined codes; the implementations have no
+///   CAVP/CMVP validation)
 pub fn is_fips_approved(mechanism: CK_MECHANISM_TYPE) -> bool {
     matches!(
         mechanism,
@@ -181,6 +191,8 @@ pub fn is_fips_approved(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_ECDSA_SHA256
             | CKM_ECDSA_SHA384
             | CKM_ECDSA_SHA512
+            // EdDSA — FIPS 186-5 (Ed25519)
+            | CKM_EDDSA
             // ECDH — SP 800-56A
             | CKM_ECDH1_DERIVE
             | CKM_ECDH1_COFACTOR_DERIVE
@@ -201,7 +213,7 @@ pub fn is_fips_approved(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_SHA3_384
             | CKM_SHA3_512
     )
-    // NOT approved: CKM_EDDSA, CKM_SHA_1 (for signing), CKM_ML_KEM_*, CKM_ML_DSA_*,
+    // NOT approved: CKM_SHA_1 (for signing), CKM_ML_KEM_*, CKM_ML_DSA_*,
     //               CKM_SLH_DSA_*, CKM_HYBRID_ML_DSA_ECDSA
 }
 
