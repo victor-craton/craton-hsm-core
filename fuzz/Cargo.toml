@@ -7,10 +7,16 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+# Fuzz targets: see fuzz_targets/common.rs for the shared token provisioning.
+# CI (.github/workflows/ci.yml, job `fuzz-smoke`) builds all targets and runs
+# each one for 60 seconds on every pull request.
+
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.craton_hsm]
+# The package is `craton-hsm` (hyphen); the library crate is still imported as
+# `craton_hsm` in Rust code (A3-13).
+[dependencies.craton-hsm]
 path = ".."
 
 # Prevent this from interfering with workspaces

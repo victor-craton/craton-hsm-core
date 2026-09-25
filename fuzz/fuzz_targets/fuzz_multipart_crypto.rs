@@ -12,38 +12,16 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use std::sync::Once;
 
 use craton_hsm::pkcs11_abi::constants::*;
 use craton_hsm::pkcs11_abi::functions;
 use craton_hsm::pkcs11_abi::types::*;
 
-static INIT: Once = Once::new();
-
-fn ensure_init() {
-    INIT.call_once(|| {
-        let rv = functions::C_Initialize(std::ptr::null_mut());
-        assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
-    });
-}
+mod common;
+use common::ensure_init;
 
 fn cleanup_sessions() {
     let _ = functions::C_CloseAllSessions(0);
-}
-
-/// FIX #3: Extract a fuzz-derived PIN from data.
-fn extract_fuzz_pin(data: &[u8]) -> (*mut u8, CK_ULONG, usize) {
-    if data.is_empty() {
-        return (std::ptr::null_mut(), 0, 0);
-    }
-    let pin_len = (data[0] as usize) % 65;
-    let consumed = 1 + pin_len.min(data.len() - 1);
-    let actual_pin = &data[1..consumed];
-    if actual_pin.is_empty() {
-        (std::ptr::null_mut(), 0, consumed)
-    } else {
-        (actual_pin.as_ptr() as *mut u8, actual_pin.len() as CK_ULONG, consumed)
-    }
 }
 
 fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
@@ -58,8 +36,12 @@ fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
     if rv != CKR_OK {
         return None;
     }
-    let pin = b"1234";
-    let _ = functions::C_Login(session, CKU_USER, pin.as_ptr() as *mut _, pin.len() as CK_ULONG);
+    // Log in with the policy-compliant User PIN provisioned by
+    // `common::ensure_init` (A3-13).
+    if common::login_user(session) != CKR_OK {
+        let _ = functions::C_CloseSession(session);
+        return None;
+    }
     Some(session)
 }
 
