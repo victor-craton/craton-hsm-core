@@ -19,6 +19,7 @@ pub fn is_sign_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
             | CKM_SHA256_RSA_PKCS
             | CKM_SHA384_RSA_PKCS
             | CKM_SHA512_RSA_PKCS
+            | CKM_RSA_PKCS_PSS
             | CKM_SHA256_RSA_PKCS_PSS
             | CKM_SHA384_RSA_PKCS_PSS
             | CKM_SHA512_RSA_PKCS_PSS
@@ -104,6 +105,8 @@ pub fn supported_mechanisms() -> Vec<CK_MECHANISM_TYPE> {
         CKM_SHA256_RSA_PKCS,
         CKM_SHA384_RSA_PKCS,
         CKM_SHA512_RSA_PKCS,
+        // Generic PSS with CK_RSA_PKCS_PSS_PARAMS (A2-13), single-part over a digest.
+        CKM_RSA_PKCS_PSS,
         CKM_SHA256_RSA_PKCS_PSS,
         CKM_SHA384_RSA_PKCS_PSS,
         CKM_SHA512_RSA_PKCS_PSS,
