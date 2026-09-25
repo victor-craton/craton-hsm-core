@@ -1,15 +1,31 @@
+# Docker build-context ignore file. Docker only reads .dockerignore from the
+# ROOT of the build context (the repository root for deploy/Dockerfile), so
+# this file must stay here (H4-23). The Dockerfile additionally COPYs only
+# the directories it needs.
+
 # ── Secrets & credentials ─────────────────────────────────────────────────
 .env
+**/.env
 .env.*
+**/.env.*
 *.pem
+**/*.pem
 *.key
+**/*.key
 *.p12
+**/*.p12
 *.pfx
+**/*.pfx
 *.jks
+**/*.jks
 credentials*
+**/credentials*
 secrets*
+**/secrets*
 *secret*
+**/*secret*
 *password*
+**/*password*
 
 # ── Test fixtures that may contain key material ──────────────────────────
 tests/fixtures/
@@ -22,12 +38,18 @@ test_data/
 
 # ── Build artifacts ───────────────────────────────────────────────────────
 target/
+target-*/
+fuzz/target/
 **/*.o
 **/*.so
 **/*.dylib
 
-# ── Deploy / CI (not needed inside image) ─────────────────────────────────
+# ── Deploy / CI / client tooling (not needed inside image) ────────────────
 deploy/
+kreya/
+.claude/
+*.krenv
+**/*.krenv
 .github/
 .gitlab-ci.yml
 Jenkinsfile
@@ -38,11 +60,15 @@ docker-compose*.yml
 .idea/
 .vscode/
 *.swp
+**/*.swp
 *.swo
+**/*.swo
 *~
+**/*~
 
 # ── Documentation & misc ─────────────────────────────────────────────────
 *.md
+**/*.md
 LICENSE*
 CHANGELOG*
 docs/

@@ -1,11 +1,44 @@
 image:
   repository: craton-hsm
-  tag: "0.9.1"
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  # Recommended: pin the image by digest ("sha256:..."). When set, the digest
+  # is used instead of the tag.
+  digest: ""
   pullPolicy: IfNotPresent
 
 daemon:
+  # gRPC (TLS) listen address inside the pod.
   bind: "0.0.0.0:5696"
+  # Plaintext listener serving ONLY grpc.health.v1 for kubelet probes (which
+  # cannot present client certificates). Reveals nothing but serving status.
+  healthPort: 5697
   replicas: 1
+  # Log level (RUST_LOG) and format ("text" or "json" for SIEM ingestion).
+  logLevel: info
+  logFormat: json
+
+  # Budget: maxInflightRequests x maxRequestBytes (+ responses) must fit well
+  # inside the memory limit below (defaults: 32 x 1 MiB in / 4 MiB out).
+  limits:
+    maxRequestBytes: 1048576
+    maxResponseBytes: 4194304
+    maxRandomLength: 65536
+    maxDigestLength: 1047552
+    maxConnections: 128
+    maxConnectionsPerIp: 32
+    maxInflightRequests: 32
+    maxConcurrentStreams: 16
+    requestTimeoutSecs: 30
+    handshakeTimeoutSecs: 10
+    connectionIdleTimeoutSecs: 300
+    maxSessionsPerClient: 16
+    sessionIdleTimeoutSecs: 900
+    maxObjectsPerClient: 1024
+    maxLoginAttempts: 5
+    loginCooldownSecs: 60
+    # 0 = number of CPUs visible to the container.
+    maxBlockingTasks: 2
 
   resources:
     requests:
@@ -17,58 +50,75 @@ daemon:
       memory: 256Mi
       ephemeral-storage: 256Mi
 
+  # Must exceed requestTimeoutSecs so in-flight requests drain and the audit
+  # log is flushed on SIGTERM.
+  terminationGracePeriodSeconds: 45
+
 tls:
   enabled: true
-  # Provide cert and key via a Kubernetes secret
+  # Secret (kubernetes.io/tls) with tls.crt / tls.key for the server.
   secretName: craton-hsm-tls
-  # Client CA secret for mutual TLS (mTLS). REQUIRED for production.
-  # The secret must contain a ca.crt key with the PEM-encoded CA certificate.
-  # Without mTLS, any pod with network access can call the HSM unauthenticated.
-  # Deliberately empty — you MUST set this to your client CA secret name.
-  # The chart will fail to render if this is empty and disableMtls is false.
+  # Secret with a ca.crt key: the CA that issues client certificates (mTLS).
+  # REQUIRED unless disableMtls=true — the chart fails to render otherwise.
   clientCaSecretName: ""
-  # Set to true to explicitly acknowledge running without TLS (plaintext gRPC).
-  # NOT recommended for any environment. Without this, the chart fails to render
-  # when tls.enabled=false, preventing accidental plaintext deployments.
+  # Optional Secret holding CRL files (PEM or DER) for client certificate
+  # revocation, one per key listed in clientCrlKeys. Expired CRLs are
+  # rejected; the files are re-read every crlReloadSecs.
+  clientCrlSecretName: ""
+  clientCrlKeys:
+    - ca.crl
+  crlReloadSecs: 300
+  # SHA-256 fingerprints (hex) of administrator client certificates. Only these
+  # may run InitToken, log in as SO and set the User PIN. Fingerprints are not
+  # secrets.  openssl x509 -in admin.crt -outform DER | sha256sum
+  adminCertSha256: []
+  # Plaintext is only possible on a loopback bind address (the daemon refuses
+  # otherwise), which is not reachable through the Service.
   acceptInsecure: false
-  # Set to true to explicitly disable mTLS (NOT recommended for production).
-  # Forces you to acknowledge the security implications of running without
-  # client certificate authentication.
+  # Explicitly accept TLS clients without certificates (NOT recommended).
   disableMtls: false
 
 config:
-  # Token configuration
   tokenLabel: "Craton HSM Token"
-  storagePath: "/data/craton-hsm_store"
+  # Relative to the working directory /data (the core rejects absolute paths).
+  storagePath: "craton_hsm_store"
+  auditLogPath: "craton_hsm_audit.jsonl"
   maxSessions: 100
   maxRwSessions: 10
 
-  # Security settings
+  # [security] — rendered into the main configuration file.
   pinMinLength: 8
   pinMaxLength: 64
   maxFailedLogins: 5
 
-  # Algorithm settings
-  enablePqc: true
+  # [algorithms]
+  fipsApprovedOnly: false
+  # Post-quantum mechanisms are not FIPS-approved; opt in explicitly.
+  enablePqc: false
 
 service:
-  # Only ClusterIP is allowed by default. NodePort/LoadBalancer would expose
-  # the HSM outside the cluster, which is almost never appropriate.
+  # Only ClusterIP is allowed. NodePort/LoadBalancer would expose the HSM
+  # outside the cluster.
   type: ClusterIP
   port: 5696
 
 persistence:
+  # NOTE: key material survives restarts only when the HSM core provides a
+  # persistent object store; until then the daemon refuses token objects.
   enabled: true
   storageClass: ""
   size: 1Gi
 
 networkPolicy:
-  # Allow egress to external OCSP/CRL endpoints for TLS certificate revocation
-  # checks. Only enable if your CA certificates require online revocation validation.
-  allowOcsp: false
+  # Clients must carry this label. mTLS — not the label — is the trust
+  # boundary: anyone able to create pods in the namespace can set a label.
+  clientPodLabels:
+    craton-hsm-client: "true"
+  # Optional namespaceSelector for cross-namespace clients (empty = same
+  # namespace only).
+  clientNamespaceSelector: {}
 
 audit:
-  # Must be set to true to explicitly acknowledge running without audit logging
-  # when persistence is disabled. Without this, the chart will fail to render,
-  # preventing silent loss of audit trails.
+  # Must be true to acknowledge running without a persistent audit trail when
+  # persistence is disabled.
   acceptNoLogging: false
