@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
 use super::Ctx;
-use crate::admin_core::{open_core, Role};
+use crate::admin_core::{open_core, Role, SLOT};
 use crate::error::{CliError, CliResult};
 use crate::output;
 use craton_hsm::audit::log::AuditOperation;
 use craton_hsm::pkcs11_abi::constants::*;
 use craton_hsm::pkcs11_abi::types::{CK_ATTRIBUTE_TYPE, CK_OBJECT_HANDLE, CK_ULONG};
+use craton_hsm::store::attributes::ObjectContext;
 use craton_hsm::store::object::StoredObject;
 use zeroize::Zeroizing;
 
@@ -39,11 +40,12 @@ pub fn list(ctx: &Ctx, role: Role) -> CliResult {
     let session = core.login(role)?;
 
     let store = core.hsm().object_store();
-    let handles = store.find_objects_for_slot(&[], role == Role::User, Some(0));
+    // Private objects are visible to the User role only (H5-14).
+    let handles = store.find_objects_for_slot(&[], role == Role::User, Some(SLOT));
 
     let mut rows = Vec::new();
     for handle in &handles {
-        if let Ok(obj_lock) = store.get_object(*handle) {
+        if let Ok(obj_lock) = store.get_object_in_slot(*handle, SLOT) {
             let obj = obj_lock.read();
             rows.push((
                 obj.handle,
@@ -143,14 +145,20 @@ pub fn import(ctx: &Ctx, file: &std::path::Path, label: &str, _kt: ImportKeyType
         (CKA_VALUE_LEN, ck_ulong_bytes(value_len)),
         (CKA_VALUE, key_data.to_vec()),
     ]);
-    let res = core.hsm().object_store().create_object(&template);
+    // C_CreateObject semantics through the core (attribute policy, slot
+    // and session binding, persisted before it becomes visible).
+    let res = core.hsm().object_store().create_object_in(
+        &template,
+        &ObjectContext::new(SLOT, session.session(), false),
+    );
     drop(template);
     drop(key_data);
 
     core.record(
+        session.session(),
         AuditOperation::CreateObject,
         res.as_ref().map(|_| ()),
-        "key-import",
+        &format!("key-import:{}", res.as_ref().map_or(0, |h| *h)),
     )?;
     let handle = res.map_err(|e| CliError::General(format!("Failed to import key: {e}")))?;
     drop(session);
@@ -190,7 +198,7 @@ pub fn delete(ctx: &Ctx, handle: u64, role: Role) -> CliResult {
         let obj_lock = core
             .hsm()
             .object_store()
-            .get_object(handle)
+            .get_object_in_slot(handle, SLOT)
             .map_err(|_| CliError::Usage(format!("Object handle {handle} not found.")))?;
         let obj = obj_lock.read();
         (
@@ -211,11 +219,12 @@ pub fn delete(ctx: &Ctx, handle: u64, role: Role) -> CliResult {
         ctx.yes,
     )?;
 
-    let res = core.hsm().object_store().destroy_object(handle);
+    let res = core.hsm().object_store().destroy_object_in(handle, SLOT);
     core.record(
+        session.session(),
         AuditOperation::DestroyObject,
         res.as_ref().map(|_| ()),
-        "key-delete",
+        &format!("key-delete:{handle}"),
     )?;
     res.map_err(|e| CliError::General(format!("Failed to destroy object: {e}")))?;
     drop(session);

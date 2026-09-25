@@ -6,10 +6,12 @@
 
 use super::Ctx;
 use crate::admin_core::{open_core, Role};
-use crate::audit_file::{self, AuditFileError};
 use crate::error::{CliError, CliResult};
 use crate::output;
-use craton_hsm::audit::log::{AuditEvent, AuditOperation};
+use craton_hsm::audit::log::{
+    format_rfc3339, format_syslog, operation_name, AuditEvent, AuditFileSummary, AuditLog,
+    AuditOperation, AuditResult, AuditVerifyError,
+};
 use std::collections::VecDeque;
 use std::io::Write;
 
@@ -34,16 +36,37 @@ impl ExportFormat {
     }
 }
 
-fn file_error(e: AuditFileError) -> CliError {
+fn file_error(e: AuditVerifyError) -> CliError {
     match e {
-        AuditFileError::Io(..) => CliError::Io(format!("Audit log: {e}")),
-        AuditFileError::Missing(_) | AuditFileError::Tampered { .. } => {
-            CliError::Integrity(format!("Audit log: {e}"))
+        AuditVerifyError::Io(..) | AuditVerifyError::Visitor(_) => {
+            CliError::Io(format!("Audit log: {e}"))
         }
+        AuditVerifyError::Missing(_)
+        | AuditVerifyError::Tampered { .. }
+        | AuditVerifyError::KeyUnavailable(..) => CliError::Integrity(format!("Audit log: {e}")),
     }
 }
 
-/// Authenticate the SO for commands that reveal audit contents.
+/// Verify the persisted log (all generations) with the core's offline
+/// verifier (keyed chain, sequence numbers, rotation links, anchor; H5-03)
+/// and visit each verified event.
+fn verify(
+    cfg: &crate::config::LoadedConfig,
+    visit: impl FnMut(&AuditEvent) -> Result<(), String>,
+) -> Result<AuditFileSummary, AuditVerifyError> {
+    AuditLog::verify_files(&cfg.config.audit.log_path, &cfg.audit_key_path(), visit)
+}
+
+fn result_string(r: &AuditResult) -> String {
+    match r {
+        AuditResult::Success => "SUCCESS".to_string(),
+        AuditResult::Failure(rv) => format!("FAILURE(0x{rv:08X})"),
+    }
+}
+
+/// Authenticate the SO for commands that reveal audit contents, record the
+/// access (`AuditExport`, H5-20) and release the core (and its locks) before
+/// the log files are read.
 fn so_gate(
     ctx: &Ctx,
     operation: &str,
@@ -60,24 +83,32 @@ fn so_gate(
             ctx.yes,
         )?;
     }
-    core.record(AuditOperation::GetAttributeValue, Ok(()), operation)?;
+    core.record(
+        session.session(),
+        AuditOperation::AuditExport,
+        Ok(()),
+        operation,
+    )?;
     drop(session);
+    drop(core);
     Ok(cfg)
 }
 
 /// Verify the persisted audit log hash chain. Exits non-zero (6) when the
-/// chain is broken, a generation is missing, or the log does not exist.
-/// Does not reveal entry contents, so no SO login is required.
+/// chain is broken, a generation is missing, the key is unavailable or the
+/// log does not exist. Does not reveal entry contents and takes no lock, so
+/// it can run while the daemon is serving (read access to the log and its
+/// key file is required).
 pub fn verify_chain(ctx: &Ctx) -> CliResult {
     let cfg = ctx.load_config()?;
-    let path = &cfg.config.audit.log_path;
-    match audit_file::verify_and_visit(path, |_| Ok(())) {
+    match verify(&cfg, |_| Ok(())) {
         Ok(summary) => {
             if ctx.json {
                 let value = serde_json::json!({
                     "status": "valid",
                     "entries_verified": summary.entries,
                     "anchored_at_genesis": summary.anchored_at_genesis,
+                    "tail_anchor_present": summary.anchor_present,
                     "files": summary.files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                 });
                 println!("{}", serde_json::to_string_pretty(&value)?);
@@ -94,8 +125,14 @@ pub fn verify_chain(ctx: &Ctx) -> CliResult {
             if !summary.anchored_at_genesis {
                 eprintln!(
                     "Warning: the oldest available generation does not start at the genesis \
-                     hash (older generations were rotated away); the start of the chain \
+                     value (older generations were rotated away); the start of the chain \
                      cannot be anchored."
+                );
+            }
+            if !summary.anchor_present {
+                eprintln!(
+                    "Warning: no tail anchor found; truncation of the newest events cannot be \
+                     ruled out."
                 );
             }
             Ok(())
@@ -103,26 +140,29 @@ pub fn verify_chain(ctx: &Ctx) -> CliResult {
         Err(e) => {
             if ctx.json {
                 let value = match &e {
-                    AuditFileError::Tampered {
-                        file,
-                        line,
-                        index,
-                        reason,
-                    } => serde_json::json!({
+                    AuditVerifyError::Tampered { file, line, reason } => serde_json::json!({
                         "status": "broken",
                         "file": file.display().to_string(),
                         "line": line,
-                        "broken_at_index": index,
                         "reason": reason,
                     }),
-                    AuditFileError::Missing(p) => serde_json::json!({
+                    AuditVerifyError::Missing(p) => serde_json::json!({
                         "status": "missing",
                         "file": p.display().to_string(),
                     }),
-                    AuditFileError::Io(p, err) => serde_json::json!({
+                    AuditVerifyError::KeyUnavailable(p, reason) => serde_json::json!({
+                        "status": "key-unavailable",
+                        "file": p.display().to_string(),
+                        "reason": reason,
+                    }),
+                    AuditVerifyError::Io(p, err) => serde_json::json!({
                         "status": "error",
                         "file": p.display().to_string(),
-                        "reason": err.to_string(),
+                        "reason": err,
+                    }),
+                    AuditVerifyError::Visitor(err) => serde_json::json!({
+                        "status": "error",
+                        "reason": err,
                     }),
                 };
                 println!("{}", serde_json::to_string_pretty(&value)?);
@@ -136,11 +176,12 @@ pub fn verify_chain(ctx: &Ctx) -> CliResult {
 
 fn entry_json(e: &AuditEvent) -> serde_json::Value {
     serde_json::json!({
-        "timestamp": audit_file::format_rfc3339(e.timestamp),
+        "seq": e.seq,
+        "timestamp": format_rfc3339(e.timestamp),
         "session_handle": e.session_handle,
         "operation": e.operation,
         "key_id": e.key_id,
-        "result": audit_file::result_string(&e.result),
+        "result": result_string(&e.result),
     })
 }
 
@@ -154,7 +195,7 @@ pub fn dump(ctx: &Ctx, last: usize) -> CliResult {
     let cfg = so_gate(ctx, "audit dump", None)?;
 
     let mut ring: VecDeque<AuditEvent> = VecDeque::with_capacity(last.min(1024));
-    let summary = audit_file::verify_and_visit(&cfg.config.audit.log_path, |e| {
+    let summary = verify(&cfg, |e| {
         if ring.len() == last {
             ring.pop_front();
         }
@@ -178,10 +219,10 @@ pub fn dump(ctx: &Ctx, last: usize) -> CliResult {
             output::ObjectTable::new(vec!["Timestamp", "Session", "Operation", "Result", "Key"]);
         for e in &ring {
             table.add_row(vec![
-                audit_file::format_rfc3339(e.timestamp),
+                format_rfc3339(e.timestamp),
                 e.session_handle.to_string(),
-                audit_file::operation_name(&e.operation),
-                audit_file::result_string(&e.result),
+                operation_name(&e.operation).to_string(),
+                result_string(&e.result),
                 e.key_id.clone().unwrap_or_else(|| "-".into()),
             ]);
         }
@@ -206,25 +247,28 @@ pub fn export(ctx: &Ctx, format: ExportFormat) -> CliResult {
     if format == ExportFormat::Json {
         out.write_all(b"[")?;
     }
-    let res = audit_file::verify_and_visit(&cfg.config.audit.log_path, |e| {
-        match format {
-            ExportFormat::Json => {
-                if !first {
-                    out.write_all(b",")?;
+    let res = verify(&cfg, |e| {
+        let r: std::io::Result<()> = (|| {
+            match format {
+                ExportFormat::Json => {
+                    if !first {
+                        out.write_all(b",")?;
+                    }
+                    out.write_all(b"\n  ")?;
+                    serde_json::to_writer(&mut out, e).map_err(std::io::Error::other)?;
                 }
-                out.write_all(b"\n  ")?;
-                serde_json::to_writer(&mut out, e).map_err(std::io::Error::other)?;
+                ExportFormat::Ndjson => {
+                    serde_json::to_writer(&mut out, e).map_err(std::io::Error::other)?;
+                    out.write_all(b"\n")?;
+                }
+                ExportFormat::Syslog => {
+                    writeln!(out, "{}", format_syslog(e))?;
+                }
             }
-            ExportFormat::Ndjson => {
-                serde_json::to_writer(&mut out, e).map_err(std::io::Error::other)?;
-                out.write_all(b"\n")?;
-            }
-            ExportFormat::Syslog => {
-                writeln!(out, "{}", audit_file::syslog_line(e))?;
-            }
-        }
+            Ok(())
+        })();
         first = false;
-        Ok(())
+        r.map_err(|e| e.to_string())
     });
     if res.is_ok() && format == ExportFormat::Json {
         out.write_all(b"\n]\n")?;

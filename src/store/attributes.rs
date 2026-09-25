@@ -8,11 +8,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::crypto::encrypt::{KeyStateSink, PersistedKeyUsage};
 use crate::error::{HsmError, HsmResult};
 use crate::pkcs11_abi::constants::*;
 use crate::pkcs11_abi::types::*;
 use crate::session::handle::ObjectHandleAllocator;
-use crate::crypto::encrypt::{KeyStateSink, PersistedKeyUsage};
 use crate::store::encrypted_store::{new_store_key, EncryptedStore, RecordInput};
 use crate::store::key_material::RawKeyMaterial;
 use crate::store::object::{
@@ -266,7 +266,12 @@ impl ObjectStore {
 
     /// Attach the durable usage-state sink of a token AES key and restore
     /// its persisted state into the crypto layer's tracker.
-    fn register_key_usage(&self, obj: &StoredObject, store_key: &str, persisted: PersistedKeyUsage) {
+    fn register_key_usage(
+        &self,
+        obj: &StoredObject,
+        store_key: &str,
+        persisted: PersistedKeyUsage,
+    ) {
         let (store, km) = match (&self.persist_store, obj.key_material.as_ref()) {
             (Some(store), Some(km)) if tracks_key_usage(obj) => (store, km),
             _ => return,

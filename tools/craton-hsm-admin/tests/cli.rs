@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
-//! End-to-end tests of the admin CLI binary, focused on negative paths.
-//! No test reaches a PIN prompt: stdin is closed and every case must fail
-//! (or succeed) before any secret is requested.
+//! End-to-end tests of the admin CLI binary.
+//!
+//! Negative paths run with stdin closed: every case must fail (or succeed)
+//! before any secret is requested. Persistence round trips use a persistent
+//! token (`token.persist_objects = true`) and feed PINs/passphrases through
+//! `--secrets-from-stdin` (never argv/env).
 
 use craton_hsm::audit::log::{AuditLog, AuditOperation, AuditResult};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const EXIT_USAGE: i32 = 2;
+const EXIT_AUTH: i32 = 4;
+const EXIT_BACKUP_REJECTED: i32 = 9;
 const EXIT_CONFIG: i32 = 3;
 const EXIT_REFUSED: i32 = 5;
 const EXIT_INTEGRITY: i32 = 6;
@@ -19,15 +24,31 @@ struct Env {
     config: PathBuf,
 }
 
+const SO_PIN: &str = "Adm1n-So#4821";
+const USER_PIN: &str = "Us3r-Adm#7390";
+const PASSPHRASE: &str = "Backup-Passphrase-2026!";
+
 impl Env {
+    /// Ephemeral token (`persist_objects = false`).
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("craton_hsm.toml");
-        std::fs::write(
-            &config,
+        Self::with_config(
             "[token]\nstorage_path = \"store\"\n[audit]\nlog_path = \"audit.jsonl\"\n",
         )
-        .unwrap();
+    }
+
+    /// Persistent token with a fast (but valid) PBKDF2 work factor.
+    fn persistent() -> Self {
+        Self::with_config(
+            "[token]\nstorage_path = \"store\"\npersist_objects = true\n\
+             [security]\npbkdf2_iterations = 100000\n\
+             [audit]\nlog_path = \"audit.jsonl\"\n",
+        )
+    }
+
+    fn with_config(body: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("craton_hsm.toml");
+        std::fs::write(&config, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -47,6 +68,67 @@ impl Env {
             self.dir.path(),
             &[&["--config", self.config.to_str().unwrap()], args].concat(),
         )
+    }
+
+    /// Run with `--yes --secrets-from-stdin`, feeding `secrets` (one per line).
+    fn run_secrets(&self, secrets: &[&str], args: &[&str]) -> Output {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_craton-hsm-admin"))
+            .args(["--config", self.config.to_str().unwrap()])
+            .args(["--yes", "--secrets-from-stdin"])
+            .args(args)
+            .current_dir(self.dir.path())
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            for s in secrets {
+                writeln!(stdin, "{s}").unwrap();
+            }
+        }
+        child.wait_with_output().unwrap()
+    }
+
+    /// Initialise the token and the User PIN.
+    fn provision(&self) {
+        let o = self.run_secrets(&[SO_PIN, SO_PIN], &["token", "init", "--label", "CliTest"]);
+        assert_eq!(code(&o), 0, "{}", stderr(&o));
+        let o = self.run_secrets(&[SO_PIN, USER_PIN, USER_PIN], &["pin", "reset"]);
+        assert_eq!(code(&o), 0, "{}", stderr(&o));
+    }
+
+    fn list_keys(&self) -> Vec<serde_json::Value> {
+        let o = self.run_secrets(&[USER_PIN], &["--json", "key", "list"]);
+        assert_eq!(code(&o), 0, "{}", stderr(&o));
+        serde_json::from_slice::<Vec<serde_json::Value>>(&o.stdout).unwrap()
+    }
+
+    fn import_key(&self, label: &str) -> u64 {
+        let key = self.path(&format!("{label}.key"));
+        std::fs::write(&key, [0x5a; 32]).unwrap();
+        let o = self.run_secrets(
+            &[USER_PIN],
+            &[
+                "key",
+                "import",
+                "--file",
+                key.to_str().unwrap(),
+                "--label",
+                label,
+                "--type",
+                "aes",
+            ],
+        );
+        assert_eq!(code(&o), 0, "{}", stderr(&o));
+        let keys = self.list_keys();
+        keys.iter()
+            .find(|k| k["label"] == label)
+            .and_then(|k| k["handle"].as_u64())
+            .expect("imported key listed")
     }
 }
 
@@ -115,21 +197,13 @@ fn insecure_config_permissions_are_rejected() {
 }
 
 #[test]
-fn token_init_refused_and_lockout_state_untouched() {
+fn token_init_refused_for_ephemeral_token() {
     let env = Env::new();
-    let lockout = env.path("store/lockout_state.json");
-    let original = br#"{"failed_user_logins":7,"failed_so_logins":9,"user_pin_locked":true,"so_pin_locked":true}"#;
-    std::fs::write(&lockout, original).unwrap();
-
     let o = env.run(&["token", "init", "--label", "Victim"]);
     assert_eq!(code(&o), EXIT_REFUSED, "{}", stderr(&o));
-    assert!(stderr(&o).contains("standalone mode"));
-    // H5-01 regression: the persisted lockout state must survive.
-    assert_eq!(std::fs::read(&lockout).unwrap(), original);
-
+    assert!(stderr(&o).contains("ephemeral"), "{}", stderr(&o));
     let o = env.run(&["--yes", "token", "init", "--label", "Victim"]);
     assert_eq!(code(&o), EXIT_REFUSED);
-    assert_eq!(std::fs::read(&lockout).unwrap(), original);
 }
 
 #[test]
@@ -151,14 +225,12 @@ fn backup_refused_and_writes_nothing() {
 }
 
 #[test]
-fn restore_refused_and_replay_guard_not_created() {
+fn restore_refused_for_ephemeral_token() {
     let env = Env::new();
     let input = env.path("in.rhbk");
     std::fs::write(&input, b"RHBK-not-really").unwrap();
     let o = env.run(&["restore", "--input", input.to_str().unwrap()]);
     assert_eq!(code(&o), EXIT_REFUSED, "{}", stderr(&o));
-    assert!(!env.path("store/.craton_hsm_replay_guard").exists());
-    assert!(!env.path(".craton_hsm_replay_guard").exists());
 }
 
 #[test]
@@ -171,7 +243,7 @@ fn restore_missing_or_special_input_is_io_error() {
 }
 
 #[test]
-fn key_and_pin_mutations_are_refused() {
+fn key_and_pin_mutations_are_refused_for_ephemeral_token() {
     let env = Env::new();
     let key = env.path("aes.key");
     std::fs::write(&key, [7u8; 32]).unwrap();
@@ -260,4 +332,189 @@ fn status_reports_ephemeral_state_and_tamper() {
         "{}",
         stderr(&o)
     );
+}
+
+// ── Persistent token: real round trips (H5-02) ─────────────────────────────
+
+#[test]
+fn init_then_login_state_persists() {
+    let env = Env::persistent();
+    let o = env.run(&["--json", "status"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["state_source"], "persistent");
+    assert_eq!(v["token_initialized"], false);
+
+    // A weak new SO PIN is rejected by the core PIN policy before anything
+    // is written.
+    let o = env.run_secrets(
+        &["sopin123", "sopin123"],
+        &["token", "init", "--label", "T"],
+    );
+    assert_eq!(code(&o), EXIT_USAGE, "{}", stderr(&o));
+
+    env.provision();
+    let o = env.run(&["--json", "status"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["token_initialized"], true, "initialisation must persist");
+    assert!(env.list_keys().is_empty());
+
+    // Wrong User PIN: authentication error (and no output).
+    let o = env.run_secrets(
+        &["Wrong-Pin#000", "Wrong-Pin#001", "Wrong-Pin#002"],
+        &["key", "list"],
+    );
+    assert_eq!(code(&o), EXIT_AUTH, "{}", stderr(&o));
+    // The right PIN still works (3 failures < 5 lockout threshold, but the
+    // failures were counted persistently: one more good login resets them).
+    assert!(env.list_keys().is_empty());
+
+    // PIN change round trip.
+    let new_pin = "N3w-User#5512";
+    let o = env.run_secrets(&[USER_PIN, new_pin, new_pin], &["pin", "change"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let o = env.run_secrets(&[new_pin], &["--json", "key", "list"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+}
+
+#[test]
+fn key_import_list_delete_round_trip() {
+    let env = Env::persistent();
+    env.provision();
+    let h = env.import_key("aes-one");
+    let keys = env.list_keys();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["sensitive"], true);
+    assert_eq!(keys[0]["extractable"], false);
+    // The SO does not see private (user) objects.
+    let o = env.run_secrets(&[SO_PIN], &["--json", "key", "list", "--role", "so"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let so_view: Vec<serde_json::Value> = serde_json::from_slice(&o.stdout).unwrap();
+    assert!(so_view.is_empty());
+    // Private objects can only be deleted by the User.
+    let hs = h.to_string();
+    let o = env.run_secrets(
+        &[SO_PIN],
+        &["key", "delete", "--handle", &hs, "--role", "so"],
+    );
+    assert_eq!(code(&o), EXIT_REFUSED, "{}", stderr(&o));
+    let o = env.run_secrets(
+        &[USER_PIN],
+        &["key", "delete", "--handle", &hs, "--role", "user"],
+    );
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(env.list_keys().is_empty());
+}
+
+#[test]
+fn backup_restore_round_trip_and_replay() {
+    let env = Env::persistent();
+    env.provision();
+    let h = env.import_key("aes-backup");
+    let out = env.path("token.rhbk");
+    let outs = out.to_str().unwrap();
+
+    // Non-extractable keys are not exported by default (A1-17).
+    let o = env.run_secrets(&[SO_PIN], &["backup", "--output", outs]);
+    assert_eq!(code(&o), EXIT_REFUSED, "{}", stderr(&o));
+    assert!(!out.exists());
+
+    let o = env.run_secrets(
+        &[SO_PIN, PASSPHRASE, PASSPHRASE],
+        &["backup", "--output", outs, "--include-non-extractable"],
+    );
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "backup must be private");
+    }
+
+    // Verify-only does not consume the backup.
+    let o = env.run_secrets(
+        &[SO_PIN, PASSPHRASE],
+        &["restore", "--input", outs, "--verify-only"],
+    );
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+
+    let hs = h.to_string();
+    let o = env.run_secrets(
+        &[USER_PIN],
+        &["key", "delete", "--handle", &hs, "--role", "user"],
+    );
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(env.list_keys().is_empty());
+
+    // Wrong passphrase: rejected, nothing restored, backup not consumed.
+    let o = env.run_secrets(
+        &[SO_PIN, "Wrong-Passphrase-2026!"],
+        &["restore", "--input", outs],
+    );
+    assert_eq!(code(&o), EXIT_BACKUP_REJECTED, "{}", stderr(&o));
+    assert!(env.list_keys().is_empty());
+
+    let o = env.run_secrets(&[SO_PIN, PASSPHRASE], &["restore", "--input", outs]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let keys = env.list_keys();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["label"], "aes-backup");
+    assert_ne!(
+        keys[0]["handle"].as_u64(),
+        Some(h),
+        "fresh handle on restore"
+    );
+
+    // Replay of the same backup is rejected (H5-04/H5-06), with a distinct reason.
+    let o = env.run_secrets(&[SO_PIN, PASSPHRASE], &["restore", "--input", outs]);
+    assert_eq!(code(&o), EXIT_BACKUP_REJECTED, "{}", stderr(&o));
+    assert!(stderr(&o).contains("already restored"), "{}", stderr(&o));
+    assert_eq!(env.list_keys().len(), 1);
+
+    // Every administrative action is in a valid chain, including the new
+    // backup event types (H5-20).
+    let o = env.run(&["audit", "verify-chain"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let o = env.run_secrets(&[SO_PIN], &["audit", "export-ndjson"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let text = String::from_utf8_lossy(&o.stdout);
+    assert!(text.contains("BackupExport"), "{text}");
+    assert!(text.contains("BackupRestore"), "{text}");
+    assert!(text.contains("craton-hsm-admin:restore"), "{text}");
+}
+
+#[test]
+fn reinit_requires_so_pin_and_keeps_objects_on_failure() {
+    let env = Env::persistent();
+    env.provision();
+    env.import_key("keep-me");
+    let o = env.run_secrets(&["Wrong-So#99887"], &["token", "init", "--label", "Again"]);
+    assert_eq!(code(&o), EXIT_AUTH, "{}", stderr(&o));
+    assert_eq!(
+        env.list_keys().len(),
+        1,
+        "a wrong SO PIN must not wipe objects"
+    );
+    let o = env.run_secrets(&[SO_PIN], &["token", "init", "--label", "Again"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let o = env.run(&["--json", "token", "info"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["user_pin_initialized"], false);
+}
+
+#[test]
+fn store_locked_by_another_process_is_a_clear_error() {
+    let env = Env::persistent();
+    // Hold the single-writer locks like a running daemon would.
+    let text = std::fs::read_to_string(&env.config).unwrap();
+    let mut cfg: craton_hsm::config::HsmConfig = toml::from_str(&text).unwrap();
+    cfg.token.storage_path = env.path("store");
+    cfg.audit.log_path = env.path("audit.jsonl");
+    let hsm = craton_hsm::core::HsmCore::open(&cfg).unwrap();
+    let o = env.run(&["status"]);
+    assert_eq!(code(&o), EXIT_REFUSED, "{}", stderr(&o));
+    assert!(stderr(&o).contains("locked"), "{}", stderr(&o));
+    drop(hsm);
+    let o = env.run(&["status"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
 }

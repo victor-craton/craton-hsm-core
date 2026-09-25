@@ -42,8 +42,7 @@ use crate::proto::hsm_service_server::HsmService;
 use crate::proto::*;
 use crate::registry::{Registry, Role, SessionView};
 use crate::template::{
-    proto_attrs_to_template, validate, KeyKind, KeyTemplate,
-    MAX_LABEL_LEN, MAX_SEARCH_VALUE_LEN,
+    proto_attrs_to_template, validate, KeyKind, KeyTemplate, MAX_LABEL_LEN, MAX_SEARCH_VALUE_LEN,
 };
 use crate::throttle::Throttle;
 
@@ -1320,10 +1319,7 @@ impl HsmServiceImpl {
                     .hsm
                     .object_store()
                     .find_objects_for_slot(&[], true, Some(slot_id));
-                match sh
-                    .hsm
-                    .init_token_by(slot_id, &so_pin, &label, Some(&actor))
-                {
+                match sh.hsm.init_token_by(slot_id, &so_pin, &label, Some(&actor)) {
                     Ok(()) => {
                         sh.init_throttle.clear(&key);
                         sh.registry.clear_slot_logins(slot_id);

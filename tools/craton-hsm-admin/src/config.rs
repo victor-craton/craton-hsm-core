@@ -31,9 +31,11 @@ pub struct LoadedConfig {
 }
 
 impl LoadedConfig {
-    /// Directory holding persistent token state (lockout file, replay guard).
-    pub fn storage_dir(&self) -> &Path {
-        &self.config.token.storage_path
+    /// Audit chain key file (`audit.key_path`, default `<log_path>.key`).
+    pub fn audit_key_path(&self) -> PathBuf {
+        self.config.audit.key_path.clone().unwrap_or_else(|| {
+            craton_hsm::audit::log::default_key_path(&self.config.audit.log_path)
+        })
     }
 }
 
@@ -65,12 +67,12 @@ pub fn load_strict(path: &Path) -> CliResult<LoadedConfig> {
 
     check_ownership_and_mode(&file, &dir, path)?;
 
-    let config = parse(file, path)?;
+    // Anchor relative paths to the config directory first, so validation
+    // (symlink / system-directory checks) sees the paths actually used.
+    let config = anchor_paths(parse(file, path)?, &dir);
     config
         .validate()
         .map_err(|e| config_err(path, format!("validation failed: {e}")))?;
-
-    let config = anchor_paths(config, &dir);
     Ok(LoadedConfig {
         config,
         path: canonical,
@@ -162,6 +164,11 @@ fn anchor_paths(mut config: HsmConfig, dir: &Path) -> HsmConfig {
     }
     if config.audit.log_path.is_relative() {
         config.audit.log_path = dir.join(&config.audit.log_path);
+    }
+    if let Some(kp) = config.audit.key_path.as_mut() {
+        if kp.is_relative() {
+            *kp = dir.join(&*kp);
+        }
     }
     config
 }

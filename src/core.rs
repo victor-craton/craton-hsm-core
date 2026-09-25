@@ -373,6 +373,16 @@ impl HsmCore {
 
     /// `C_InitPIN` (SO session required), audited.
     pub fn init_pin(&self, session: CK_SESSION_HANDLE, pin: &[u8]) -> HsmResult<()> {
+        self.init_pin_by(session, pin, None)
+    }
+
+    /// [`init_pin`](Self::init_pin) with an actor recorded in the audit event.
+    pub fn init_pin_by(
+        &self,
+        session: CK_SESSION_HANDLE,
+        pin: &[u8],
+        actor: Option<&str>,
+    ) -> HsmResult<()> {
         self.check_live()?;
         let sess = self.session_manager.get_session(session)?;
         let (slot, is_so) = {
@@ -384,12 +394,13 @@ impl HsmCore {
         } else {
             self.slot_manager.get_token(slot)?.init_pin(pin)
         };
-        let audit = self.audit(
+        let audit = self.audit_as(
             session as u64,
             AuditOperation::InitPin {
                 slot_id: slot as u64,
             },
             &result,
+            actor,
         );
         result?;
         audit
@@ -402,6 +413,17 @@ impl HsmCore {
         old_pin: &[u8],
         new_pin: &[u8],
     ) -> HsmResult<()> {
+        self.set_pin_by(session, old_pin, new_pin, None)
+    }
+
+    /// [`set_pin`](Self::set_pin) with an actor recorded in the audit event.
+    pub fn set_pin_by(
+        &self,
+        session: CK_SESSION_HANDLE,
+        old_pin: &[u8],
+        new_pin: &[u8],
+        actor: Option<&str>,
+    ) -> HsmResult<()> {
         self.check_live()?;
         let sess = self.session_manager.get_session(session)?;
         let (slot, rw) = {
@@ -413,12 +435,13 @@ impl HsmCore {
         } else {
             self.slot_manager.get_token(slot)?.set_pin(old_pin, new_pin)
         };
-        let audit = self.audit(
+        let audit = self.audit_as(
             session as u64,
             AuditOperation::SetPin {
                 slot_id: slot as u64,
             },
             &result,
+            actor,
         );
         result?;
         audit

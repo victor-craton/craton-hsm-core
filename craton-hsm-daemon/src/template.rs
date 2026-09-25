@@ -451,7 +451,10 @@ mod tests {
         let o = store.get_object(h).unwrap();
         let o = o.read();
         assert_eq!(
-            read_attribute(&o, CKA_LOCAL).unwrap().as_deref().map(|v| v.to_vec()),
+            read_attribute(&o, CKA_LOCAL)
+                .unwrap()
+                .as_deref()
+                .map(|v| v.to_vec()),
             Some(vec![1u8])
         );
         assert_eq!(

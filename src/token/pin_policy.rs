@@ -138,8 +138,7 @@ pub fn check_complexity(pin: &[u8]) -> Result<(), &'static str> {
 
     // A short unit repeated, e.g. "abababab", "abcabcabc".
     if n > 1
-        && (1..=n / 2)
-            .any(|unit| n % unit == 0 && units.chunks(unit).all(|c| c == &units[..unit]))
+        && (1..=n / 2).any(|unit| n % unit == 0 && units.chunks(unit).all(|c| c == &units[..unit]))
     {
         return Err("PIN must not be a repeated character or pattern");
     }
@@ -202,7 +201,10 @@ mod tests {
             "S0pin-47",
             "Us3rpin9",
         ] {
-            assert!(validate_new_pin(ok.as_bytes(), 8, 64).is_ok(), "{ok} rejected");
+            assert!(
+                validate_new_pin(ok.as_bytes(), 8, 64).is_ok(),
+                "{ok} rejected"
+            );
         }
     }
 
@@ -220,7 +222,9 @@ mod tests {
 
     #[test]
     fn binary_pins_need_distinct_bytes() {
-        assert!(validate_new_pin(&[0xff, 0xfe, 0xff, 0xfe, 0xff, 0xfe, 0xff, 0xfe], 8, 64).is_err());
+        assert!(
+            validate_new_pin(&[0xff, 0xfe, 0xff, 0xfe, 0xff, 0xfe, 0xff, 0xfe], 8, 64).is_err()
+        );
         assert!(validate_new_pin(&[0xff, 0x10, 0x80, 0x33, 0x91, 0x07, 0xc4, 0x5a], 8, 64).is_ok());
     }
 }

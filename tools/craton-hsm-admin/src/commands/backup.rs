@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
 use super::Ctx;
-use crate::admin_core::{open_core, Role};
+use crate::admin_core::{open_core, Role, SLOT};
 use crate::error::{CliError, CliResult};
-use crate::replay_guard::ReplayGuard;
-use craton_hsm::audit::log::AuditOperation;
 use craton_hsm::error::HsmError;
-use craton_hsm::store::backup;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -161,41 +158,78 @@ fn write_backup_file(output: &Path, data: &[u8], force: bool) -> CliResult {
     result
 }
 
-/// Create an encrypted backup of all token objects. Requires SO login and a
-/// typed confirmation; refuses to write an empty backup unless asked to.
-pub fn create_backup(ctx: &Ctx, output: &Path, allow_empty: bool, force: bool) -> CliResult {
+/// Options of `backup`.
+pub struct BackupOptions {
+    /// Write a backup even if no object is exported.
+    pub allow_empty: bool,
+    /// Replace an existing output file.
+    pub force: bool,
+    /// Also export non-extractable keys (explicit operator decision).
+    pub include_non_extractable: bool,
+}
+
+/// Create an encrypted backup of the token objects of slot 0. Requires SO
+/// login and a typed confirmation; refuses to write an empty backup unless
+/// asked to. Non-extractable keys are not exported (A1-17) unless the
+/// operator explicitly passes `--include-non-extractable`. The backup is
+/// bound to the per-token random identity (H3-16) and the export is audited
+/// synchronously by the core (`BackupExport`, H5-20).
+pub fn create_backup(ctx: &Ctx, output: &Path, opts: BackupOptions) -> CliResult {
+    let BackupOptions {
+        allow_empty,
+        force,
+        include_non_extractable,
+    } = opts;
     let cfg = ctx.load_config()?;
     let core = open_core(&cfg)?;
     core.require_persistent("backup")?;
     core.require_audit_intact()?;
+    if !force && std::fs::symlink_metadata(output).is_ok() {
+        return Err(CliError::Refused(format!(
+            "Output '{}' already exists; pass --force to replace it.",
+            output.display()
+        )));
+    }
     let session = core.login(Role::So)?;
 
-    let objects = core.hsm().object_store().export_all_objects();
-    if objects.is_empty() && !allow_empty {
+    let count = core
+        .hsm()
+        .export_token_objects(SLOT, include_non_extractable)
+        .map_err(|e| CliError::General(format!("Cannot enumerate token objects: {e}")))?
+        .len();
+    if count == 0 && !allow_empty {
         return Err(CliError::Refused(
-            "The token holds no objects; refusing to write an empty backup \
+            "The token holds no exportable objects; refusing to write an empty backup \
              (use --allow-empty to override)."
                 .into(),
         ));
     }
+    let scope = if include_non_extractable {
+        "INCLUDING non-extractable keys"
+    } else {
+        "non-extractable keys are not exported"
+    };
     crate::prompt::confirm_typed(
         &format!(
-            "This exports ALL {} token object(s), including key material, encrypted under a \
-             passphrase.",
-            objects.len()
+            "This exports {count} token object(s), including key material, encrypted under a \
+             passphrase ({scope})."
         ),
         "backup",
         ctx.yes,
     )?;
     let passphrase = prompt_passphrase(true)?;
 
-    let res = backup::create_backup(
-        &objects,
+    let action = if include_non_extractable {
+        "backup:include-non-extractable"
+    } else {
+        "backup"
+    };
+    let (data, exported) = match core.hsm().export_backup(
+        SLOT,
         &passphrase,
-        &cfg.config.token.serial_number,
-        Some(cfg.config.security.pbkdf2_iterations),
-    );
-    let data = match res {
+        include_non_extractable,
+        Some(&core.actor(action)),
+    ) {
         Ok(d) => d,
         Err(HsmError::PinLenRange) | Err(HsmError::PinInvalid) => {
             return Err(CliError::Usage(
@@ -204,22 +238,14 @@ pub fn create_backup(ctx: &Ctx, output: &Path, allow_empty: bool, force: bool) -
         }
         Err(e) => return Err(CliError::General(format!("Backup creation failed: {e}"))),
     };
-    let write = write_backup_file(output, &data, force);
-    core.record(
-        AuditOperation::GetAttributeValue,
-        write
-            .as_ref()
-            .map(|_| ())
-            .map_err(|_| &HsmError::GeneralError),
-        &format!("backup:objects={}", objects.len()),
-    )?;
-    write?;
+    let data = Zeroizing::new(data);
+    write_backup_file(output, &data, force)?;
     drop(session);
 
     println!(
         "Backup created: {} ({} objects, {} bytes)",
         output.display(),
-        objects.len(),
+        exported,
         data.len()
     );
     Ok(())
@@ -230,117 +256,60 @@ fn map_restore_error(e: HsmError) -> CliError {
         HsmError::PinIncorrect => {
             CliError::BackupRejected("Wrong passphrase or corrupted backup file.".into())
         }
-        HsmError::DataInvalid => CliError::BackupRejected(
-            "Backup rejected: malformed, bound to a different token serial, older than 30 \
-             days, from the future, or already restored (replay). See the warning above."
-                .into(),
-        ),
+        HsmError::BackupRejected(reason) => {
+            CliError::BackupRejected(format!("Backup rejected: {reason}."))
+        }
+        HsmError::DataInvalid => CliError::BackupRejected("Backup rejected.".into()),
         other => CliError::General(format!("Backup restore failed: {other}")),
     }
 }
 
-/// Restore token objects from an encrypted backup.
+/// Restore token objects from an encrypted backup (SO login required).
 ///
-/// The replay guard is locked for the whole operation and the backup ID is
-/// recorded only after every object has been inserted; on any failure the
-/// inserted objects are rolled back and the backup remains restorable (H5-04).
-/// `--verify-only` decrypts and validates without restoring or consuming.
+/// The core validates the backup (binding to this token, age, replay,
+/// object policy), imports every object with fresh handles and records the
+/// consumed backup ID **in the same store transaction**, so a failed restore
+/// changes nothing and the backup stays restorable, while a completed one
+/// can never be replayed (H5-04, H5-06). `--verify-only` decrypts and
+/// validates without restoring or consuming.
 pub fn restore_backup(ctx: &Ctx, input: &Path, verify_only: bool) -> CliResult {
     let cfg = ctx.load_config()?;
-    let data = crate::fsutil::read_bounded(input, MAX_BACKUP_BYTES, "backup file")?;
-
-    if verify_only {
-        let mut ids = ReplayGuard::read_only_ids(cfg.storage_dir())?;
-        let passphrase = prompt_passphrase(false)?;
-        let objects = backup::restore_backup(
-            &data,
-            &passphrase,
-            &cfg.config.token.serial_number,
-            None,
-            Some(cfg.config.security.pbkdf2_iterations),
-            Some(&mut ids),
-        )
-        .map_err(map_restore_error)?;
-        println!(
-            "Backup verified: {} object(s). Nothing was restored and the backup was not consumed.",
-            objects.len()
-        );
-        return Ok(());
-    }
+    let data = Zeroizing::new(crate::fsutil::read_bounded(
+        input,
+        MAX_BACKUP_BYTES,
+        "backup file",
+    )?);
 
     let core = open_core(&cfg)?;
     core.require_persistent("restore")?;
     core.require_audit_intact()?;
     let session = core.login(Role::So)?;
+
+    if verify_only {
+        let passphrase = prompt_passphrase(false)?;
+        let n = core
+            .hsm()
+            .verify_backup(SLOT, &data, &passphrase, None)
+            .map_err(map_restore_error)?;
+        println!(
+            "Backup verified: {n} object(s). Nothing was restored and the backup was not consumed."
+        );
+        return Ok(());
+    }
+
     crate::prompt::confirm_typed(
         "This imports all objects from the backup into the token.",
         "restore",
         ctx.yes,
     )?;
     let passphrase = prompt_passphrase(false)?;
-
-    // Held until the end of the function: load → check → restore → record.
-    let mut guard = ReplayGuard::open_locked(cfg.storage_dir())?;
-    let mut ids = guard.consumed_ids().clone();
-    let objects = backup::restore_backup(
-        &data,
-        &passphrase,
-        &cfg.config.token.serial_number,
-        None,
-        Some(cfg.config.security.pbkdf2_iterations),
-        Some(&mut ids),
-    )
-    .map_err(map_restore_error)?;
-    let new_id = ids
-        .difference(guard.consumed_ids())
-        .next()
-        .cloned()
-        .ok_or_else(|| CliError::General("Backup ID was not reported by the library.".into()))?;
-
-    let store = core.hsm().object_store();
-    let mut inserted = Vec::with_capacity(objects.len());
-    let outcome = (|| -> CliResult {
-        for mut obj in objects {
-            if obj.key_material.is_some() && !obj.sensitive && !obj.extractable {
-                return Err(CliError::BackupRejected(
-                    "Backup contains an inconsistent key object; nothing restored.".into(),
-                ));
-            }
-            // Never trust handles/slots from the payload.
-            obj.handle = store
-                .next_handle()
-                .map_err(|e| CliError::General(format!("Handle allocation failed: {e}")))?;
-            obj.slot_id = 0;
-            let h = store
-                .insert_object(obj)
-                .map_err(|e| CliError::General(format!("Failed to insert object: {e}")))?;
-            inserted.push(h);
-        }
-        // HANDOFF: insert_object must report persistence failures so that
-        // "committed" below really means durable.
-        guard.record(&new_id)
-    })();
-
-    if let Err(e) = outcome {
-        for h in &inserted {
-            let _ = store.destroy_object(*h);
-        }
-        let _ = core.record(
-            AuditOperation::CreateObject,
-            Err(&HsmError::GeneralError),
-            "restore",
-        );
-        return Err(e);
-    }
-    core.record(
-        AuditOperation::CreateObject,
-        Ok(()),
-        &format!("restore:objects={}", inserted.len()),
-    )?;
-    drop(guard);
+    let handles = core
+        .hsm()
+        .restore_backup(SLOT, &data, &passphrase, None, Some(&core.actor("restore")))
+        .map_err(map_restore_error)?;
     drop(session);
 
-    println!("Restored {} object(s) from backup.", inserted.len());
+    println!("Restored {} object(s) from backup.", handles.len());
     Ok(())
 }
 
@@ -391,5 +360,12 @@ mod tests {
             map_restore_error(HsmError::DataInvalid),
             CliError::BackupRejected(_)
         ));
+        // H5-04: the reason is reported distinctly.
+        match map_restore_error(HsmError::BackupRejected(
+            craton_hsm::error::BackupRejection::Replayed,
+        )) {
+            CliError::BackupRejected(m) => assert!(m.contains("already restored"), "{m}"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

@@ -537,8 +537,14 @@ impl EncryptedStore {
                         .checked_add(1)
                         .ok_or(HsmError::DeviceError)?;
                     let generation = manifest.counter;
-                    let record =
-                        Self::seal_record(cipher, slot, r.store_key, r.handle, generation, r.plaintext)?;
+                    let record = Self::seal_record(
+                        cipher,
+                        slot,
+                        r.store_key,
+                        r.handle,
+                        generation,
+                        r.plaintext,
+                    )?;
                     objs.insert(r.store_key, record.as_slice())
                         .map_err(db_err("insert object"))?;
                     manifest.entries.insert(r.store_key.to_string(), generation);
@@ -1257,7 +1263,13 @@ pub(crate) fn pbkdf2_hmac_sha256(
     #[cfg(feature = "fips")]
     {
         let iters = std::num::NonZeroU32::new(iterations).ok_or(HsmError::ArgumentsBad)?;
-        aws_lc_rs::pbkdf2::derive(aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA256, iters, salt, secret, out);
+        aws_lc_rs::pbkdf2::derive(
+            aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA256,
+            iters,
+            salt,
+            secret,
+            out,
+        );
         Ok(())
     }
     #[cfg(not(feature = "fips"))]
