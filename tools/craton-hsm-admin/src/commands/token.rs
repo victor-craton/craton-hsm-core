@@ -1,68 +1,118 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
+use super::Ctx;
+use crate::admin_core::{open_core, prompt_new_pin, AdminCore, CoreMode, Role};
+use crate::error::{CliError, CliResult};
 use crate::output;
-use craton_hsm::config::config::HsmConfig;
-use craton_hsm::core::HsmCore;
-use zeroize::Zeroizing;
+use craton_hsm::audit::log::AuditOperation;
 
-type CliResult = Result<(), Box<dyn std::error::Error>>;
+/// PKCS#11 `CK_TOKEN_INFO.label` length.
+const LABEL_LEN: usize = 32;
 
-/// Initialize a new token with the given label.
-pub fn init(config_path: &str, label: &str) -> CliResult {
-    let config = load_config_strict(config_path)?;
-    let hsm = HsmCore::new(&config);
-    let token = hsm
-        .slot_manager()
-        .get_token(0)
-        .map_err(|_| "Failed to access token.")?;
-
-    // Prompt for SO PIN (zeroized on drop)
-    let so_pin = Zeroizing::new(rpassword::prompt_password("Enter new SO PIN: ")?);
-    let so_pin_confirm = Zeroizing::new(rpassword::prompt_password("Confirm SO PIN: ")?);
-    if *so_pin != *so_pin_confirm {
-        return Err("SO PINs do not match.".into());
+/// Validate a token/object label with the same rule the config validator
+/// applies to `token.label`: 1..=32 bytes of printable ASCII (H5-15).
+pub fn validate_label(label: &str) -> CliResult<[u8; LABEL_LEN]> {
+    if label.is_empty() || label.len() > LABEL_LEN {
+        return Err(CliError::Usage(format!(
+            "Label must be 1 to {LABEL_LEN} bytes long."
+        )));
     }
-    if so_pin.len() < config.security.pin_min_length
-        || so_pin.len() > config.security.pin_max_length
-    {
-        return Err("SO PIN does not meet length requirements.".into());
+    if !label.bytes().all(|b| b.is_ascii_graphic() || b == b' ') {
+        return Err(CliError::Usage(
+            "Label must contain printable ASCII characters only.".into(),
+        ));
     }
+    let mut padded = [b' '; LABEL_LEN];
+    padded[..label.len()].copy_from_slice(label.as_bytes());
+    Ok(padded)
+}
 
-    if let Err(reason) = super::pin::validate_pin_complexity(&so_pin) {
-        return Err(reason.into());
-    }
+/// Initialize (or re-initialize) the token.
+///
+/// - Re-initialization requires the current SO PIN.
+/// - First-time initialization is refused if persisted lockout state exists,
+///   because that state can then not be tied to a verifiable SO (H5-01).
+/// - A typed confirmation is required (or `--yes`).
+pub fn init(ctx: &Ctx, label: &str) -> CliResult {
+    let label_bytes = validate_label(label)?;
+    let cfg = ctx.load_config()?;
+    let core = open_core(&cfg)?;
+    core.require_persistent("token init")?;
+    core.require_audit_intact()?;
+    let token = core.token()?;
 
-    // Pad or truncate label to 32 bytes (PKCS#11 spec)
-    let mut label_bytes = [b' '; 32];
-    let copy_len = label.len().min(32);
-    label_bytes[..copy_len].copy_from_slice(&label.as_bytes()[..copy_len]);
+    let so_pin = if token.is_initialized() {
+        // Verify the current SO PIN before anything is reset. C_InitToken
+        // semantics: the SO PIN is kept.
+        let (guard, pin) = core.login_with_pin(Role::So)?;
+        drop(guard);
+        pin
+    } else {
+        let lockout = cfg.storage_dir().join("lockout_state.json");
+        if std::fs::symlink_metadata(&lockout).is_ok() {
+            return Err(CliError::Refused(format!(
+                "Token reports no SO PIN but persisted lockout state exists at '{}'. \
+                 Refusing to clear it without SO verification; investigate and remove it \
+                 manually if the token really is new.",
+                lockout.display()
+            )));
+        }
+        prompt_new_pin(&cfg, "SO")?
+    };
 
-    token
-        .init_token(so_pin.as_bytes(), &label_bytes)
-        .map_err(|_| "Token initialization failed.")?;
+    crate::prompt::confirm_typed(
+        "This will initialize the token: ALL objects are destroyed and the User PIN is removed.",
+        "initialize",
+        ctx.yes,
+    )?;
+
+    let res = token.init_token(so_pin.as_bytes(), &label_bytes);
+    core.record(
+        AuditOperation::InitToken { slot_id: 0 },
+        res.as_ref().map(|_| ()),
+        "token-init",
+    )?;
+    res.map_err(|e| CliError::Auth(format!("Token initialization failed: {e}")))?;
+    // Per PKCS#11, C_InitToken destroys all objects on the token.
+    core.hsm().object_store().clear();
 
     println!("Token initialized successfully.");
-    println!("  Label: {}", label);
+    println!("  Label: {label}");
     Ok(())
 }
 
+fn warn_if_ephemeral(core: &AdminCore, json: bool) {
+    if core.mode() == CoreMode::Ephemeral && !json {
+        eprintln!(
+            "Note: standalone mode — token state below is NOT loaded from persistent storage \
+             (fresh in-memory core)."
+        );
+    }
+}
+
+fn state_source(core: &AdminCore) -> &'static str {
+    match core.mode() {
+        CoreMode::Ephemeral => "ephemeral",
+        CoreMode::Persistent => "persistent",
+    }
+}
+
 /// Display token information.
-pub fn info(config_path: &str, json: bool) -> CliResult {
-    let config = load_config(config_path)?;
-    let hsm = HsmCore::new(&config);
-    let token = hsm
-        .slot_manager()
-        .get_token(0)
-        .map_err(|_| "Failed to access token.")?;
+pub fn info(ctx: &Ctx) -> CliResult {
+    let cfg = ctx.load_config()?;
+    let core = open_core(&cfg)?;
+    let token = core.token()?;
+    warn_if_ephemeral(&core, ctx.json);
 
     let initialized = token.is_initialized();
     let user_pin_init = token.is_user_pin_initialized();
     let login_state = format!("{:?}", token.login_state());
     let flags = token.flags();
 
-    if json {
+    if ctx.json {
         let value = serde_json::json!({
             "slot_id": 0,
+            "state_source": state_source(&core),
             "initialized": initialized,
             "user_pin_initialized": user_pin_init,
             "login_state": login_state,
@@ -80,6 +130,7 @@ pub fn info(config_path: &str, json: bool) -> CliResult {
         println!("=================");
         output::print_table(&[
             ("Slot ID:", "0".to_string()),
+            ("State Source:", state_source(&core).to_string()),
             ("Initialized:", initialized.to_string()),
             ("User PIN Init:", user_pin_init.to_string()),
             ("Login State:", login_state),
@@ -102,24 +153,23 @@ pub fn info(config_path: &str, json: bool) -> CliResult {
     Ok(())
 }
 
-/// Show overall HSM status.
-pub fn status(config_path: &str, json: bool) -> CliResult {
-    let config = load_config(config_path)?;
-    let hsm = HsmCore::new(&config);
-    let token = hsm
-        .slot_manager()
-        .get_token(0)
-        .map_err(|_| "Failed to access token.")?;
+/// Show overall HSM status. Does not expose object or audit contents.
+pub fn status(ctx: &Ctx) -> CliResult {
+    let cfg = ctx.load_config()?;
+    let core = open_core(&cfg)?;
+    let token = core.token()?;
+    warn_if_ephemeral(&core, ctx.json);
+    let audit_tamper = core.hsm().audit_log().is_tamper_detected();
+    let config = &cfg.config;
 
-    let obj_count = hsm.object_store().find_objects(&[], true).len();
-    let audit_count = hsm.audit_log().entry_count();
-
-    if json {
+    if ctx.json {
         let value = serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
+            "config_path": cfg.path.display().to_string(),
+            "state_source": state_source(&core),
             "token_initialized": token.is_initialized(),
-            "object_count": obj_count,
-            "audit_entries": audit_count,
+            "audit_enabled": config.audit.enabled,
+            "audit_tamper_detected": audit_tamper,
             "config": {
                 "max_sessions": config.token.max_sessions,
                 "pqc_enabled": config.algorithms.enable_pqc,
@@ -128,33 +178,37 @@ pub fn status(config_path: &str, json: bool) -> CliResult {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("Craton HSM Status");
-        println!("==============");
+        println!("=================");
         output::print_table(&[
             ("Version:", env!("CARGO_PKG_VERSION").to_string()),
+            ("Config:", cfg.path.display().to_string()),
+            ("State Source:", state_source(&core).to_string()),
             ("Token Init:", token.is_initialized().to_string()),
-            ("Objects:", obj_count.to_string()),
-            ("Audit Entries:", audit_count.to_string()),
+            ("Audit Enabled:", config.audit.enabled.to_string()),
+            ("Audit Tamper:", audit_tamper.to_string()),
             ("Max Sessions:", config.token.max_sessions.to_string()),
             ("PQC Enabled:", config.algorithms.enable_pqc.to_string()),
         ]);
     }
-
+    if audit_tamper {
+        return Err(CliError::Integrity(
+            "Audit log tamper detected. Run 'audit verify-chain' for details.".into(),
+        ));
+    }
     Ok(())
 }
 
-fn load_config(path: &str) -> Result<HsmConfig, Box<dyn std::error::Error>> {
-    let config = HsmConfig::load_from_path(path)?;
-    config
-        .validate()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-    Ok(config)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Strict config loading for mutating operations — fails if config is missing.
-fn load_config_strict(path: &str) -> Result<HsmConfig, Box<dyn std::error::Error>> {
-    let config = HsmConfig::load_from_path(path)?;
-    config
-        .validate()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-    Ok(config)
+    #[test]
+    fn label_validation() {
+        assert!(validate_label("MyToken").is_ok());
+        assert_eq!(&validate_label("ab").unwrap()[..3], b"ab ");
+        assert!(validate_label("").is_err());
+        assert!(validate_label(&"x".repeat(33)).is_err());
+        assert!(validate_label("bad\x1b[31m").is_err());
+        assert!(validate_label("ключ").is_err());
+    }
 }

@@ -1,20 +1,55 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
+#![deny(unsafe_code)]
+// CK_ULONG is u32 on Windows and u64 elsewhere; `u64::from` is needed for portability.
+#![allow(clippy::useless_conversion)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
+mod admin_core;
+mod audit_file;
 mod commands;
+mod config;
+mod error;
+mod fsutil;
 mod output;
+mod prompt;
+mod replay_guard;
+mod sys;
 
 use clap::{Parser, Subcommand};
+use commands::audit::ExportFormat;
+use commands::Ctx;
+use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "craton-hsm-admin", about = "Craton HSM Admin CLI")]
+#[command(
+    name = "craton-hsm-admin",
+    version,
+    about = "Craton HSM Admin CLI",
+    after_help = error::EXIT_CODE_HELP
+)]
 struct Cli {
-    /// Path to craton_hsm.toml config file
-    #[arg(long, default_value = "craton_hsm.toml")]
-    config: String,
+    /// Path to the craton_hsm.toml config file. Must exist, be owned by the
+    /// invoking user or root and not be group/world-writable. Relative paths
+    /// inside it are resolved against its directory.
+    #[arg(long, global = true, default_value = config::DEFAULT_CONFIG_PATH)]
+    config: PathBuf,
 
-    /// Output in JSON format
-    #[arg(long, default_value_t = false)]
+    /// Output in JSON format (where supported)
+    #[arg(long, global = true, default_value_t = false)]
     json: bool,
+
+    /// Skip typed confirmation prompts (authentication is still required)
+    #[arg(long, global = true, default_value_t = false)]
+    yes: bool,
+
+    /// Increase diagnostic verbosity on stderr (-v info, -vv debug).
+    /// RUST_LOG=<level> is also honoured. Default: warn.
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
 
     #[command(subcommand)]
     command: Commands,
@@ -37,32 +72,41 @@ enum Commands {
         #[command(subcommand)]
         action: PinAction,
     },
-    /// Dump audit log
+    /// Audit log inspection (reads and verifies the persisted log)
     Audit {
         #[command(subcommand)]
         action: AuditAction,
     },
     /// Show HSM status
     Status,
-    /// Create encrypted backup of token objects
+    /// Create an encrypted backup of all token objects (SO login required)
     Backup {
         /// Output backup file path
         #[arg(long)]
-        output: String,
+        output: PathBuf,
+        /// Allow writing a backup that contains no objects
+        #[arg(long, default_value_t = false)]
+        allow_empty: bool,
+        /// Replace an existing output file
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
-    /// Restore token objects from encrypted backup
+    /// Restore token objects from an encrypted backup (SO login required)
     Restore {
         /// Input backup file path
         #[arg(long)]
-        input: String,
+        input: PathBuf,
+        /// Only decrypt and validate the backup; do not restore or consume it
+        #[arg(long, default_value_t = false)]
+        verify_only: bool,
     },
 }
 
 #[derive(Subcommand)]
 enum TokenAction {
-    /// Initialize a new token
+    /// Initialize the token (destroys all objects; SO PIN required if already initialized)
     Init {
-        /// Token label
+        /// Token label (1-32 printable ASCII characters)
         #[arg(long)]
         label: String,
     },
@@ -72,98 +116,135 @@ enum TokenAction {
 
 #[derive(Subcommand)]
 enum KeyAction {
-    /// List all keys
-    List,
-    /// Import a key from file
+    /// List keys visible to the authenticated role
+    List {
+        /// Role to authenticate as
+        #[arg(long, value_enum, default_value_t = admin_core::Role::User)]
+        role: admin_core::Role,
+    },
+    /// Import a raw AES key (16, 24 or 32 bytes) as a sensitive token object (User login)
     Import {
-        /// Path to key file (PEM or DER)
+        /// Path to the raw key file
         #[arg(long)]
-        file: String,
-        /// Key label
+        file: PathBuf,
+        /// Key label (1-32 printable ASCII characters)
         #[arg(long)]
         label: String,
-        /// Key type (RSA, EC, AES)
-        #[arg(long, name = "type")]
-        key_type: String,
+        /// Key type
+        #[arg(long = "type", value_enum)]
+        key_type: commands::key::ImportKeyType,
     },
-    /// Delete a key
+    /// Delete a key (typed confirmation required)
     Delete {
         /// Key handle
         #[arg(long)]
         handle: u64,
-        /// Skip confirmation
-        #[arg(long, default_value_t = false)]
-        force: bool,
+        /// Role to authenticate as (private objects require USER)
+        #[arg(long, value_enum)]
+        role: admin_core::Role,
     },
 }
 
 #[derive(Subcommand)]
 enum PinAction {
-    /// Change user or SO PIN
+    /// Change the User or SO PIN
     Change {
-        /// User type: USER or SO
-        #[arg(long, default_value = "USER")]
-        user_type: String,
+        /// Role whose PIN is changed
+        #[arg(long = "user-type", value_enum, default_value_t = admin_core::Role::User)]
+        role: admin_core::Role,
     },
-    /// Reset user PIN (requires SO authentication)
+    /// Reset the User PIN (requires SO authentication)
     Reset,
 }
 
 #[derive(Subcommand)]
 enum AuditAction {
-    /// Dump recent audit log entries
+    /// Show the most recent audit entries (SO login required)
     Dump {
         /// Number of recent entries to show
         #[arg(long, default_value_t = 50)]
         last: usize,
     },
-    /// Export audit log as JSON array
+    /// Export the audit log as a JSON array (SO login required)
     ExportJson,
-    /// Export audit log as newline-delimited JSON (NDJSON) for SIEM ingestion
+    /// Export the audit log as NDJSON for SIEM ingestion (SO login required)
     ExportNdjson,
-    /// Export audit log in syslog RFC 5424 format
+    /// Export the audit log in syslog RFC 5424 format (SO login required)
     ExportSyslog,
-    /// Verify integrity of the audit log hash chain
+    /// Verify the hash chain of the persisted audit log and its rotated generations
     VerifyChain,
 }
 
-fn main() {
-    let cli = Cli::parse();
+/// Install a stderr tracing subscriber so that the core library's security
+/// warnings (tamper detection, lockout corruption, replay rejection, config
+/// errors) are visible (H5-09).
+fn init_tracing(verbose: u8) {
+    use tracing_subscriber::filter::LevelFilter;
+    let from_env = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| v.trim().parse::<LevelFilter>().ok());
+    let level = match verbose {
+        0 => from_env.unwrap_or(LevelFilter::WARN),
+        1 => LevelFilter::INFO,
+        _ => LevelFilter::DEBUG,
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_max_level(level)
+        .with_target(false)
+        .try_init();
+}
 
-    let result = match cli.command {
+fn run(cli: Cli) -> error::CliResult {
+    let ctx = Ctx {
+        config_path: cli.config,
+        json: cli.json,
+        yes: cli.yes,
+    };
+    match cli.command {
         Commands::Token { action } => match action {
-            TokenAction::Init { label } => commands::token::init(&cli.config, &label),
-            TokenAction::Info => commands::token::info(&cli.config, cli.json),
+            TokenAction::Init { label } => commands::token::init(&ctx, &label),
+            TokenAction::Info => commands::token::info(&ctx),
         },
         Commands::Key { action } => match action {
-            KeyAction::List => commands::key::list(&cli.config, cli.json),
+            KeyAction::List { role } => commands::key::list(&ctx, role),
             KeyAction::Import {
                 file,
                 label,
                 key_type,
-            } => commands::key::import(&cli.config, &file, &label, &key_type),
-            KeyAction::Delete { handle, force } => {
-                commands::key::delete(&cli.config, handle, force)
-            }
+            } => commands::key::import(&ctx, &file, &label, key_type),
+            KeyAction::Delete { handle, role } => commands::key::delete(&ctx, handle, role),
         },
         Commands::Pin { action } => match action {
-            PinAction::Change { user_type } => commands::pin::change(&cli.config, &user_type),
-            PinAction::Reset => commands::pin::reset(&cli.config),
+            PinAction::Change { role } => commands::pin::change(&ctx, role),
+            PinAction::Reset => commands::pin::reset(&ctx),
         },
         Commands::Audit { action } => match action {
-            AuditAction::Dump { last } => commands::audit::dump(&cli.config, last, cli.json),
-            AuditAction::ExportJson => commands::audit::export_json(&cli.config),
-            AuditAction::ExportNdjson => commands::audit::export_ndjson(&cli.config),
-            AuditAction::ExportSyslog => commands::audit::export_syslog(&cli.config),
-            AuditAction::VerifyChain => commands::audit::verify_chain(&cli.config, cli.json),
+            AuditAction::Dump { last } => commands::audit::dump(&ctx, last),
+            AuditAction::ExportJson => commands::audit::export(&ctx, ExportFormat::Json),
+            AuditAction::ExportNdjson => commands::audit::export(&ctx, ExportFormat::Ndjson),
+            AuditAction::ExportSyslog => commands::audit::export(&ctx, ExportFormat::Syslog),
+            AuditAction::VerifyChain => commands::audit::verify_chain(&ctx),
         },
-        Commands::Status => commands::token::status(&cli.config, cli.json),
-        Commands::Backup { output } => commands::backup::create_backup(&cli.config, &output),
-        Commands::Restore { input } => commands::backup::restore_backup(&cli.config, &input),
-    };
+        Commands::Status => commands::token::status(&ctx),
+        Commands::Backup {
+            output,
+            allow_empty,
+            force,
+        } => commands::backup::create_backup(&ctx, &output, allow_empty, force),
+        Commands::Restore { input, verify_only } => {
+            commands::backup::restore_backup(&ctx, &input, verify_only)
+        }
+    }
+}
 
-    if let Err(e) = result {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+fn main() {
+    let cli = Cli::parse();
+    init_tracing(cli.verbose);
+    sys::harden_process();
+
+    if let Err(e) = run(cli) {
+        eprintln!("Error: {}", output::escape_display(&e.to_string()));
+        std::process::exit(e.exit_code());
     }
 }

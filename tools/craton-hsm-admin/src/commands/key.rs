@@ -1,106 +1,78 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
+use super::Ctx;
+use crate::admin_core::{open_core, Role};
+use crate::error::{CliError, CliResult};
 use crate::output;
-use craton_hsm::config::config::HsmConfig;
-use craton_hsm::core::HsmCore;
+use craton_hsm::audit::log::AuditOperation;
 use craton_hsm::pkcs11_abi::constants::*;
-use craton_hsm::pkcs11_abi::types::{CK_ATTRIBUTE_TYPE, CK_OBJECT_HANDLE};
+use craton_hsm::pkcs11_abi::types::{CK_ATTRIBUTE_TYPE, CK_OBJECT_HANDLE, CK_ULONG};
+use craton_hsm::store::object::StoredObject;
 use zeroize::Zeroizing;
 
-type CliResult = Result<(), Box<dyn std::error::Error>>;
+/// Maximum size of a key file accepted by `key import` (H5-16).
+const MAX_KEY_FILE_BYTES: u64 = 16 * 1024;
 
-/// Maximum authentication attempts before the CLI refuses further tries.
-const MAX_AUTH_ATTEMPTS: u32 = 3;
+/// Key types accepted by `key import`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ImportKeyType {
+    /// Raw AES key: exactly 16, 24 or 32 bytes.
+    Aes,
+}
 
-/// Authenticate as SO or USER before performing key operations.
-/// Enforces a delay between failed attempts as defense-in-depth against
-/// brute-force, even if the underlying token has its own lockout.
-fn authenticate_user(hsm: &HsmCore) -> CliResult {
-    let token = hsm
-        .slot_manager()
-        .get_token(0)
-        .map_err(|_| "Failed to access token.")?;
+fn ck_ulong_bytes(v: CK_ULONG) -> Vec<u8> {
+    v.to_ne_bytes().to_vec()
+}
 
-    if !token.is_initialized() {
-        return Err("Token is not initialized. Run 'token init' first.".into());
-    }
+/// Key size in bits for display (overflow-safe, H5-17).
+fn size_bits(obj: &StoredObject) -> Option<CK_ULONG> {
+    obj.modulus_bits
+        .or_else(|| obj.value_len.and_then(|v| v.checked_mul(8)))
+}
 
-    // Ask the user which role to authenticate as — never silently try both,
-    // as that doubles brute-force surface and can escalate privileges.
-    eprint!("Authenticate as [U]ser or [S]O? [U/S] ");
-    let mut role_input = String::new();
-    std::io::stdin().read_line(&mut role_input)?;
-    let ck_user = match role_input.trim().to_uppercase().as_str() {
-        "S" | "SO" => CKU_SO,
-        _ => CKU_USER,
-    };
+/// List keys visible to the authenticated role. An SO session does not see
+/// private (user) objects (H5-14).
+pub fn list(ctx: &Ctx, role: Role) -> CliResult {
+    let cfg = ctx.load_config()?;
+    let core = open_core(&cfg)?;
+    core.require_persistent("key list")?;
+    let session = core.login(role)?;
 
-    let role_name = if ck_user == CKU_SO { "SO" } else { "User" };
+    let store = core.hsm().object_store();
+    let handles = store.find_objects_for_slot(&[], role == Role::User, Some(0));
 
-    for attempt in 1..=MAX_AUTH_ATTEMPTS {
-        let pin = Zeroizing::new(rpassword::prompt_password(&format!(
-            "Enter {} PIN: ",
-            role_name
-        ))?);
-
-        match token.login(ck_user, pin.as_bytes()) {
-            Ok(_) => return Ok(()),
-            Err(_) => {
-                let remaining = MAX_AUTH_ATTEMPTS - attempt;
-                if remaining == 0 {
-                    // Enforce a final delay to slow down scripted retry loops
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    return Err("Authentication failed. Maximum attempts reached.".into());
-                }
-                // Exponential backoff: 1s, 2s between retries
-                let delay = std::time::Duration::from_secs(attempt as u64);
-                eprintln!(
-                    "Authentication failed. {} attempt(s) remaining. Retrying in {}s...",
-                    remaining,
-                    delay.as_secs()
-                );
-                std::thread::sleep(delay);
-            }
+    let mut rows = Vec::new();
+    for handle in &handles {
+        if let Ok(obj_lock) = store.get_object(*handle) {
+            let obj = obj_lock.read();
+            rows.push((
+                obj.handle,
+                output::object_class_name(u64::from(obj.class)),
+                obj.key_type.map(|kt| output::key_type_name(u64::from(kt))),
+                output::display_label(&obj.label),
+                size_bits(&obj),
+                obj.sensitive,
+                obj.extractable,
+            ));
         }
     }
+    drop(session);
 
-    Err("Authentication failed.".into())
-}
-
-/// Logout after operation.
-fn logout(hsm: &HsmCore) {
-    if let Ok(token) = hsm.slot_manager().get_token(0) {
-        token.logout().ok();
-    }
-}
-
-/// List all keys in the object store.
-pub fn list(config_path: &str, json: bool) -> CliResult {
-    let config = load_config(config_path)?;
-    let hsm = HsmCore::new(&config);
-
-    // Require authentication to view private objects
-    authenticate_user(&hsm)?;
-
-    let handles = hsm.object_store().find_objects(&[], true);
-
-    if json {
-        let mut objects = Vec::new();
-        for handle in &handles {
-            if let Ok(obj_lock) = hsm.object_store().get_object(*handle) {
-                let obj = obj_lock.read();
-                let label = String::from_utf8_lossy(&obj.label).trim().to_string();
-                objects.push(serde_json::json!({
-                    "handle": obj.handle,
-                    "class": output::object_class_name(obj.class as u64),
-                    "key_type": obj.key_type.map(|kt| output::key_type_name(kt as u64)),
+    if ctx.json {
+        let objects: Vec<_> = rows
+            .iter()
+            .map(|(h, class, kt, label, size, sens, ext)| {
+                serde_json::json!({
+                    "handle": h,
+                    "class": class,
+                    "key_type": kt,
                     "label": label,
-                    "size_bits": obj.modulus_bits.or(obj.value_len.map(|v| v * 8)),
-                    "sensitive": obj.sensitive,
-                    "extractable": obj.extractable,
-                }));
-            }
-        }
+                    "size_bits": size,
+                    "sensitive": sens,
+                    "extractable": ext,
+                })
+            })
+            .collect();
         println!("{}", serde_json::to_string_pretty(&objects)?);
     } else {
         let mut table = output::ObjectTable::new(vec![
@@ -112,183 +84,177 @@ pub fn list(config_path: &str, json: bool) -> CliResult {
             "Sensitive",
             "Extractable",
         ]);
-
-        for handle in &handles {
-            if let Ok(obj_lock) = hsm.object_store().get_object(*handle) {
-                let obj = obj_lock.read();
-                let label = String::from_utf8_lossy(&obj.label).trim().to_string();
-                let class = output::object_class_name(obj.class as u64);
-                let key_type = obj
-                    .key_type
-                    .map(|kt| output::key_type_name(kt as u64))
-                    .unwrap_or("-");
-                let size = obj
-                    .modulus_bits
-                    .or(obj.value_len.map(|v| v * 8))
-                    .map(|s| format!("{}", s))
-                    .unwrap_or_else(|| "-".to_string());
-
-                table.add_row(vec![
-                    format!("{}", obj.handle),
-                    class.to_string(),
-                    key_type.to_string(),
-                    label,
-                    size,
-                    obj.sensitive.to_string(),
-                    obj.extractable.to_string(),
-                ]);
-            }
+        for (h, class, kt, label, size, sens, ext) in &rows {
+            table.add_row(vec![
+                h.to_string(),
+                class.to_string(),
+                kt.unwrap_or("-").to_string(),
+                label.clone(),
+                size.map_or_else(|| "-".to_string(), |s| s.to_string()),
+                sens.to_string(),
+                ext.to_string(),
+            ]);
         }
-
         println!("Key Objects");
         println!("===========");
-        if table.is_empty() {
-            println!("  (no objects found)");
-        } else {
-            print!("{}", table);
-        }
-        println!("\nTotal: {} object(s)", handles.len());
+        print!("{table}");
+        println!("\nTotal: {} object(s)", rows.len());
     }
-
-    logout(&hsm);
     Ok(())
 }
 
-/// Import a key from file (PEM or DER).
-pub fn import(config_path: &str, file: &str, label: &str, key_type: &str) -> CliResult {
-    let config = load_config(config_path)?;
-    let hsm = HsmCore::new(&config);
+/// Validate raw AES key material (H5-13).
+pub fn validate_aes_key(bytes: &[u8]) -> CliResult {
+    match bytes.len() {
+        16 | 24 | 32 => Ok(()),
+        n => Err(CliError::Usage(format!(
+            "AES key file must contain exactly 16, 24 or 32 raw bytes (found {n}). \
+             PEM/DER and RSA/EC keys are not supported by 'key import'; use \
+             C_CreateObject/C_UnwrapKey through PKCS#11."
+        ))),
+    }
+}
 
-    // Require authentication before importing keys
-    authenticate_user(&hsm)?;
+/// Import a raw AES key as a private, sensitive, non-extractable token
+/// object. Requires a User login (objects created under SO would otherwise
+/// be private objects owned by the wrong role).
+pub fn import(ctx: &Ctx, file: &std::path::Path, label: &str, _kt: ImportKeyType) -> CliResult {
+    let label_bytes = super::token::validate_label(label)?;
+    let cfg = ctx.load_config()?;
+    let core = open_core(&cfg)?;
+    core.require_persistent("key import")?;
+    core.require_audit_intact()?;
 
-    // Wrap key data in Zeroizing so it is scrubbed from memory after use.
-    // Without this, the raw key bytes from std::fs::read persist in freed
-    // heap memory until the allocator reuses the pages.
-    let key_data = Zeroizing::new(std::fs::read(file).map_err(|_| "Failed to read key file.")?);
+    let key_data = crate::fsutil::read_bounded(file, MAX_KEY_FILE_BYTES, "key file")?;
+    validate_aes_key(&key_data)?;
 
-    // Determine CKA_KEY_TYPE and CKA_CLASS based on --type argument
-    let (ck_key_type, ck_class) = match key_type.to_uppercase().as_str() {
-        "RSA" => (CKK_RSA, CKO_PRIVATE_KEY),
-        "EC" => (CKK_EC, CKO_PRIVATE_KEY),
-        "AES" => (CKK_AES, CKO_SECRET_KEY),
-        other => {
-            return Err(format!("Unsupported key type: '{}'. Use RSA, EC, or AES", other).into())
-        }
-    };
+    let session = core.login(Role::User)?;
 
-    // Build attribute template.
-    // SECURITY: key_data.to_vec() creates an unprotected copy of the raw key bytes.
-    // We must explicitly zeroize the template after create_object consumes it.
-    let mut template: Vec<(CK_ATTRIBUTE_TYPE, Vec<u8>)> = vec![
-        (CKA_CLASS, (ck_class as u64).to_le_bytes().to_vec()),
-        (CKA_KEY_TYPE, (ck_key_type as u64).to_le_bytes().to_vec()),
-        (CKA_LABEL, label.as_bytes().to_vec()),
-        (CKA_TOKEN, vec![1u8]), // token object
+    let label_trimmed = &label_bytes[..label.len()];
+    let value_len = key_data.len() as CK_ULONG;
+    let template: Zeroizing<Vec<(CK_ATTRIBUTE_TYPE, Vec<u8>)>> = Zeroizing::new(vec![
+        (CKA_CLASS, ck_ulong_bytes(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ck_ulong_bytes(CKK_AES)),
+        (CKA_LABEL, label_trimmed.to_vec()),
+        (CKA_TOKEN, vec![1u8]),
         (CKA_PRIVATE, vec![1u8]),
         (CKA_SENSITIVE, vec![1u8]),
+        (CKA_EXTRACTABLE, vec![0u8]),
+        (CKA_VALUE_LEN, ck_ulong_bytes(value_len)),
         (CKA_VALUE, key_data.to_vec()),
-    ];
-    // key_data (Zeroizing<Vec<u8>>) is dropped here, scrubbing the file contents.
-
-    let handle = hsm
-        .object_store()
-        .create_object(&template)
-        .map_err(|e| format!("Failed to import key: {:?}", e));
-
-    // Zeroize all template value buffers — especially CKA_VALUE which contains
-    // the raw key material that was copied out of the Zeroizing wrapper.
-    for (_attr, ref mut value) in &mut template {
-        zeroize::Zeroize::zeroize(value.as_mut_slice());
-    }
+    ]);
+    let res = core.hsm().object_store().create_object(&template);
     drop(template);
+    drop(key_data);
 
-    let handle = handle?;
+    core.record(
+        AuditOperation::CreateObject,
+        res.as_ref().map(|_| ()),
+        "key-import",
+    )?;
+    let handle = res.map_err(|e| CliError::General(format!("Failed to import key: {e}")))?;
+    drop(session);
 
     println!("Key imported successfully.");
-    println!("  Handle: {}", handle);
-    println!("  Label:  {}", label);
-    println!("  Type:   {}", key_type.to_uppercase());
-
-    logout(&hsm);
+    println!("  Handle: {handle}");
+    println!("  Label:  {label}");
+    println!("  Type:   AES-{}", value_len * 8);
     Ok(())
 }
 
-/// Delete a key by handle.
-pub fn delete(config_path: &str, handle: u64, force: bool) -> CliResult {
-    let config = load_config(config_path)?;
-    let hsm = HsmCore::new(&config);
+/// Convert a user-supplied handle without truncation (H5-14).
+pub fn parse_handle(handle: u64) -> CliResult<CK_OBJECT_HANDLE> {
+    let h = CK_OBJECT_HANDLE::try_from(handle).map_err(|_| {
+        CliError::Usage(format!(
+            "Object handle {handle} is out of range for this platform."
+        ))
+    })?;
+    if h == 0 {
+        return Err(CliError::Usage(
+            "Object handle 0 is CK_INVALID_HANDLE.".into(),
+        ));
+    }
+    Ok(h)
+}
 
-    // Require authentication before deleting keys
-    authenticate_user(&hsm)?;
+/// Delete a key by handle after authentication and typed confirmation.
+pub fn delete(ctx: &Ctx, handle: u64, role: Role) -> CliResult {
+    let handle = parse_handle(handle)?;
+    let cfg = ctx.load_config()?;
+    let core = open_core(&cfg)?;
+    core.require_persistent("key delete")?;
+    core.require_audit_intact()?;
+    let session = core.login(role)?;
 
-    let handle = handle as CK_OBJECT_HANDLE;
-
-    // Capture object identity before prompting for confirmation
-    let (label, orig_class, orig_key_type, orig_sensitive) = {
-        let obj_lock = hsm
+    let (label, class, private) = {
+        let obj_lock = core
+            .hsm()
             .object_store()
             .get_object(handle)
-            .map_err(|_| format!("Object handle {} not found", handle))?;
+            .map_err(|_| CliError::Usage(format!("Object handle {handle} not found.")))?;
         let obj = obj_lock.read();
         (
-            String::from_utf8_lossy(&obj.label).trim().to_string(),
-            obj.class,
-            obj.key_type,
-            obj.sensitive,
+            output::display_label(&obj.label),
+            output::object_class_name(u64::from(obj.class)),
+            obj.private,
         )
     };
-
-    if !force {
-        eprint!("Delete object {} (label: '{}')? [y/N] ", handle, label);
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Aborted.");
-            logout(&hsm);
-            return Ok(());
-        }
+    if private && role != Role::User {
+        return Err(CliError::Refused(
+            "Private objects can only be deleted by the User role (PKCS#11).".into(),
+        ));
     }
 
-    // Re-verify object still exists and matches before destroying (mitigate TOCTOU).
-    // Check label, class, key_type, and sensitive flag to detect object swaps.
-    {
-        let obj_lock = hsm
-            .object_store()
-            .get_object(handle)
-            .map_err(|_| format!("Object handle {} no longer exists", handle))?;
-        let obj = obj_lock.read();
-        let current_label = String::from_utf8_lossy(&obj.label).trim().to_string();
-        let current_class = obj.class;
-        let current_key_type = obj.key_type;
-        let current_sensitive = obj.sensitive;
-        if current_label != label
-            || current_class != orig_class
-            || current_key_type != orig_key_type
-            || current_sensitive != orig_sensitive
-        {
-            logout(&hsm);
-            return Err(format!(
-                "Object at handle {} changed since confirmation. Aborting for safety.",
-                handle
-            )
-            .into());
-        }
-    }
+    crate::prompt::confirm_typed(
+        &format!("Delete {class} object {handle} (label '{label}')? This cannot be undone."),
+        "delete",
+        ctx.yes,
+    )?;
 
-    hsm.object_store()
-        .destroy_object(handle)
-        .map_err(|e| format!("Failed to destroy object: {:?}", e))?;
+    let res = core.hsm().object_store().destroy_object(handle);
+    core.record(
+        AuditOperation::DestroyObject,
+        res.as_ref().map(|_| ()),
+        "key-delete",
+    )?;
+    res.map_err(|e| CliError::General(format!("Failed to destroy object: {e}")))?;
+    drop(session);
 
-    println!("Object {} deleted.", handle);
-    logout(&hsm);
+    println!("Object {handle} deleted.");
     Ok(())
 }
 
-fn load_config(path: &str) -> Result<HsmConfig, Box<dyn std::error::Error>> {
-    let config = HsmConfig::load_from_path(path)?;
-    config
-        .validate()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-    Ok(config)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aes_key_lengths() {
+        assert!(validate_aes_key(&[0u8; 16]).is_ok());
+        assert!(validate_aes_key(&[0u8; 24]).is_ok());
+        assert!(validate_aes_key(&[0u8; 32]).is_ok());
+        assert!(validate_aes_key(&[0u8; 15]).is_err());
+        assert!(validate_aes_key(&[0u8; 33]).is_err());
+        assert!(validate_aes_key(b"-----BEGIN PRIVATE KEY-----").is_err());
+    }
+
+    #[test]
+    fn handle_conversion_is_checked() {
+        assert!(parse_handle(0).is_err());
+        assert_eq!(parse_handle(5).unwrap(), 5);
+        if std::mem::size_of::<CK_OBJECT_HANDLE>() < 8 {
+            assert!(parse_handle(u64::from(u32::MAX) + 1).is_err());
+        } else {
+            assert!(parse_handle(u64::MAX).is_ok());
+        }
+    }
+
+    #[test]
+    fn size_bits_does_not_overflow() {
+        let mut obj = StoredObject::new(1, CKO_SECRET_KEY);
+        obj.value_len = Some(CK_ULONG::MAX);
+        assert_eq!(size_bits(&obj), None);
+        obj.value_len = Some(32);
+        assert_eq!(size_bits(&obj), Some(256));
+    }
 }
