@@ -89,7 +89,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             lib: libcraton_hsm.so
             spy: libpkcs11_spy.so
             exe: ""
@@ -99,28 +99,28 @@ jobs:
           # approved-only policy compiled in) + AWS-LC backend. NOT a
           # FIPS 140-3 validated module — see docs/fips-mode-guide.md.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             lib: libcraton_hsm.so
             spy: libpkcs11_spy.so
             exe: ""
             flavor: "-fips"
             features: "craton-hsm/fips,craton-hsm/awslc-backend"
           - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            os: windows-2025
             lib: craton_hsm.dll
             spy: pkcs11_spy.dll
             exe: ".exe"
             flavor: ""
             features: ""
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15
             lib: libcraton_hsm.dylib
             spy: libpkcs11_spy.dylib
             exe: ""
             flavor: ""
             features: ""
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-15
             lib: libcraton_hsm.dylib
             spy: libpkcs11_spy.dylib
             exe: ""
