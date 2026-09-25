@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+Remediation of the 2026-09-24 security / certification-readiness audit
+(reports H1–H6, A1–A3). Entries below cover build, CI, supply chain and
+documentation; code changes are listed by their respective areas.
+
+### Build, CI and supply chain
+- **Release pipeline gated and complete (A3-03):** tag must match `Cargo.toml` and CHANGELOG; the full CI suite and the security audit run on the tagged commit before anything is built; all shipped binaries (library, admin CLI, daemon, pkcs11-spy) are built with `--locked`; crates.io publishing uses trusted publishing (OIDC) from a protected environment instead of a long-lived token.
+- **Integrity self-test in force for releases (A3-04, A1-05):** release builds embed `CRATON_HSM_INTEGRITY_PUBLIC_KEY`, sign every library with Ed25519 in a protected environment (`.sig` shipped next to the library), and a load/tamper smoke test proves the check runs. New Linux `-fips` flavour built with `fips,awslc-backend`.
+- **Release artefacts (A3-11, A3-12):** deterministic tarballs, `SHA256SUMS`, cosign keyless bundles (`*.sigstore.json`), SLSA build provenance, CycloneDX SBOMs, `THIRD-PARTY-LICENSES.txt`, `LICENSE` and `NOTICE` in every tarball.
+- **Dependency policy (A3-05, A3-06):** `deny.toml` is the single source of advisory suppressions, each with an honest reason and an expiry enforced by CI; the false "raw RSA decryption not exposed" justification for RUSTSEC-2023-0071 was removed (the risk is **not** mitigated); stale suppressions for already-patched advisories were dropped; `cargo deny` now checks advisories, bans (duplicates, wildcards), licences and sources for the whole workspace, and runs with `cargo audit` on every pull request.
+- **GitHub Actions hardening (A3-10):** `permissions: contents: read` by default in every workflow, all third-party actions pinned by commit SHA (one previously pinned SHA did not exist), job-scoped CLA permissions, Pages deployment moved to a push-only workflow, secret scanning.
+- **Toolchain (A3-08):** toolchain pinned to 1.94.1 in `rust-toolchain.toml`; `rust-version` corrected from 1.75 to the real MSRV 1.89 and checked by an MSRV job; `-A clippy::incompatible_msrv` and `-A clippy::not_unsafe_ptr_arg_deref` removed from CI; test runners pinned to Ubuntu 24.04, Windows Server 2025 and macOS 15 (tested OEs, A1-19).
+- **CI coverage:** `fips` and `awslc-backend` feature builds, doc-tests, a check that every `tests/*.rs` file is scheduled, Miri on more modules (A3-14), a 60-second smoke run of all 12 fuzz targets (A3-13), Helm lint/template.
+- **Fuzzing (A3-13):** the harness now resolves (`craton-hsm` dependency), `fuzz/Cargo.lock` regenerated, and the authenticated targets provision the token with policy-compliant PINs so logged-in paths are actually fuzzed.
+- **Packaging (A3-01, A3-23):** the crates.io package contains only the library sources, `LICENSE`, `NOTICE` and `README.md`; `.claude/settings.local.json` is no longer tracked; `.gitignore` excludes key material and CLI state files.
+- Dependabot covers `fuzz/`, Docker and npm; PQC crates receive security and release-candidate updates (A3-07).
+
+### Documentation
+- Draft FIPS 140-3 Security Policy rewritten against the code: one module-boundary definition (daemon and admin CLI are outside), Ed25519 integrity scheme, complete SSP table, tested operational environments, approved-service indicator status, self-test and error-state descriptions (A1-05, A1-06, A1-11, A1-18, A1-19, A1-24).
+- Corrected claims across README and docs: PKCS#11 v2.40 function set plus v3.0 interface discovery (not "v3.0-compliant"), 12 fuzz targets, no stale `unsafe`/line counts, Helm chart path and defaults, NOTICE licence attributions (dalek crates are BSD-3-Clause, prost is Apache-2.0; the in-tree AWS-LC backend is Apache-2.0).
+- The generated `docs/fips-140-3-certification.pdf` was removed (stale, no provenance).
+
+### Corrections to earlier entries
+- The HMAC-SHA256 `.hmac` integrity test described under 0.9.1 and 0.7.x was later replaced by an Ed25519 signature over the module file (`.sig` sidecar); that change was not recorded at the time. The `compute-integrity-hmac` tools have been removed.
+- "`#![forbid(unsafe_code)]` on store": the store module uses `#![deny(unsafe_code)]` with one targeted `#[allow]` for a Windows ACL call.
+- "Version synchronized across all workspace crates": the sub-crates (`craton-hsm-admin`, `craton-hsm-daemon`, `pkcs11-spy`) remained at 0.3.0 while the core is 0.9.x.
+- Test counts ("617+") and "zeroization tests ignored by default" were inaccurate; the zeroization tests run in CI.
+- `last_operation_fips_approved` / `CKA_VENDOR_FIPS_APPROVED` (0.8.0) are not wired up; there is no API-visible approved-service indicator yet.
+- Releases before 0.9.1 are not tagged in the public repository (its history starts at the open-sourcing commit).
+
 ## [0.9.1] - 2026-03-20 (Security Audit Hardening)
 
 ### Security Fixes
