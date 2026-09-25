@@ -7,11 +7,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use craton_hsm::crypto::encrypt;
 use craton_hsm::crypto::digest;
+use craton_hsm::crypto::encrypt;
 use craton_hsm::crypto::sign;
 use craton_hsm::pkcs11_abi::constants::*;
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {

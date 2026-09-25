@@ -278,7 +278,7 @@ pub fn ml_kem_pairwise_test(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rustcrypto-backend"))]
 mod tests {
     use super::*;
 

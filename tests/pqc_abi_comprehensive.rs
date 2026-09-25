@@ -982,7 +982,11 @@ fn test_hybrid_ml_dsa_ecdsa_rejected() {
     let rv = C_SignInit(session, &mut mechanism, ml_priv);
     assert_eq!(rv, CKR_MECHANISM_INVALID, "hybrid C_SignInit: 0x{:08X}", rv);
     let rv = C_VerifyInit(session, &mut mechanism, ml_pub);
-    assert_eq!(rv, CKR_MECHANISM_INVALID, "hybrid C_VerifyInit: 0x{:08X}", rv);
+    assert_eq!(
+        rv, CKR_MECHANISM_INVALID,
+        "hybrid C_VerifyInit: 0x{:08X}",
+        rv
+    );
 }
 
 // ===========================================================================

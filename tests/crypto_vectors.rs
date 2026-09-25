@@ -207,7 +207,8 @@ fn test_aes_256_gcm_kat_roundtrip_integrity() {
     let ciphertext = encrypt::aes_256_gcm_encrypt(&key, &plaintext).unwrap();
     let decrypted = encrypt::aes_256_gcm_decrypt(&key, &ciphertext).unwrap();
     assert_eq!(
-        &decrypted[..], &plaintext[..],
+        &decrypted[..],
+        &plaintext[..],
         "AES-256-GCM KAT: decrypt must match plaintext"
     );
 }
@@ -254,7 +255,8 @@ fn test_aes_256_cbc_nist_kat() {
     // Verify decrypt recovers plaintext
     let decrypted = encrypt::aes_cbc_decrypt(&key, &iv, &ciphertext).unwrap();
     assert_eq!(
-        &decrypted[..], &plaintext[..],
+        &decrypted[..],
+        &plaintext[..],
         "AES-256-CBC decrypt must match original plaintext"
     );
 }
@@ -294,7 +296,8 @@ fn test_aes_256_ctr_nist_kat() {
     // CTR mode: encrypt again to decrypt
     let decrypted = encrypt::aes_ctr_decrypt(&key, &iv, &ciphertext).unwrap();
     assert_eq!(
-        &decrypted[..], &plaintext[..],
+        &decrypted[..],
+        &plaintext[..],
         "AES-256-CTR decrypt must match original plaintext"
     );
 }

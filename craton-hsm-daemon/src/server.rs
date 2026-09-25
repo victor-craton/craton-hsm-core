@@ -1546,7 +1546,9 @@ impl HsmService for HsmServiceImpl {
         )?;
 
         // Decrypt helpers return zeroizing buffers; copy out for the response.
-        Ok(Response::new(DecryptResponse { data: data.to_vec() }))
+        Ok(Response::new(DecryptResponse {
+            data: data.to_vec(),
+        }))
     }
 
     async fn digest(

@@ -123,7 +123,8 @@ const CTR_CT: &str = "601ec313775789a5b7a7f504bbf3d228f443e3ca4d62b59aca84e990ca
 // RFC 3394 §4.6 (256-bit KEK, 256-bit key) and KWP with the same KEK
 const KW_KEK: &str = "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
 const KW_KEY: &str = "00112233445566778899AABBCCDDEEFF000102030405060708090A0B0C0D0E0F";
-const KW_CT: &str = "28C9F404C4B810F4CBCCB35CFB87F8263F5786E2D80ED326CBC7F0E71A99F43BFB988B9B7A02DD21";
+const KW_CT: &str =
+    "28C9F404C4B810F4CBCCB35CFB87F8263F5786E2D80ED326CBC7F0E71A99F43BFB988B9B7A02DD21";
 const KWP_KEY: &str = "c37b7e6492584340bed12207808941155068f738";
 const KWP_CT: &str = "29b7fa191c2165684374eee9f74595e2a42bace75c425b3053efa26ffe1bb32f";
 
@@ -152,7 +153,8 @@ const X963_SHA256_32: &str = "7a7f1239f6d369eae3ccc016ee8799a538b3be6f85d7eb3683
 const HKDF_IKM: &str = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
 const HKDF_SALT: &str = "000102030405060708090a0b0c";
 const HKDF_INFO: &str = "f0f1f2f3f4f5f6f7f8f9";
-const HKDF_OKM: &str = "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865";
+const HKDF_OKM: &str =
+    "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865";
 const PBKDF2_OUT: &str = "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783";
 
 // ML-KEM-768 (kyber-py): seed d||z = 00..3f, m = a5*32
@@ -258,9 +260,18 @@ fn sha2_kats() -> HsmResult<()> {
 
 fn sha3_kats() -> HsmResult<()> {
     use sha3::{Digest, Sha3_256, Sha3_384, Sha3_512};
-    check(eq(&Sha3_256::digest(b"abc"), &h(SHA3_256_ABC)), "SHA3-256 KAT")?;
-    check(eq(&Sha3_384::digest(b"abc"), &h(SHA3_384_ABC)), "SHA3-384 KAT")?;
-    check(eq(&Sha3_512::digest(b"abc"), &h(SHA3_512_ABC)), "SHA3-512 KAT")
+    check(
+        eq(&Sha3_256::digest(b"abc"), &h(SHA3_256_ABC)),
+        "SHA3-256 KAT",
+    )?;
+    check(
+        eq(&Sha3_384::digest(b"abc"), &h(SHA3_384_ABC)),
+        "SHA3-384 KAT",
+    )?;
+    check(
+        eq(&Sha3_512::digest(b"abc"), &h(SHA3_512_ABC)),
+        "SHA3-512 KAT",
+    )
 }
 
 fn hmac_kats() -> HsmResult<()> {
@@ -301,7 +312,10 @@ fn kdf_kats() -> HsmResult<()> {
 
     let k = crate::crypto::derive::x963_kdf(EcdhKdf::Sha256, &h(ECDH_Z), X963_SHARED_INFO, 32)
         .map_err(|_| fail("X9.63 KDF KAT"))?;
-    check(eq(&k, &h(X963_SHA256_32)), "X9.63-KDF (SP 800-56C one-step) KAT")
+    check(
+        eq(&k, &h(X963_SHA256_32)),
+        "X9.63-KDF (SP 800-56C one-step) KAT",
+    )
 }
 
 fn sha256(data: &[u8]) -> Vec<u8> {
@@ -317,18 +331,27 @@ fn ml_kem_kat() -> HsmResult<()> {
         *b = i as u8;
     }
     let (dk, ek) = pqc::ml_kem_keygen_from_seed(MlKem768, &seed).map_err(|_| fail("ML-KEM KAT"))?;
-    check(eq(&sha256(&ek), &h(MLKEM_EK_SHA256)), "ML-KEM-768 KeyGen KAT")?;
+    check(
+        eq(&sha256(&ek), &h(MLKEM_EK_SHA256)),
+        "ML-KEM-768 KeyGen KAT",
+    )?;
     let (ct, ss) = pqc::ml_kem_encapsulate_deterministic(&ek, MlKem768, &[0xA5; 32])
         .map_err(|_| fail("ML-KEM KAT"))?;
-    check(eq(&ct, MLKEM_CT) && eq(&ss, &h(MLKEM_SS)), "ML-KEM-768 Encaps KAT")?;
+    check(
+        eq(&ct, MLKEM_CT) && eq(&ss, &h(MLKEM_SS)),
+        "ML-KEM-768 Encaps KAT",
+    )?;
     let ss2 = pqc::ml_kem_decapsulate(dk.as_bytes(), MLKEM_CT, MlKem768)
         .map_err(|_| fail("ML-KEM KAT"))?;
     check(eq(&ss2, &h(MLKEM_SS)), "ML-KEM-768 Decaps KAT")?;
     let mut bad = MLKEM_CT.to_vec();
     bad[0] ^= 1;
-    let rej = pqc::ml_kem_decapsulate(dk.as_bytes(), &bad, MlKem768)
-        .map_err(|_| fail("ML-KEM KAT"))?;
-    check(eq(&rej, &h(MLKEM_REJECT_SS)), "ML-KEM-768 implicit rejection KAT")
+    let rej =
+        pqc::ml_kem_decapsulate(dk.as_bytes(), &bad, MlKem768).map_err(|_| fail("ML-KEM KAT"))?;
+    check(
+        eq(&rej, &h(MLKEM_REJECT_SS)),
+        "ML-KEM-768 implicit rejection KAT",
+    )
 }
 
 /// ML-DSA-44: KeyGen, deterministic Sign and Verify (FIPS 204).
@@ -339,10 +362,22 @@ fn ml_dsa_kat() -> HsmResult<()> {
         *b = 32 + i as u8;
     }
     let (sk, vk) = pqc::ml_dsa_keygen_from_seed(MlDsa44, &xi).map_err(|_| fail("ML-DSA KAT"))?;
-    check(eq(&sha256(&vk), &h(MLDSA_VK_SHA256)), "ML-DSA-44 KeyGen KAT")?;
-    let sig = pqc::ml_dsa_sign_with(sk.as_bytes(), MLDSA_MSG, MlDsa44, &[], PqcSigning::Deterministic)
-        .map_err(|_| fail("ML-DSA KAT"))?;
-    check(eq(&sha256(&sig), &h(MLDSA_SIG_SHA256)), "ML-DSA-44 Sign KAT")?;
+    check(
+        eq(&sha256(&vk), &h(MLDSA_VK_SHA256)),
+        "ML-DSA-44 KeyGen KAT",
+    )?;
+    let sig = pqc::ml_dsa_sign_with(
+        sk.as_bytes(),
+        MLDSA_MSG,
+        MlDsa44,
+        &[],
+        PqcSigning::Deterministic,
+    )
+    .map_err(|_| fail("ML-DSA KAT"))?;
+    check(
+        eq(&sha256(&sig), &h(MLDSA_SIG_SHA256)),
+        "ML-DSA-44 Sign KAT",
+    )?;
     let ok = pqc::ml_dsa_verify(&vk, MLDSA_MSG, &sig, MlDsa44).unwrap_or(false);
     let bad_ok = pqc::ml_dsa_verify(&vk, b"other", &sig, MlDsa44).unwrap_or(true);
     check(ok && !bad_ok, "ML-DSA-44 Verify KAT")
@@ -375,7 +410,9 @@ fn backend_casts(b: &dyn CryptoBackend) -> HsmResult<()> {
         (CKM_SHA3_384, SHA3_384_ABC),
         (CKM_SHA3_512, SHA3_512_ABC),
     ] {
-        let d = b.compute_digest(mech, b"abc").map_err(|_| fail("digest KAT"))?;
+        let d = b
+            .compute_digest(mech, b"abc")
+            .map_err(|_| fail("digest KAT"))?;
         check(eq(&d, &h(exp)), "backend digest KAT")?;
     }
 
@@ -440,17 +477,36 @@ fn backend_casts(b: &dyn CryptoBackend) -> HsmResult<()> {
     let sig = b
         .rsa_pkcs1v15_sign(RSA_KAT_PK8, RSA_KAT_MSG, Some(HashAlg::Sha256))
         .map_err(|_| fail("RSA KAT"))?;
-    check(eq(&sig, RSA_KAT_PKCS1_SHA256_SIG), "RSA PKCS#1 v1.5 SigGen KAT")?;
+    check(
+        eq(&sig, RSA_KAT_PKCS1_SHA256_SIG),
+        "RSA PKCS#1 v1.5 SigGen KAT",
+    )?;
     let ok = b
-        .rsa_pkcs1v15_verify(RSA_KAT_N, RSA_KAT_E, RSA_KAT_MSG, RSA_KAT_PKCS1_SHA256_SIG, Some(HashAlg::Sha256))
+        .rsa_pkcs1v15_verify(
+            RSA_KAT_N,
+            RSA_KAT_E,
+            RSA_KAT_MSG,
+            RSA_KAT_PKCS1_SHA256_SIG,
+            Some(HashAlg::Sha256),
+        )
         .unwrap_or(false);
     check(ok, "RSA PKCS#1 v1.5 SigVer KAT")?;
     let ok = b
-        .rsa_pss_verify(RSA_KAT_N, RSA_KAT_E, RSA_KAT_MSG, RSA_KAT_PSS_SHA256_SIG, HashAlg::Sha256)
+        .rsa_pss_verify(
+            RSA_KAT_N,
+            RSA_KAT_E,
+            RSA_KAT_MSG,
+            RSA_KAT_PSS_SHA256_SIG,
+            HashAlg::Sha256,
+        )
         .unwrap_or(false);
     check(ok, "RSA-PSS SigVer KAT")?;
     let pt = b
-        .rsa_oaep_decrypt(RSA_KAT_PK8, RSA_KAT_OAEP_SHA256_CT, &OaepParams::new(OaepHash::Sha256))
+        .rsa_oaep_decrypt(
+            RSA_KAT_PK8,
+            RSA_KAT_OAEP_SHA256_CT,
+            &OaepParams::new(OaepHash::Sha256),
+        )
         .map_err(|_| fail("RSA-OAEP KAT"))?;
     check(eq(&pt, RSA_KAT_MSG), "RSA-OAEP decrypt KAT")?;
     // Release the KAT key from the parsed-key cache.
@@ -461,11 +517,23 @@ fn backend_casts(b: &dyn CryptoBackend) -> HsmResult<()> {
     let d = h(P256_D);
     let q = h(P256_Q);
     let ok = b
-        .ecdsa_verify(EcCurve::P256, &q, EC_KAT_MSG, &h(P256_SIG), Some(HashAlg::Sha256))
+        .ecdsa_verify(
+            EcCurve::P256,
+            &q,
+            EC_KAT_MSG,
+            &h(P256_SIG),
+            Some(HashAlg::Sha256),
+        )
         .unwrap_or(false);
     check(ok, "ECDSA P-256 SigVer KAT")?;
     let ok = b
-        .ecdsa_verify(EcCurve::P384, &h(P384_Q), EC_KAT_MSG, &h(P384_SIG), Some(HashAlg::Sha384))
+        .ecdsa_verify(
+            EcCurve::P384,
+            &h(P384_Q),
+            EC_KAT_MSG,
+            &h(P384_SIG),
+            Some(HashAlg::Sha384),
+        )
         .unwrap_or(false);
     check(ok, "ECDSA P-384 SigVer KAT")?;
     let mut bad = h(P256_SIG);

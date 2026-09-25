@@ -56,14 +56,18 @@ pub fn ecdh_raw(
         EcCurve::P256 => {
             let sk = p256::SecretKey::from_slice(private_key_bytes)
                 .map_err(|_| HsmError::KeyHandleInvalid)?;
-            let peer = parse_peer(peer_public_key, |p| p256::PublicKey::from_sec1_bytes(p).ok())?;
+            let peer = parse_peer(peer_public_key, |p| {
+                p256::PublicKey::from_sec1_bytes(p).ok()
+            })?;
             let shared = p256_dh(sk.to_nonzero_scalar(), peer.as_affine());
             Ok(Zeroizing::new(shared.raw_secret_bytes().to_vec()))
         }
         EcCurve::P384 => {
             let sk = p384::SecretKey::from_slice(private_key_bytes)
                 .map_err(|_| HsmError::KeyHandleInvalid)?;
-            let peer = parse_peer(peer_public_key, |p| p384::PublicKey::from_sec1_bytes(p).ok())?;
+            let peer = parse_peer(peer_public_key, |p| {
+                p384::PublicKey::from_sec1_bytes(p).ok()
+            })?;
             let shared = p384_dh(sk.to_nonzero_scalar(), peer.as_affine());
             Ok(Zeroizing::new(shared.raw_secret_bytes().to_vec()))
         }
@@ -195,8 +199,8 @@ mod tests {
     fn two_parties_agree() {
         let (a_sk, a_pk) = keygen::generate_ec_p256_key_pair().unwrap();
         let (b_sk, b_pk) = keygen::generate_ec_p256_key_pair().unwrap();
-        let params = EcdhParams::from_ck(crate::crypto::params::CKD_SHA256_KDF, b"ctx", &b_pk)
-            .unwrap();
+        let params =
+            EcdhParams::from_ck(crate::crypto::params::CKD_SHA256_KDF, b"ctx", &b_pk).unwrap();
         let za = ecdh_raw(EcCurve::P256, a_sk.as_bytes(), &b_pk).unwrap();
         let zb = ecdh_raw(EcCurve::P256, b_sk.as_bytes(), &a_pk).unwrap();
         assert_eq!(za, zb);

@@ -36,8 +36,8 @@
 //! caller-chosen CTR/CBC IVs are not tracked across processes or restarts.
 
 use aes_gcm::aead::consts::{U12, U13, U14, U15, U16};
-use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::aead::generic_array::GenericArray;
+use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::AesGcm;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -135,17 +135,16 @@ fn key_id(key: &[u8]) -> [u8; 32] {
 
 /// Run `f` on the tracking state of `kid` while holding the bookkeeping lock.
 /// The lock is held only for the bookkeeping, never during encryption.
-fn with_key_state<R>(kid: &[u8; 32], f: impl FnOnce(&mut KeyState) -> HsmResult<R>) -> HsmResult<R> {
+fn with_key_state<R>(
+    kid: &[u8; 32],
+    f: impl FnOnce(&mut KeyState) -> HsmResult<R>,
+) -> HsmResult<R> {
     let mut guard = KEY_STATE.lock();
     let map = guard.get_or_insert_with(HashMap::new);
     if !map.contains_key(kid) && map.len() >= MAX_TRACKED_KEYS {
         // Evict the least-recently-used key instead of refusing service to
         // every new key (which let one session DoS all others).
-        if let Some(victim) = map
-            .iter()
-            .min_by_key(|(_, s)| s.last_used)
-            .map(|(k, _)| *k)
-        {
+        if let Some(victim) = map.iter().min_by_key(|(_, s)| s.last_used).map(|(k, _)| *k) {
             tracing::warn!(
                 "Symmetric IV tracker full ({} keys) — evicting least recently used key state",
                 MAX_TRACKED_KEYS
@@ -242,9 +241,7 @@ pub fn gcm_encrypt_with(
     let kid = key_id(key);
     let count = with_key_state(&kid, |st| {
         if st.gcm_invocations >= GCM_MAX_INVOCATIONS_PER_KEY {
-            tracing::error!(
-                "AES-GCM per-key invocation limit (2^32) reached — rotate the key"
-            );
+            tracing::error!("AES-GCM per-key invocation limit (2^32) reached — rotate the key");
             return Err(HsmError::KeyFunctionNotPermitted);
         }
         if !st.gcm_ivs.insert(iv) {
@@ -480,35 +477,33 @@ macro_rules! gcm_dispatch {
     };
 }
 
-fn gcm_seal_generic<C: AeadInPlace + KeyInit>(
+fn gcm_seal_generic<C>(
     key: &[u8],
     iv: &[u8; GCM_IV_LEN],
     aad: &[u8],
     plaintext: &[u8],
 ) -> HsmResult<Vec<u8>>
 where
-    C: aes_gcm::aead::AeadCore<NonceSize = U12>,
+    C: AeadInPlace + KeyInit + aes_gcm::aead::AeadCore<NonceSize = U12>,
 {
     let cipher = C::new_from_slice(key).map_err(|_| HsmError::KeySizeRange)?;
     let mut buf = Vec::with_capacity(plaintext.len() + 16);
     buf.extend_from_slice(plaintext);
     let tag = cipher
         .encrypt_in_place_detached(GenericArray::from_slice(iv), aad, &mut buf)
-        .map_err(|_| {
-            HsmError::DataLenRange
-        })?;
+        .map_err(|_| HsmError::DataLenRange)?;
     buf.extend_from_slice(&tag);
     Ok(buf)
 }
 
-fn gcm_open_generic<C: AeadInPlace + KeyInit>(
+fn gcm_open_generic<C>(
     key: &[u8],
     iv: &[u8; GCM_IV_LEN],
     aad: &[u8],
     ct_and_tag: &[u8],
 ) -> HsmResult<Zeroizing<Vec<u8>>>
 where
-    C: aes_gcm::aead::AeadCore<NonceSize = U12>,
+    C: AeadInPlace + KeyInit + aes_gcm::aead::AeadCore<NonceSize = U12>,
 {
     let cipher = C::new_from_slice(key).map_err(|_| HsmError::KeySizeRange)?;
     let tag_len = <C as aes_gcm::aead::AeadCore>::TagSize::to_usize();

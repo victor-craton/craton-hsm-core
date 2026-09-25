@@ -248,8 +248,9 @@ fn test_hybrid_mechanism_not_advertised() {
     assert!(!craton_hsm::crypto::mechanisms::is_sign_mechanism(
         CKM_HYBRID_ML_DSA_ECDSA
     ));
-    assert!(!craton_hsm::crypto::mechanisms::supported_mechanisms()
-        .contains(&CKM_HYBRID_ML_DSA_ECDSA));
+    assert!(
+        !craton_hsm::crypto::mechanisms::supported_mechanisms().contains(&CKM_HYBRID_ML_DSA_ECDSA)
+    );
 }
 
 // ============================================================================

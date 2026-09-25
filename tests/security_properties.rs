@@ -323,12 +323,19 @@ fn test_aes_gcm_wrong_key_size_rejected() {
     // AES-128/192/256 are all valid GCM key sizes (H2-01); other sizes are not.
     for bad in [0usize, 8, 15, 20, 31, 33, 64] {
         let result = encrypt::aes_256_gcm_encrypt(&vec![0x11u8; bad], b"test");
-        assert!(result.is_err(), "AES-GCM with {}-byte key must be rejected", bad);
+        assert!(
+            result.is_err(),
+            "AES-GCM with {}-byte key must be rejected",
+            bad
+        );
     }
     for good in [16usize, 24, 32] {
         let key = vec![0x22u8; good];
         let ct = encrypt::aes_256_gcm_encrypt(&key, b"test").unwrap();
-        assert_eq!(&encrypt::aes_256_gcm_decrypt(&key, &ct).unwrap()[..], b"test");
+        assert_eq!(
+            &encrypt::aes_256_gcm_decrypt(&key, &ct).unwrap()[..],
+            b"test"
+        );
     }
 }
 

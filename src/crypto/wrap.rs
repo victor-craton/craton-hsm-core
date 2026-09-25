@@ -46,9 +46,15 @@ impl<C: BlockEncrypt + BlockDecrypt> Block for C {
 
 fn with_kek<R>(kek: &[u8], f: impl FnOnce(&dyn Block) -> R) -> HsmResult<R> {
     match kek.len() {
-        16 => Ok(f(&aes::Aes128::new_from_slice(kek).map_err(|_| HsmError::KeySizeRange)?)),
-        24 => Ok(f(&aes::Aes192::new_from_slice(kek).map_err(|_| HsmError::KeySizeRange)?)),
-        32 => Ok(f(&aes::Aes256::new_from_slice(kek).map_err(|_| HsmError::KeySizeRange)?)),
+        16 => Ok(f(
+            &aes::Aes128::new_from_slice(kek).map_err(|_| HsmError::KeySizeRange)?
+        )),
+        24 => Ok(f(
+            &aes::Aes192::new_from_slice(kek).map_err(|_| HsmError::KeySizeRange)?
+        )),
+        32 => Ok(f(
+            &aes::Aes256::new_from_slice(kek).map_err(|_| HsmError::KeySizeRange)?
+        )),
         _ => Err(HsmError::KeySizeRange),
     }
 }
@@ -103,8 +109,7 @@ fn w_inv(c: &dyn Block, ciphertext: &[u8]) -> ([u8; 8], Zeroizing<Vec<u8>>) {
 /// AES Key Wrap (RFC 3394 / SP 800-38F KW). Input must be a multiple of
 /// 8 bytes and at least 16 bytes.
 pub fn aes_key_wrap(wrapping_key: &[u8], key_to_wrap: &[u8]) -> HsmResult<Vec<u8>> {
-    if key_to_wrap.len() % 8 != 0 || key_to_wrap.len() < 16 || key_to_wrap.len() > MAX_WRAP_INPUT
-    {
+    if key_to_wrap.len() % 8 != 0 || key_to_wrap.len() < 16 || key_to_wrap.len() > MAX_WRAP_INPUT {
         return Err(HsmError::DataLenRange);
     }
     with_kek(wrapping_key, |c| w(c, KW_IV, key_to_wrap))
@@ -112,7 +117,9 @@ pub fn aes_key_wrap(wrapping_key: &[u8], key_to_wrap: &[u8]) -> HsmResult<Vec<u8
 
 /// AES Key Unwrap (RFC 3394 / SP 800-38F KW) with constant-time ICV check.
 pub fn aes_key_unwrap(wrapping_key: &[u8], wrapped_key: &[u8]) -> HsmResult<Zeroizing<Vec<u8>>> {
-    if wrapped_key.len() % 8 != 0 || wrapped_key.len() < 24 || wrapped_key.len() > MAX_WRAP_INPUT + 8
+    if wrapped_key.len() % 8 != 0
+        || wrapped_key.len() < 24
+        || wrapped_key.len() > MAX_WRAP_INPUT + 8
     {
         return Err(HsmError::DataLenRange);
     }
@@ -161,7 +168,9 @@ pub fn aes_key_unwrap_padded(
     wrapping_key: &[u8],
     wrapped_key: &[u8],
 ) -> HsmResult<Zeroizing<Vec<u8>>> {
-    if wrapped_key.len() % 8 != 0 || wrapped_key.len() < 16 || wrapped_key.len() > MAX_WRAP_INPUT + 8
+    if wrapped_key.len() % 8 != 0
+        || wrapped_key.len() < 16
+        || wrapped_key.len() > MAX_WRAP_INPUT + 8
     {
         return Err(HsmError::DataLenRange);
     }
@@ -239,7 +248,11 @@ pub fn key_security_strength(
 
 /// Check that an AES KEK of `kek_len_bytes` is at least as strong as a key of
 /// strength `target_bits`. Enforced in FIPS approved mode; logged otherwise.
-pub fn check_wrap_strength(kek_len_bytes: usize, target_bits: u32, fips_mode: bool) -> HsmResult<()> {
+pub fn check_wrap_strength(
+    kek_len_bytes: usize,
+    target_bits: u32,
+    fips_mode: bool,
+) -> HsmResult<()> {
     let kek_bits = (kek_len_bytes * 8) as u32;
     if kek_bits >= target_bits {
         return Ok(());

@@ -366,7 +366,11 @@ fn test_full_pkcs11_lifecycle() {
     // input (RustCrypto backend); backends without a seeding API report
     // RANDOM_SEED_NOT_SUPPORTED.
     let rv = C_SeedRandom(session, random_data.as_mut_ptr(), 32);
-    assert!(rv == CKR_OK || rv == CKR_RANDOM_SEED_NOT_SUPPORTED, "0x{:08X}", rv);
+    assert!(
+        rv == CKR_OK || rv == CKR_RANDOM_SEED_NOT_SUPPORTED,
+        "0x{:08X}",
+        rv
+    );
 
     // 30. C_GetMechanismList
     let mut mech_count: CK_ULONG = 0;

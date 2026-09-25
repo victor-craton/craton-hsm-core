@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use std::sync::Arc;
 
 use craton_hsm::crypto::backend::CryptoBackend;
 use craton_hsm::crypto::params::GcmParams;
-use craton_hsm::crypto::sign::EcCurve;
 use craton_hsm::crypto::pqc::*;
+use craton_hsm::crypto::sign::EcCurve;
 use craton_hsm::crypto::{digest, encrypt, keygen, sign};
 use craton_hsm::pkcs11_abi::constants::*;
 
@@ -487,7 +488,12 @@ fn bench_backend_aes_gcm_decrypt(c: &mut Criterion) {
         let key = backend.generate_aes_key(32, false).unwrap();
         let plaintext = vec![0u8; 4096];
         let ciphertext = backend
-            .aes_gcm_encrypt(key.as_bytes(), &GcmParams::legacy([0u8; 12]), &plaintext, false)
+            .aes_gcm_encrypt(
+                key.as_bytes(),
+                &GcmParams::legacy([0u8; 12]),
+                &plaintext,
+                false,
+            )
             .unwrap();
         group.bench_function(format!("{}/4KB", name), |b| {
             b.iter(|| {

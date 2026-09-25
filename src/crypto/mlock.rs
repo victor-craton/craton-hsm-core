@@ -93,8 +93,9 @@ fn os_unlock_page(page: usize, ps: usize) {
 #[cfg(windows)]
 fn os_lock_page(page: usize, ps: usize) -> Result<(), std::io::Error> {
     // SAFETY: `page` overlaps a live allocation owned by the caller.
-    let ret =
-        unsafe { windows_sys::Win32::System::Memory::VirtualLock(page as *mut core::ffi::c_void, ps) };
+    let ret = unsafe {
+        windows_sys::Win32::System::Memory::VirtualLock(page as *mut core::ffi::c_void, ps)
+    };
     if ret != 0 {
         Ok(())
     } else {
@@ -182,7 +183,10 @@ pub fn locked_page_count() -> usize {
 
 #[cfg(test)]
 fn page_refcount(page: usize) -> Option<usize> {
-    LOCKS.lock().as_ref().and_then(|t| t.pages.get(&page).copied())
+    LOCKS
+        .lock()
+        .as_ref()
+        .and_then(|t| t.pages.get(&page).copied())
 }
 
 #[cfg(test)]

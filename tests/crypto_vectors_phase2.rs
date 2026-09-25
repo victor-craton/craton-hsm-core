@@ -605,8 +605,7 @@ fn test_aes_key_wrap_128_roundtrip() {
     let wrapping_key = keygen::generate_aes_key(16, false).unwrap();
     let key_to_wrap = keygen::generate_aes_key(16, false).unwrap();
 
-    let wrapped =
-        wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
+    let wrapped = wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
     assert_eq!(wrapped.len(), 16 + 8); // key + 8-byte overhead
 
     let unwrapped = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped).unwrap();
@@ -618,8 +617,7 @@ fn test_aes_key_wrap_256_roundtrip() {
     let wrapping_key = keygen::generate_aes_key(32, false).unwrap();
     let key_to_wrap = keygen::generate_aes_key(32, false).unwrap();
 
-    let wrapped =
-        wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
+    let wrapped = wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
     assert_eq!(wrapped.len(), 32 + 8);
 
     let unwrapped = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped).unwrap();
@@ -632,8 +630,7 @@ fn test_aes_key_wrap_wrong_key() {
     let wrapping_key2 = keygen::generate_aes_key(32, false).unwrap();
     let key_to_wrap = keygen::generate_aes_key(32, false).unwrap();
 
-    let wrapped =
-        wrap::aes_key_wrap(wrapping_key1.as_bytes(), key_to_wrap.as_bytes()).unwrap();
+    let wrapped = wrap::aes_key_wrap(wrapping_key1.as_bytes(), key_to_wrap.as_bytes()).unwrap();
     let result = wrap::aes_key_unwrap(wrapping_key2.as_bytes(), &wrapped);
     assert!(result.is_err(), "Unwrap with wrong key should fail");
 }
@@ -643,8 +640,7 @@ fn test_aes_key_wrap_tamper_detection() {
     let wrapping_key = keygen::generate_aes_key(32, false).unwrap();
     let key_to_wrap = keygen::generate_aes_key(32, false).unwrap();
 
-    let mut wrapped =
-        wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
+    let mut wrapped = wrap::aes_key_wrap(wrapping_key.as_bytes(), key_to_wrap.as_bytes()).unwrap();
     // Tamper
     wrapped[0] ^= 0xFF;
     let result = wrap::aes_key_unwrap(wrapping_key.as_bytes(), &wrapped);

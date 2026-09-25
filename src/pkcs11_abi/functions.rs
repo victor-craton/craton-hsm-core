@@ -271,8 +271,7 @@ unsafe fn read_param_struct<T: Copy>(p_mechanism: CK_MECHANISM_PTR) -> Option<T>
     // SAFETY: see function contract; the size is checked before reading.
     unsafe {
         let mech = &*p_mechanism;
-        if mech.p_parameter.is_null() || mech.parameter_len as usize != std::mem::size_of::<T>()
-        {
+        if mech.p_parameter.is_null() || mech.parameter_len as usize != std::mem::size_of::<T>() {
             return None;
         }
         Some(std::ptr::read_unaligned(mech.p_parameter as *const T))
@@ -329,15 +328,15 @@ fn canonical_cipher_param(
                     .map_err(err_to_rv);
             }
             // SAFETY: size checked by read_param_struct.
-            let (p_iv, iv_len, p_aad, aad_len, tag_bits) =
-                if let Some(g) = unsafe { read_param_struct::<CkGcmParams>(p_mechanism) } {
-                    (g.p_iv, g.ul_iv_len, g.p_aad, g.ul_aad_len, g.ul_tag_bits)
-                } else if let Some(g) = unsafe { read_param_struct::<CkGcmParamsV230>(p_mechanism) }
-                {
-                    (g.p_iv, g.ul_iv_len, g.p_aad, g.ul_aad_len, g.ul_tag_bits)
-                } else {
-                    return Err(CKR_MECHANISM_PARAM_INVALID);
-                };
+            let (p_iv, iv_len, p_aad, aad_len, tag_bits) = if let Some(g) =
+                unsafe { read_param_struct::<CkGcmParams>(p_mechanism) }
+            {
+                (g.p_iv, g.ul_iv_len, g.p_aad, g.ul_aad_len, g.ul_tag_bits)
+            } else if let Some(g) = unsafe { read_param_struct::<CkGcmParamsV230>(p_mechanism) } {
+                (g.p_iv, g.ul_iv_len, g.p_aad, g.ul_aad_len, g.ul_tag_bits)
+            } else {
+                return Err(CKR_MECHANISM_PARAM_INVALID);
+            };
             // SAFETY: pointers come from the caller's CK_GCM_PARAMS.
             let aad = unsafe { copy_param_bytes(p_aad, aad_len) }?;
             let params = if encrypt && hsm.algorithm_config.fips_approved_only {
@@ -5539,24 +5538,25 @@ pub extern "C" fn C_DeriveKey(
             (ct, None)
         } else {
             // SAFETY: size checked by read_param_struct.
-            let parsed = if let Some(p) =
-                unsafe { read_param_struct::<CkEcdh1DeriveParams>(p_mechanism) }
-            {
-                // SAFETY: pointers come from the caller's CK_ECDH1_DERIVE_PARAMS.
-                let shared = match unsafe { copy_param_bytes(p.p_shared_data, p.ul_shared_data_len) } {
-                    Ok(v) => v,
-                    Err(rv) => return rv,
+            let parsed =
+                if let Some(p) = unsafe { read_param_struct::<CkEcdh1DeriveParams>(p_mechanism) } {
+                    // SAFETY: pointers come from the caller's CK_ECDH1_DERIVE_PARAMS.
+                    let shared =
+                        match unsafe { copy_param_bytes(p.p_shared_data, p.ul_shared_data_len) } {
+                            Ok(v) => v,
+                            Err(rv) => return rv,
+                        };
+                    let public =
+                        match unsafe { copy_param_bytes(p.p_public_data, p.ul_public_data_len) } {
+                            Ok(v) => v,
+                            Err(rv) => return rv,
+                        };
+                    crate::crypto::params::EcdhParams::from_ck(p.kdf, &shared, &public)
+                } else {
+                    crate::crypto::params::EcdhParams::from_legacy_point(&extract_mechanism_param(
+                        p_mechanism,
+                    ))
                 };
-                let public = match unsafe { copy_param_bytes(p.p_public_data, p.ul_public_data_len) } {
-                    Ok(v) => v,
-                    Err(rv) => return rv,
-                };
-                crate::crypto::params::EcdhParams::from_ck(p.kdf, &shared, &public)
-            } else {
-                crate::crypto::params::EcdhParams::from_legacy_point(&extract_mechanism_param(
-                    p_mechanism,
-                ))
-            };
             match parsed {
                 Ok(p) => (Vec::new(), Some(p)),
                 Err(e) => return err_to_rv(e),

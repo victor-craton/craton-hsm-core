@@ -255,8 +255,7 @@ impl HmacDrbg {
     pub fn new_with_prediction_resistance(prediction_resistance: bool) -> HsmResult<Self> {
         let mut drbg = Self::blank(prediction_resistance, false);
         // entropy_input (security_strength) || nonce (security_strength / 2)
-        let mut seed =
-            Zeroizing::new([0u8; SECURITY_STRENGTH_BYTES + SECURITY_STRENGTH_BYTES / 2]);
+        let mut seed = Zeroizing::new([0u8; SECURITY_STRENGTH_BYTES + SECURITY_STRENGTH_BYTES / 2]);
         entropy::get_entropy(&mut *seed)?;
         // Personalization string: distinguishes instances across processes.
         let mut pers = [0u8; 20];
@@ -542,7 +541,10 @@ impl rand::RngCore for DrbgRng {
             // signatures, so the process is aborted (a panic could be caught
             // by `catch_unwind`, and unwinding across the FFI boundary is UB).
             dest.fill(0);
-            tracing::error!("DRBG catastrophic failure in fill_bytes: {:?} — aborting", e);
+            tracing::error!(
+                "DRBG catastrophic failure in fill_bytes: {:?} — aborting",
+                e
+            );
             std::process::abort();
         }
     }

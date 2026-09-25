@@ -106,7 +106,7 @@ pub fn ml_kem_keygen_from_seed(
 ) -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
     let mut s: ml_kem::Seed = (*seed).into();
     let ek = ml_kem_dispatch!(variant, P => {
-        let dk = ml_kem::DecapsulationKey::<P>::from_seed(s.clone());
+        let dk = ml_kem::DecapsulationKey::<P>::from_seed(s);
         dk.encapsulation_key().to_bytes()[..].to_vec()
     });
     zeroize::Zeroize::zeroize(&mut s);
@@ -160,7 +160,7 @@ pub fn ml_kem_decapsulate(
     }
     let mut seed: ml_kem::Seed = dk_seed.try_into().map_err(|_| HsmError::KeyHandleInvalid)?;
     let result = ml_kem_dispatch!(variant, P => {
-        let dk = ml_kem::DecapsulationKey::<P>::from_seed(seed.clone());
+        let dk = ml_kem::DecapsulationKey::<P>::from_seed(seed);
         match ciphertext.try_into() {
             Ok(ct) => Ok(Zeroizing::new(dk.decapsulate(&ct)[..].to_vec())),
             Err(_) => Err(HsmError::EncryptedDataInvalid),
@@ -484,8 +484,22 @@ mod tests {
         let b = ml_dsa_sign(sk.as_bytes(), b"m", MlDsaVariant::MlDsa44).unwrap();
         assert_ne!(a, b, "hedged signatures must be randomized");
         assert!(ml_dsa_verify(&vk, b"m", &a, MlDsaVariant::MlDsa44).unwrap());
-        let d1 = ml_dsa_sign_with(sk.as_bytes(), b"m", MlDsaVariant::MlDsa44, b"ctx", PqcSigning::Deterministic).unwrap();
-        let d2 = ml_dsa_sign_with(sk.as_bytes(), b"m", MlDsaVariant::MlDsa44, b"ctx", PqcSigning::Deterministic).unwrap();
+        let d1 = ml_dsa_sign_with(
+            sk.as_bytes(),
+            b"m",
+            MlDsaVariant::MlDsa44,
+            b"ctx",
+            PqcSigning::Deterministic,
+        )
+        .unwrap();
+        let d2 = ml_dsa_sign_with(
+            sk.as_bytes(),
+            b"m",
+            MlDsaVariant::MlDsa44,
+            b"ctx",
+            PqcSigning::Deterministic,
+        )
+        .unwrap();
         assert_eq!(d1, d2);
         assert!(ml_dsa_verify_with_context(&vk, b"m", &d1, MlDsaVariant::MlDsa44, b"ctx").unwrap());
         assert!(!ml_dsa_verify(&vk, b"m", &d1, MlDsaVariant::MlDsa44).unwrap());

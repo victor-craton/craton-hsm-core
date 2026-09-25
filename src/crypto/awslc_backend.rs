@@ -45,7 +45,10 @@ pub struct AwsLcBackend;
 /// express. Refused in `fips` builds (non-validated code).
 fn rustcrypto_fallback<T>(what: &str, f: impl FnOnce() -> HsmResult<T>) -> HsmResult<T> {
     if cfg!(feature = "fips") {
-        tracing::error!("{}: not available from the validated module in FIPS builds", what);
+        tracing::error!(
+            "{}: not available from the validated module in FIPS builds",
+            what
+        );
         return Err(HsmError::MechanismInvalid);
     }
     tracing::debug!("{}: using RustCrypto fallback (not FIPS validated)", what);
@@ -102,7 +105,8 @@ fn hash_for_digest_len(len: usize) -> Option<HashAlg> {
 }
 
 fn import_digest(digest_bytes: &[u8], hash: HashAlg) -> HsmResult<digest::Digest> {
-    digest::Digest::import_less_safe(digest_bytes, digest_alg(hash)).map_err(|_| HsmError::DataLenRange)
+    digest::Digest::import_less_safe(digest_bytes, digest_alg(hash))
+        .map_err(|_| HsmError::DataLenRange)
 }
 
 /// DER-encode a PKCS#1 `RSAPublicKey` for `UnparsedPublicKey`.
@@ -118,7 +122,10 @@ fn rsa_public_key_der(n: &[u8], e: &[u8]) -> Vec<u8> {
         }
     }
     fn int(out: &mut Vec<u8>, v: &[u8]) {
-        let first = v.iter().position(|&b| b != 0).unwrap_or(v.len().saturating_sub(1));
+        let first = v
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(v.len().saturating_sub(1));
         let v = &v[first.min(v.len())..];
         let pad = v.first().is_some_and(|&b| b & 0x80 != 0);
         out.push(0x02);
@@ -137,7 +144,7 @@ fn rsa_public_key_der(n: &[u8], e: &[u8]) -> Vec<u8> {
     out
 }
 
-fn ec_point<'a>(public_key: &'a [u8]) -> &'a [u8] {
+fn ec_point(public_key: &[u8]) -> &[u8] {
     // Accept a DER OCTET STRING wrapped point as well as a raw X9.62 point.
     match public_key.first() {
         Some(0x04) if matches!(public_key.len(), 65 | 97) => public_key,
@@ -401,13 +408,17 @@ impl CryptoBackend for AwsLcBackend {
             Some(h) if h == default => {
                 let key_pair = ecdsa_key_pair(curve, private_key_bytes)?;
                 let rng = awslc_rand::SystemRandom::new();
-                let sig = key_pair.sign(&rng, data).map_err(|_| HsmError::GeneralError)?;
+                let sig = key_pair
+                    .sign(&rng, data)
+                    .map_err(|_| HsmError::GeneralError)?;
                 Ok(sig.as_ref().to_vec())
             }
             None if hash_for_digest_len(data.len()) == Some(default) => {
                 let key_pair = ecdsa_key_pair(curve, private_key_bytes)?;
                 let d = import_digest(data, default)?;
-                let sig = key_pair.sign_digest(&d).map_err(|_| HsmError::GeneralError)?;
+                let sig = key_pair
+                    .sign_digest(&d)
+                    .map_err(|_| HsmError::GeneralError)?;
                 Ok(sig.as_ref().to_vec())
             }
             _ => rustcrypto_fallback("ECDSA with a non-default hash", || {
@@ -504,7 +515,11 @@ impl CryptoBackend for AwsLcBackend {
         let sealing_key = LessSafeKey::new(gcm_unbound_key(key)?);
         let mut in_out = plaintext.to_vec();
         let tag = sealing_key
-            .seal_in_place_separate_tag(Nonce::assume_unique_for_key(*iv), Aad::from(aad), &mut in_out)
+            .seal_in_place_separate_tag(
+                Nonce::assume_unique_for_key(*iv),
+                Aad::from(aad),
+                &mut in_out,
+            )
             .map_err(|_| HsmError::GeneralError)?;
         in_out.extend_from_slice(&tag.as_ref()[..tag_len]);
         Ok(in_out)
@@ -530,7 +545,11 @@ impl CryptoBackend for AwsLcBackend {
         let opening_key = LessSafeKey::new(gcm_unbound_key(key)?);
         let mut in_out = Zeroizing::new(ct_and_tag.to_vec());
         let pt_len = opening_key
-            .open_in_place(Nonce::assume_unique_for_key(*iv), Aad::from(aad), &mut in_out)
+            .open_in_place(
+                Nonce::assume_unique_for_key(*iv),
+                Aad::from(aad),
+                &mut in_out,
+            )
             .map_err(|_| HsmError::EncryptedDataInvalid)?
             .len();
         in_out.truncate(pt_len);
@@ -756,7 +775,8 @@ impl CryptoBackend for AwsLcBackend {
                 }
             });
         };
-        let kek = KeyEncryptionKey::new(kw_alg, wrapping_key).map_err(|_| HsmError::KeySizeRange)?;
+        let kek =
+            KeyEncryptionKey::new(kw_alg, wrapping_key).map_err(|_| HsmError::KeySizeRange)?;
         if padded {
             if key_to_wrap.is_empty() {
                 return Err(HsmError::DataLenRange);
@@ -800,7 +820,8 @@ impl CryptoBackend for AwsLcBackend {
         if wrapped_key.len() % 8 != 0 || wrapped_key.len() < if padded { 16 } else { 24 } {
             return Err(HsmError::DataLenRange);
         }
-        let kek = KeyEncryptionKey::new(kw_alg, wrapping_key).map_err(|_| HsmError::KeySizeRange)?;
+        let kek =
+            KeyEncryptionKey::new(kw_alg, wrapping_key).map_err(|_| HsmError::KeySizeRange)?;
         let mut output = Zeroizing::new(vec![0u8; wrapped_key.len()]);
         let n = if padded {
             kek.unwrap_with_padding(wrapped_key, &mut output)
@@ -888,7 +909,10 @@ fn generate_ec(alg: &'static agreement::Algorithm) -> HsmResult<(RawKeyMaterial,
         .as_be_bytes()
         .map_err(|_| HsmError::GeneralError)?;
     let sk = Zeroizing::new(priv_bytes.as_ref().to_vec());
-    Ok((RawKeyMaterial::new(sk.to_vec()), public_key.as_ref().to_vec()))
+    Ok((
+        RawKeyMaterial::new(sk.to_vec()),
+        public_key.as_ref().to_vec(),
+    ))
 }
 
 fn derive_ec_public_key(
@@ -1040,7 +1064,6 @@ impl DigestAccumulator for AwsLcHasher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::params::{EcdhParams, CKD_SHA256_KDF};
 
     /// All backend CASTs pass through AWS-LC (A1-04: POST exercises the
     /// configured backend).
@@ -1055,6 +1078,7 @@ mod tests {
     #[cfg(feature = "rustcrypto-backend")]
     #[test]
     fn differential_against_rustcrypto() {
+        use crate::crypto::params::{EcdhParams, CKD_SHA256_KDF};
         use crate::crypto::rustcrypto_backend::RustCryptoBackend;
         let aws = AwsLcBackend;
         let rc = RustCryptoBackend;
@@ -1062,8 +1086,12 @@ mod tests {
         let (b_sk, b_pk) = aws.generate_ec_p256_key_pair().unwrap();
         let pa = EcdhParams::from_ck(CKD_SHA256_KDF, b"x", &b_pk).unwrap();
         let pb = EcdhParams::from_ck(CKD_SHA256_KDF, b"x", &a_pk).unwrap();
-        let ka = rc.ecdh_derive(EcCurve::P256, a_sk.as_bytes(), &pa, 32, true).unwrap();
-        let kb = aws.ecdh_derive(EcCurve::P256, b_sk.as_bytes(), &pb, 32, true).unwrap();
+        let ka = rc
+            .ecdh_derive(EcCurve::P256, a_sk.as_bytes(), &pa, 32, true)
+            .unwrap();
+        let kb = aws
+            .ecdh_derive(EcCurve::P256, b_sk.as_bytes(), &pb, 32, true)
+            .unwrap();
         assert_eq!(ka.as_bytes(), kb.as_bytes());
 
         let key = [7u8; 32];

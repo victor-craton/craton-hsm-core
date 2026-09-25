@@ -414,7 +414,7 @@ pub fn rsa_pkcs1v15_verify(
 }
 
 /// RSA PKCS#1 v1.5 sign with a pre-computed digest (blinded).
-pub(crate) fn rsa_pkcs1v15_sign_prehashed(
+pub fn rsa_pkcs1v15_sign_prehashed(
     private_key_der: &[u8],
     digest: &[u8],
     hash_alg: HashAlg,
@@ -427,7 +427,7 @@ pub(crate) fn rsa_pkcs1v15_sign_prehashed(
 }
 
 /// RSA PKCS#1 v1.5 verify with a pre-computed digest.
-pub(crate) fn rsa_pkcs1v15_verify_prehashed(
+pub fn rsa_pkcs1v15_verify_prehashed(
     modulus: &[u8],
     public_exponent: &[u8],
     digest: &[u8],
@@ -466,7 +466,7 @@ pub fn rsa_pss_verify(
 }
 
 /// RSA-PSS sign with a pre-computed digest (blinded; salt from the DRBG).
-pub(crate) fn rsa_pss_sign_prehashed(
+pub fn rsa_pss_sign_prehashed(
     private_key_der: &[u8],
     digest: &[u8],
     hash_alg: HashAlg,
@@ -480,7 +480,7 @@ pub(crate) fn rsa_pss_sign_prehashed(
 
 /// RSA-PSS verify with a pre-computed digest (salt length must equal the
 /// hash length).
-pub(crate) fn rsa_pss_verify_prehashed(
+pub fn rsa_pss_verify_prehashed(
     modulus: &[u8],
     public_exponent: &[u8],
     digest: &[u8],
@@ -531,7 +531,12 @@ pub fn rsa_oaep_encrypt(
     plaintext: &[u8],
     hash_alg: OaepHash,
 ) -> HsmResult<Vec<u8>> {
-    rsa_oaep_encrypt_with_params(modulus, public_exponent, plaintext, &OaepParams::new(hash_alg))
+    rsa_oaep_encrypt_with_params(
+        modulus,
+        public_exponent,
+        plaintext,
+        &OaepParams::new(hash_alg),
+    )
 }
 
 /// RSA-OAEP encrypt honouring the OAEP label (H1-16).
@@ -683,30 +688,44 @@ fn ecdsa_verify_prehash(
 
 /// ECDSA P-256 with SHA-256 (raw `r || s` output).
 pub fn ecdsa_p256_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
-    ecdsa_sign(EcCurve::P256, private_key_bytes, data, Some(HashAlg::Sha256))
+    ecdsa_sign(
+        EcCurve::P256,
+        private_key_bytes,
+        data,
+        Some(HashAlg::Sha256),
+    )
 }
 
 /// ECDSA P-256 with SHA-256 verify (raw `r || s`).
-pub fn ecdsa_p256_verify(
-    public_key_sec1: &[u8],
-    data: &[u8],
-    signature: &[u8],
-) -> HsmResult<bool> {
-    ecdsa_verify(EcCurve::P256, public_key_sec1, data, signature, Some(HashAlg::Sha256))
+pub fn ecdsa_p256_verify(public_key_sec1: &[u8], data: &[u8], signature: &[u8]) -> HsmResult<bool> {
+    ecdsa_verify(
+        EcCurve::P256,
+        public_key_sec1,
+        data,
+        signature,
+        Some(HashAlg::Sha256),
+    )
 }
 
 /// ECDSA P-384 with SHA-384 (raw `r || s` output).
 pub fn ecdsa_p384_sign(private_key_bytes: &[u8], data: &[u8]) -> HsmResult<Vec<u8>> {
-    ecdsa_sign(EcCurve::P384, private_key_bytes, data, Some(HashAlg::Sha384))
+    ecdsa_sign(
+        EcCurve::P384,
+        private_key_bytes,
+        data,
+        Some(HashAlg::Sha384),
+    )
 }
 
 /// ECDSA P-384 with SHA-384 verify (raw `r || s`).
-pub fn ecdsa_p384_verify(
-    public_key_sec1: &[u8],
-    data: &[u8],
-    signature: &[u8],
-) -> HsmResult<bool> {
-    ecdsa_verify(EcCurve::P384, public_key_sec1, data, signature, Some(HashAlg::Sha384))
+pub fn ecdsa_p384_verify(public_key_sec1: &[u8], data: &[u8], signature: &[u8]) -> HsmResult<bool> {
+    ecdsa_verify(
+        EcCurve::P384,
+        public_key_sec1,
+        data,
+        signature,
+        Some(HashAlg::Sha384),
+    )
 }
 
 // ============================================================================
@@ -806,7 +825,10 @@ pub fn pss_mechanism_to_hash(mechanism: CK_MECHANISM_TYPE) -> HsmResult<HashAlg>
 pub fn is_pss_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
     matches!(
         mechanism,
-        CKM_RSA_PKCS_PSS | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
+        CKM_RSA_PKCS_PSS
+            | CKM_SHA256_RSA_PKCS_PSS
+            | CKM_SHA384_RSA_PKCS_PSS
+            | CKM_SHA512_RSA_PKCS_PSS
     )
 }
 
@@ -910,7 +932,10 @@ mod tests {
         // Raw signing of a SHA-256 DigestInfo equals CKM_SHA256_RSA_PKCS.
         assert!(rsa_pkcs1v15_verify(&n, &e, b"payload", &raw, Some(HashAlg::Sha256)).unwrap());
         assert!(rsa_pkcs1v15_verify(&n, &e, &di, &raw, None).unwrap());
-        assert_eq!(parse_digest_info(&di).map(|(a, _)| a), Some(HashAlg::Sha256));
+        assert_eq!(
+            parse_digest_info(&di).map(|(a, _)| a),
+            Some(HashAlg::Sha256)
+        );
     }
 
     #[test]

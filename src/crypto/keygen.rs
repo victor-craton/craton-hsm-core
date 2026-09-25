@@ -53,7 +53,11 @@ pub fn generate_rsa_key_pair(
     let der = private_key
         .to_pkcs8_der()
         .map_err(|_| HsmError::GeneralError)?;
-    Ok((RawKeyMaterial::new(der.as_bytes().to_vec()), modulus, pub_exp))
+    Ok((
+        RawKeyMaterial::new(der.as_bytes().to_vec()),
+        modulus,
+        pub_exp,
+    ))
 }
 
 /// Generate an EC P-256 key pair. Returns (private_scalar, public_point_uncompressed).
@@ -63,7 +67,10 @@ pub fn generate_ec_p256_key_pair() -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
     let secret_key = p256::SecretKey::random(&mut rng);
     let pub_point = secret_key.public_key().to_encoded_point(false);
     let sk = Zeroizing::new(secret_key.to_bytes());
-    Ok((RawKeyMaterial::new(sk.to_vec()), pub_point.as_bytes().to_vec()))
+    Ok((
+        RawKeyMaterial::new(sk.to_vec()),
+        pub_point.as_bytes().to_vec(),
+    ))
 }
 
 /// Generate an EC P-384 key pair. Returns (private_scalar, public_point_uncompressed).
@@ -73,7 +80,10 @@ pub fn generate_ec_p384_key_pair() -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
     let secret_key = p384::SecretKey::random(&mut rng);
     let pub_point = secret_key.public_key().to_encoded_point(false);
     let sk = Zeroizing::new(secret_key.to_bytes());
-    Ok((RawKeyMaterial::new(sk.to_vec()), pub_point.as_bytes().to_vec()))
+    Ok((
+        RawKeyMaterial::new(sk.to_vec()),
+        pub_point.as_bytes().to_vec(),
+    ))
 }
 
 /// Generate an Ed25519 key pair. Returns (seed, public_key).
@@ -82,5 +92,8 @@ pub fn generate_ed25519_key_pair() -> HsmResult<(RawKeyMaterial, Vec<u8>)> {
     crate::crypto::drbg::fill_random(&mut *seed)?;
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let verifying_key = signing_key.verifying_key();
-    Ok((RawKeyMaterial::new(seed.to_vec()), verifying_key.to_bytes().to_vec()))
+    Ok((
+        RawKeyMaterial::new(seed.to_vec()),
+        verifying_key.to_bytes().to_vec(),
+    ))
 }
