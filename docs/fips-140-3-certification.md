@@ -586,7 +586,7 @@ bits (SP 800-131A); AES 128/192/256 bits; EC P-256/P-384.
 |---|---|
 | `C_DestroyObject` | the object's key value (#1–#6, #8) |
 | `C_CloseSession` / `C_CloseAllSessions` | session objects; operation buffers (#19) |
-| `C_Logout` | per-login state; persistence keyring entries for the slot |
+| `C_Logout` | per-login state (the slot's unwrapped DEK deliberately stays in the keyring until `C_Finalize` so that token objects remain loaded) |
 | `C_InitToken` | all objects of the slot, PIN verifiers (#11), DEK (#13, crypto-shredding the persisted records), GCM tracking (#18), RSA parsed-key cache |
 | `C_Finalize` | all volatile SSPs: objects in memory, DRBG state (#16), operation-state key (#21), DEK keyring (#13/#14), RSA parsed-key cache |
 | Error state | services are refused; SSPs are zeroized at `C_Finalize` |

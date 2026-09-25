@@ -26,8 +26,8 @@ These fixes affect internal behavior but are transparent to consumers:
 **Potentially breaking** if your config uses values now rejected:
 
 1. **`pbkdf2_iterations`**: Must be >= 100,000. If your config had a lower value, increase it.
-2. **`storage_path`**: Paths containing `..`, symlinks, or pointing to sensitive directories (`.git`, `.ssh`, `.aws`, `.gnupg`) are now rejected. Use simple relative paths.
-3. **File permissions**: Config files must be owner-readable only (0o600 on Unix; no Everyone/Users write on Windows).
+2. **`storage_path`**: Paths containing `..`, symlinks, or pointing to sensitive or system directories (`.git`, `.ssh`, `.aws`, `.gnupg`, `/etc`, `/usr`, ...) are rejected. Use an absolute, service-owned directory such as `/var/lib/craton-hsm` (relative paths still work but depend on the working directory).
+3. **File permissions and location**: Config files must be owned by the user or root and not be group/world-writable (no Everyone/Users write on Windows); the library no longer reads `./craton_hsm.toml` — use `CRATON_HSM_CONFIG` or `/etc/craton-hsm/craton_hsm.toml`.
 
 ### Recommended Steps
 

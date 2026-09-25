@@ -63,9 +63,11 @@ A `fips` build **ignores `craton_hsm.toml` and `CRATON_HSM_CONFIG` /
 | everything else | the documented defaults ([configuration-reference.md](configuration-reference.md)) |
 
 Consequently token storage, audit log path, PIN policy and session limits
-cannot be changed in a `fips` build; they use the defaults (storage in
-`craton_hsm_store` and audit log `craton_hsm_audit.jsonl`, both relative to
-the process working directory).
+cannot be changed in a `fips` build; they use the defaults: the token is
+**ephemeral** (`persist_objects = false`), and the storage directory
+`craton_hsm_store` and audit log `craton_hsm_audit.jsonl` are relative to the
+process working directory. Run the process from a dedicated, service-owned
+working directory. Audit logging is fail-closed (`audit.fail_closed = true`).
 
 ### Effect of the approved-only policy
 
