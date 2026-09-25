@@ -964,118 +964,25 @@ fn test_ml_dsa_44_sign_buffer_too_small() {
 }
 
 // ===========================================================================
-// Test 23: Hybrid ML-DSA + ECDSA sign + verify through ABI
+// Test 23: Hybrid ML-DSA + ECDSA is no longer offered (H2-19 / A2-18)
 // ===========================================================================
 #[test]
-fn test_hybrid_ml_dsa_ecdsa_sign_verify() {
-    // The hybrid mechanism CKM_HYBRID_ML_DSA_ECDSA does not support keygen via
-    // C_GenerateKeyPair. Instead, we generate ML-DSA-65 and EC-P256 keys separately,
-    // then attach the ECDSA key data to the ML-DSA objects via C_SetAttributeValue,
-    // and use the hybrid mechanism for sign/verify.
+fn test_hybrid_ml_dsa_ecdsa_rejected() {
+    // The vendor hybrid mechanism took its ECDSA private key from the public
+    // CKA_EC_POINT attribute and lacked domain separation, so it was removed.
+    // C_SignInit / C_VerifyInit must reject it.
     let session = setup_user_session();
-
-    // Step 1: Generate ML-DSA-65 keypair (for ML-DSA component)
     let (ml_pub, ml_priv) = generate_ml_dsa_keypair(session, CKM_ML_DSA_65);
 
-    // Step 2: Generate EC-P256 keypair (for ECDSA component)
-    let mut ec_mechanism = CK_MECHANISM {
-        mechanism: CKM_EC_KEY_PAIR_GEN,
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_HYBRID_ML_DSA_ECDSA,
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let ck_true: CK_BBOOL = CK_TRUE;
-    // P-256 OID: 1.2.840.10045.3.1.7 (DER-encoded)
-    let ec_params: &[u8] = &[0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
-    let mut ec_pub_template = vec![
-        CK_ATTRIBUTE {
-            attr_type: CKA_EC_PARAMS,
-            p_value: ec_params.as_ptr() as CK_VOID_PTR,
-            value_len: ec_params.len() as CK_ULONG,
-        },
-        CK_ATTRIBUTE {
-            attr_type: CKA_VERIFY,
-            p_value: &ck_true as *const _ as CK_VOID_PTR,
-            value_len: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
-        },
-    ];
-    let ck_false: CK_BBOOL = CK_FALSE;
-    let mut ec_priv_template = vec![
-        CK_ATTRIBUTE {
-            attr_type: CKA_SIGN,
-            p_value: &ck_true as *const _ as CK_VOID_PTR,
-            value_len: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
-        },
-        // Mark as non-sensitive and extractable so we can read CKA_VALUE
-        CK_ATTRIBUTE {
-            attr_type: CKA_SENSITIVE,
-            p_value: &ck_false as *const _ as CK_VOID_PTR,
-            value_len: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
-        },
-        CK_ATTRIBUTE {
-            attr_type: CKA_EXTRACTABLE,
-            p_value: &ck_true as *const _ as CK_VOID_PTR,
-            value_len: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
-        },
-    ];
-    let mut ec_pub: CK_OBJECT_HANDLE = 0;
-    let mut ec_priv: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut ec_mechanism,
-        ec_pub_template.as_mut_ptr(),
-        ec_pub_template.len() as CK_ULONG,
-        ec_priv_template.as_mut_ptr(),
-        ec_priv_template.len() as CK_ULONG,
-        &mut ec_pub,
-        &mut ec_priv,
-    );
-    assert_eq!(rv, CKR_OK, "EC-P256 keygen failed: 0x{:08X}", rv);
-
-    // Step 3: Read ECDSA private key bytes (non-sensitive, so CKA_VALUE is readable)
-    let ecdsa_priv_bytes = read_variable_attribute(session, ec_priv, CKA_VALUE);
-
-    // Step 4: Read ECDSA public key point
-    let ecdsa_pub_bytes = read_variable_attribute(session, ec_pub, CKA_EC_POINT);
-
-    // Step 5: Attach ECDSA keys to ML-DSA objects via C_SetAttributeValue
-    // Set CKA_EC_POINT on the ML-DSA private key (ECDSA private key for signing)
-    let mut set_template_priv = [CK_ATTRIBUTE {
-        attr_type: CKA_EC_POINT,
-        p_value: ecdsa_priv_bytes.as_ptr() as CK_VOID_PTR,
-        value_len: ecdsa_priv_bytes.len() as CK_ULONG,
-    }];
-    let rv = C_SetAttributeValue(session, ml_priv, set_template_priv.as_mut_ptr(), 1);
-    assert_eq!(
-        rv, CKR_OK,
-        "Setting ECDSA key on ML-DSA priv failed: 0x{:08X}",
-        rv
-    );
-
-    // Set CKA_EC_POINT on the ML-DSA public key (ECDSA public key for verification)
-    let mut set_template_pub = [CK_ATTRIBUTE {
-        attr_type: CKA_EC_POINT,
-        p_value: ecdsa_pub_bytes.as_ptr() as CK_VOID_PTR,
-        value_len: ecdsa_pub_bytes.len() as CK_ULONG,
-    }];
-    let rv = C_SetAttributeValue(session, ml_pub, set_template_pub.as_mut_ptr(), 1);
-    assert_eq!(
-        rv, CKR_OK,
-        "Setting ECDSA key on ML-DSA pub failed: 0x{:08X}",
-        rv
-    );
-
-    // Step 6: Sign with hybrid mechanism
-    let data = b"hybrid PQC + classical test";
-    let signature = sign_data(session, CKM_HYBRID_ML_DSA_ECDSA, ml_priv, data);
-    assert!(
-        signature.len() > 3309,
-        "Hybrid signature should be larger than bare ML-DSA-65 (3309), got {}",
-        signature.len()
-    );
-
-    // Step 7: Verify with hybrid mechanism
-    let rv = verify_data(session, CKM_HYBRID_ML_DSA_ECDSA, ml_pub, data, &signature);
-    assert_eq!(rv, CKR_OK, "Hybrid verify failed: 0x{:08X}", rv);
+    let rv = C_SignInit(session, &mut mechanism, ml_priv);
+    assert_eq!(rv, CKR_MECHANISM_INVALID, "hybrid C_SignInit: 0x{:08X}", rv);
+    let rv = C_VerifyInit(session, &mut mechanism, ml_pub);
+    assert_eq!(rv, CKR_MECHANISM_INVALID, "hybrid C_VerifyInit: 0x{:08X}", rv);
 }
 
 // ===========================================================================

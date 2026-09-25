@@ -4,6 +4,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::sync::Arc;
 
 use craton_hsm::crypto::backend::CryptoBackend;
+use craton_hsm::crypto::params::GcmParams;
+use craton_hsm::crypto::sign::EcCurve;
 use craton_hsm::crypto::pqc::*;
 use craton_hsm::crypto::{digest, encrypt, keygen, sign};
 use craton_hsm::pkcs11_abi::constants::*;
@@ -331,9 +333,8 @@ fn bench_ml_kem_decap(c: &mut Criterion) {
 // ============================================================================
 //
 // These benchmarks run identical operations through the CryptoBackend trait.
-// The aws-lc-rs backend has moved to the craton_hsm-awslc crate (enterprise).
-// To compare backends, add craton_hsm-awslc as a dev-dependency and push
-// its AwsLcBackend into the backends vec below.
+// The inline aws-lc-rs backend is included when built with
+// `--features awslc-backend` (or `fips`).
 
 fn get_backends() -> Vec<(&'static str, Arc<dyn CryptoBackend>)> {
     let mut backends: Vec<(&'static str, Arc<dyn CryptoBackend>)> = Vec::new();
@@ -344,8 +345,9 @@ fn get_backends() -> Vec<(&'static str, Arc<dyn CryptoBackend>)> {
         backends.push(("RustCrypto", Arc::new(RustCryptoBackend)));
     }
 
+    #[cfg(feature = "awslc-backend")]
     {
-        use craton_hsm_awslc::AwsLcBackend;
+        use craton_hsm::crypto::awslc_backend::AwsLcBackend;
         backends.push(("AwsLc", Arc::new(AwsLcBackend)));
     }
 
@@ -410,7 +412,12 @@ fn bench_backend_ecdsa_p256_sign(c: &mut Criterion) {
             b.iter(|| {
                 black_box(
                     backend
-                        .ecdsa_p256_sign(black_box(priv_key.as_bytes()), black_box(&data))
+                        .ecdsa_sign(
+                            EcCurve::P256,
+                            black_box(priv_key.as_bytes()),
+                            black_box(&data),
+                            Some(sign::HashAlg::Sha256),
+                        )
                         .unwrap(),
                 )
             })
@@ -424,15 +431,24 @@ fn bench_backend_ecdsa_p256_verify(c: &mut Criterion) {
     for (name, backend) in get_backends() {
         let (priv_key, pub_key) = backend.generate_ec_p256_key_pair().unwrap();
         let data = vec![0u8; 32];
-        let signature = backend.ecdsa_p256_sign(priv_key.as_bytes(), &data).unwrap();
+        let signature = backend
+            .ecdsa_sign(
+                EcCurve::P256,
+                priv_key.as_bytes(),
+                &data,
+                Some(sign::HashAlg::Sha256),
+            )
+            .unwrap();
         group.bench_function(name, |b| {
             b.iter(|| {
                 black_box(
                     backend
-                        .ecdsa_p256_verify(
+                        .ecdsa_verify(
+                            EcCurve::P256,
                             black_box(&pub_key),
                             black_box(&data),
                             black_box(&signature),
+                            Some(sign::HashAlg::Sha256),
                         )
                         .unwrap(),
                 )
@@ -451,7 +467,12 @@ fn bench_backend_aes_gcm_encrypt(c: &mut Criterion) {
             b.iter(|| {
                 black_box(
                     backend
-                        .aes_256_gcm_encrypt(black_box(key.as_bytes()), black_box(&plaintext))
+                        .aes_gcm_encrypt(
+                            black_box(key.as_bytes()),
+                            &GcmParams::legacy([0u8; 12]),
+                            black_box(&plaintext),
+                            false,
+                        )
                         .unwrap(),
                 )
             })
@@ -466,13 +487,17 @@ fn bench_backend_aes_gcm_decrypt(c: &mut Criterion) {
         let key = backend.generate_aes_key(32, false).unwrap();
         let plaintext = vec![0u8; 4096];
         let ciphertext = backend
-            .aes_256_gcm_encrypt(key.as_bytes(), &plaintext)
+            .aes_gcm_encrypt(key.as_bytes(), &GcmParams::legacy([0u8; 12]), &plaintext, false)
             .unwrap();
         group.bench_function(format!("{}/4KB", name), |b| {
             b.iter(|| {
                 black_box(
                     backend
-                        .aes_256_gcm_decrypt(black_box(key.as_bytes()), black_box(&ciphertext))
+                        .aes_gcm_decrypt(
+                            black_box(key.as_bytes()),
+                            &GcmParams::legacy([0u8; 12]),
+                            black_box(&ciphertext),
+                        )
                         .unwrap(),
                 )
             })

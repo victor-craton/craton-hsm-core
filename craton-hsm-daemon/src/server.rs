@@ -1545,7 +1545,8 @@ impl HsmService for HsmServiceImpl {
             Some(format!("key={}", req.key_handle)),
         )?;
 
-        Ok(Response::new(DecryptResponse { data }))
+        // Decrypt helpers return zeroizing buffers; copy out for the response.
+        Ok(Response::new(DecryptResponse { data: data.to_vec() }))
     }
 
     async fn digest(

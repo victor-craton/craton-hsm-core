@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
-//! Phase 3 PQC integration tests — roundtrip KAT tests for ML-KEM, ML-DSA, SLH-DSA, and hybrid
+//! Phase 3 PQC integration tests — roundtrip tests for ML-KEM, ML-DSA and SLH-DSA
 
 use craton_hsm::crypto::pqc::*;
 
@@ -155,12 +155,35 @@ fn test_ml_dsa_wrong_key_fails() {
 
 #[test]
 fn test_ml_dsa_deterministic() {
-    let (sk_seed, _vk_bytes) = ml_dsa_keygen(MlDsaVariant::MlDsa65).unwrap();
+    // Default signing is hedged (FIPS 204 recommendation): two signatures of
+    // the same message differ but both verify.
+    let (sk_seed, vk_bytes) = ml_dsa_keygen(MlDsaVariant::MlDsa65).unwrap();
     let message = b"deterministic signing test";
-    let sig1 = ml_dsa_sign(sk_seed.as_bytes(), message, MlDsaVariant::MlDsa65).unwrap();
-    let sig2 = ml_dsa_sign(sk_seed.as_bytes(), message, MlDsaVariant::MlDsa65).unwrap();
+    let h1 = ml_dsa_sign(sk_seed.as_bytes(), message, MlDsaVariant::MlDsa65).unwrap();
+    let h2 = ml_dsa_sign(sk_seed.as_bytes(), message, MlDsaVariant::MlDsa65).unwrap();
+    assert_ne!(h1, h2, "Hedged signing must be randomized");
+    assert!(ml_dsa_verify(&vk_bytes, message, &h1, MlDsaVariant::MlDsa65).unwrap());
+    assert!(ml_dsa_verify(&vk_bytes, message, &h2, MlDsaVariant::MlDsa65).unwrap());
+
+    // The explicit deterministic variant is reproducible.
+    let d1 = ml_dsa_sign_with(
+        sk_seed.as_bytes(),
+        message,
+        MlDsaVariant::MlDsa65,
+        &[],
+        PqcSigning::Deterministic,
+    )
+    .unwrap();
+    let d2 = ml_dsa_sign_with(
+        sk_seed.as_bytes(),
+        message,
+        MlDsaVariant::MlDsa65,
+        &[],
+        PqcSigning::Deterministic,
+    )
+    .unwrap();
     assert_eq!(
-        sig1, sig2,
+        d1, d2,
         "Deterministic signing should produce identical signatures"
     );
 }
@@ -214,50 +237,19 @@ fn test_slh_dsa_wrong_message_fails() {
 }
 
 // ============================================================================
-// Hybrid ML-DSA-65 + ECDSA-P256 tests
+// Hybrid ML-DSA + ECDSA: removed (H2-19 / A2-18)
 // ============================================================================
 
 #[test]
-fn test_hybrid_sign_verify() {
-    // Generate ML-DSA-65 keypair
-    let (ml_dsa_sk, ml_dsa_vk) = ml_dsa_keygen(MlDsaVariant::MlDsa65).unwrap();
-
-    // Generate ECDSA P-256 keypair
-    let (ecdsa_sk, ecdsa_pk) = craton_hsm::crypto::keygen::generate_ec_p256_key_pair().unwrap();
-
-    let message = b"Hybrid PQC + classical test message";
-
-    let combined_sig = hybrid_sign(ml_dsa_sk.as_bytes(), ecdsa_sk.as_bytes(), message).unwrap();
-    assert!(combined_sig.len() > 4 + 3309); // ML-DSA-65 sig + ECDSA overhead
-
-    let valid = hybrid_verify(&ml_dsa_vk, &ecdsa_pk, message, &combined_sig).unwrap();
-    assert!(valid);
-}
-
-#[test]
-fn test_hybrid_wrong_message_fails() {
-    let (ml_dsa_sk, ml_dsa_vk) = ml_dsa_keygen(MlDsaVariant::MlDsa65).unwrap();
-    let (ecdsa_sk, ecdsa_pk) = craton_hsm::crypto::keygen::generate_ec_p256_key_pair().unwrap();
-
-    let message = b"correct message";
-    let combined_sig = hybrid_sign(ml_dsa_sk.as_bytes(), ecdsa_sk.as_bytes(), message).unwrap();
-
-    let valid = hybrid_verify(&ml_dsa_vk, &ecdsa_pk, b"wrong message", &combined_sig).unwrap();
-    assert!(!valid);
-}
-
-#[test]
-fn test_hybrid_mismatched_keys_fails() {
-    let (ml_dsa_sk, _ml_dsa_vk) = ml_dsa_keygen(MlDsaVariant::MlDsa65).unwrap();
-    let (_ml_dsa_sk2, ml_dsa_vk2) = ml_dsa_keygen(MlDsaVariant::MlDsa65).unwrap();
-    let (ecdsa_sk, ecdsa_pk) = craton_hsm::crypto::keygen::generate_ec_p256_key_pair().unwrap();
-
-    let message = b"test message";
-    let combined_sig = hybrid_sign(ml_dsa_sk.as_bytes(), ecdsa_sk.as_bytes(), message).unwrap();
-
-    // Verify with different ML-DSA key — should fail
-    let valid = hybrid_verify(&ml_dsa_vk2, &ecdsa_pk, message, &combined_sig).unwrap();
-    assert!(!valid);
+fn test_hybrid_mechanism_not_advertised() {
+    // The vendor hybrid mechanism signed its classical half with the public
+    // CKA_EC_POINT and had no domain separation; it has been removed.
+    use craton_hsm::pkcs11_abi::constants::*;
+    assert!(!craton_hsm::crypto::mechanisms::is_sign_mechanism(
+        CKM_HYBRID_ML_DSA_ECDSA
+    ));
+    assert!(!craton_hsm::crypto::mechanisms::supported_mechanisms()
+        .contains(&CKM_HYBRID_ML_DSA_ECDSA));
 }
 
 // ============================================================================
@@ -326,5 +318,5 @@ fn test_supported_mechanisms_includes_pqc() {
     assert!(mechs.contains(&CKM_ML_DSA_87));
     assert!(mechs.contains(&CKM_SLH_DSA_SHA2_128S));
     assert!(mechs.contains(&CKM_SLH_DSA_SHA2_256S));
-    assert!(mechs.contains(&CKM_HYBRID_ML_DSA_ECDSA));
+    assert!(!mechs.contains(&CKM_HYBRID_ML_DSA_ECDSA));
 }

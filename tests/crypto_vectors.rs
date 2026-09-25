@@ -12,7 +12,7 @@ fn test_aes_256_gcm_roundtrip() {
     assert_ne!(&ciphertext[12..], plaintext.as_slice()); // Must be encrypted
 
     let decrypted = encrypt::aes_256_gcm_decrypt(key.as_bytes(), &ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
+    assert_eq!(&decrypted[..], &plaintext[..]);
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn test_aes_gcm_empty_plaintext() {
 
     let ciphertext = encrypt::aes_256_gcm_encrypt(key.as_bytes(), plaintext).unwrap();
     let decrypted = encrypt::aes_256_gcm_decrypt(key.as_bytes(), &ciphertext).unwrap();
-    assert_eq!(decrypted, plaintext);
+    assert_eq!(&decrypted[..], &plaintext[..]);
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn test_aes_256_gcm_kat_roundtrip_integrity() {
     let ciphertext = encrypt::aes_256_gcm_encrypt(&key, &plaintext).unwrap();
     let decrypted = encrypt::aes_256_gcm_decrypt(&key, &ciphertext).unwrap();
     assert_eq!(
-        decrypted, plaintext,
+        &decrypted[..], &plaintext[..],
         "AES-256-GCM KAT: decrypt must match plaintext"
     );
 }
@@ -254,7 +254,7 @@ fn test_aes_256_cbc_nist_kat() {
     // Verify decrypt recovers plaintext
     let decrypted = encrypt::aes_cbc_decrypt(&key, &iv, &ciphertext).unwrap();
     assert_eq!(
-        decrypted, plaintext,
+        &decrypted[..], &plaintext[..],
         "AES-256-CBC decrypt must match original plaintext"
     );
 }
@@ -285,16 +285,16 @@ fn test_aes_256_ctr_nist_kat() {
     )
     .unwrap();
 
-    let ciphertext = encrypt::aes_ctr_crypt(&key, &iv, &plaintext).unwrap();
+    let ciphertext = encrypt::aes_ctr_encrypt(&key, &iv, &plaintext).unwrap();
     assert_eq!(
         ciphertext, expected_ct,
         "AES-256-CTR must match NIST SP 800-38A F.5.5"
     );
 
     // CTR mode: encrypt again to decrypt
-    let decrypted = encrypt::aes_ctr_crypt(&key, &iv, &ciphertext).unwrap();
+    let decrypted = encrypt::aes_ctr_decrypt(&key, &iv, &ciphertext).unwrap();
     assert_eq!(
-        decrypted, plaintext,
+        &decrypted[..], &plaintext[..],
         "AES-256-CTR decrypt must match original plaintext"
     );
 }
