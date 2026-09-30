@@ -130,12 +130,12 @@ Audit date: 2026-09-24. Auditor role: supply-chain / SDLC certification-readines
 ### A3-01 [High] Public "remote test server" endpoint and SO/User PINs committed, with TLS validation disabled
 
 - **Location:**
-  - `kreya/remote.krenv:3-5` (`"server_url": "http://185.177.116.16:9898"` with `so_pin_b64` and `user_pin_b64`)
+  - `kreya/remote.krenv:3-5` (`server_url` pointing at a public plaintext gRPC host, with `so_pin_b64` and `user_pin_b64`)
   - `kreya/default.krenv:4-5`
   - `kreya/craton-hsm/HsmService/01-InitToken/InitToken-request.json:3`
   - `kreya/craton-hsm/HsmService/03-LoginSO/LoginSO-request.json:4`
   - `kreya/directory.krpref` (`"disableServerCertificateValidation": true`)
-  - `docs/postman-grpc-manual-tests.md:20` and `:34-35` (plaintext PINs `SoP1n!Fips#2024` and `UsrP1n!Fips#2024`)
+  - `docs/postman-grpc-manual-tests.md:20` and `:34-35` (a plaintext PIN table with the SO and User PINs)
   - `tests/fips_approved_mode.rs:51` and `:80`
   - `cargo package --list` shows `kreya/remote.krenv` and `.claude/settings.local.json` inside the crate that would be published.
 - **Description:** The repository names a routable public IPv4 host that serves the HSM gRPC API over `http://`, meaning plaintext h2c. It also publishes the base64-encoded SO and User PINs used against that host. The Kreya project disables server-certificate validation globally. The daemon itself refuses plaintext on non-loopback addresses (`craton-hsm-daemon/src/main.rs:168-178`). A plaintext endpoint on a public IP therefore implies a modified build, an older build, or a TLS-stripping proxy — all of which are outside the documented security posture. Because `Cargo.toml` has no `include` or `exclude` list, these files also go to crates.io on `cargo publish` (release.yml:66-69).
@@ -716,7 +716,7 @@ Results:
 | 36 | fuzz/Cargo.toml:13-14 | `[dependencies.craton_hsm]` does not resolve | Broken harness | Medium (A3-13) |
 | 37 | fuzz/fuzz_targets/fuzz_keygen.rs:80; fuzz_derive_key.rs:61; fuzz_multipart_crypto.rs:61; fuzz_rsa_ops.rs:52; fuzz_set_attribute.rs:62; fuzz_wrap_unwrap.rs:60 | Hard-coded PIN `b"1234"` (below the default min length of 8, with no token init) | Test stub / hard-coded PIN | Medium (A3-13) |
 | 38 | fuzz/fuzz_targets/fuzz_init_token.rs:90, 125, 141, 162 | Hard-coded PIN `b"12345678"` | Hard-coded test PIN | Info |
-| 39 | tests/fips_approved_mode.rs:51, 80 | Hard-coded PINs `SoP1n!Fips#2024` / `UsrP1n!Fips#2024` (reused in kreya) | Hard-coded test PIN | Low (A3-01) |
+| 39 | tests/fips_approved_mode.rs:51, 80 | Hard-coded SO/User PINs (the same values were reused in kreya) | Hard-coded test PIN | Low (A3-01) |
 | 40 | tests/interop/java_sunpkcs11.sh:64-65; openssl_pkcs11.sh:67-68 | Default `SO_PIN=12345678`, `USER_PIN=1234` | Hard-coded default PINs | Low (A3-21) |
 | 41 | tests/interop/java_sunpkcs11.sh:457 | `# rm -rf "$TMPDIR_BASE"  # Keep for debugging; uncomment for production` | Debug leftover | Low |
 | 42 | kreya/remote.krenv:3-5; kreya/default.krenv:4-5; kreya/…/InitToken-request.json:3; LoginSO-request.json:4 | Committed PINs and a public server URL | Committed credentials | **High** (A3-01) |

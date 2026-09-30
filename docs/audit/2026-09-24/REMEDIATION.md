@@ -361,7 +361,7 @@ required before a production release or a FIPS 140-3 submission.
 - **Rotate the exposed test PINs** (the SO/User PINs that were committed in
   `kreya/` and the manual-test docs, and reused in `tests/fips_approved_mode.rs`)
   everywhere they were used, and treat them as compromised.
-- **Take the public test endpoint offline** (`185.177.116.16:9898`), or
+- **Take the public test endpoint offline** (the host named in `kreya/remote.krenv` in the audited revision), or
   re-initialise it, firewall it and put it behind TLS + mTLS.
 - **Scrub git history** (`git filter-repo`) of the committed PINs/endpoint if
   required by policy; the values remain in history and in any fork.

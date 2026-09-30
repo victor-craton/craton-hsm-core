@@ -30,6 +30,18 @@ git push -u origin claude/audit-fixes
 
 `dev` was created locally from `main` and has **not** been pushed either.
 
+**History note.** The first version of the A3 report and of `REMEDIATION.md` quoted the
+address and PIN values of the exposed test server (they are already present in `main`
+via `kreya/`, `docs/postman-grpc-manual-tests.md` and `tests/fips_approved_mode.rs`). The
+tip of `claude/audit-fixes` no longer contains them, but earlier local commits do
+(`d0f385e` on `claude/modest-hamilton-y6ok79`, its merge `f6dfe17` on `dev`, and the merge of `dev`
+into `claude/audit-fixes`). A `git filter-branch` scrub of those unpushed commits was attempted
+and was blocked by the session's permission policy, so it was **not** done. If you want the
+values out of the pushed history, rewrite those unpushed commits before the first push (the
+values to remove are the host address and the two PINs named in `kreya/remote.krenv`), or
+squash-merge the branch. Since the same values are already in `main`, rotating them
+(§6, item 1) matters more than the rewrite.
+
 ## 2. What changed (summary)
 
 - **Critical / High security fixes.** `C_InitToken` verifies the SO PIN (with lockout)
