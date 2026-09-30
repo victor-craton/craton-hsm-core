@@ -21,33 +21,35 @@ mod common;
 use common::ensure_init;
 
 fn cleanup_sessions() {
-    let _ = functions::C_CloseAllSessions(0);
+    let _ = unsafe { functions::C_CloseAllSessions(0) };
 }
 
 fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = functions::C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION | CKF_RW_SESSION,
-        std::ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        functions::C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     if rv != CKR_OK {
         return None;
     }
     // Log in with the policy-compliant User PIN provisioned by
     // `common::ensure_init` (A3-13).
     if common::login_user(session) != CKR_OK {
-        let _ = functions::C_CloseSession(session);
+        let _ = unsafe { functions::C_CloseSession(session) };
         return None;
     }
     Some(session)
 }
 
 fn close_session(session: CK_SESSION_HANDLE) {
-    let _ = functions::C_Logout(session);
-    let _ = functions::C_CloseSession(session);
+    let _ = unsafe { functions::C_Logout(session) };
+    let _ = unsafe { functions::C_CloseSession(session) };
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -132,16 +134,18 @@ fn fuzz_derive_ecdh_random_params(data: &[u8]) {
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
 
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut keygen_mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut keygen_mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
 
     if rv != CKR_OK {
         close_session(session);
@@ -179,21 +183,23 @@ fn fuzz_derive_ecdh_random_params(data: &[u8]) {
     let mut derived_key: CK_OBJECT_HANDLE = 0;
 
     // Should error for random peer key bytes, not panic
-    let rv = functions::C_DeriveKey(
-        session,
-        &mut derive_mechanism,
-        priv_key,
-        derive_template.as_mut_ptr(),
-        derive_template.len() as CK_ULONG,
-        &mut derived_key,
-    );
+    let rv = unsafe {
+        functions::C_DeriveKey(
+            session,
+            &mut derive_mechanism,
+            priv_key,
+            derive_template.as_mut_ptr(),
+            derive_template.len() as CK_ULONG,
+            &mut derived_key,
+        )
+    };
 
     if rv == CKR_OK {
-        let _ = functions::C_DestroyObject(session, derived_key);
+        let _ = unsafe { functions::C_DestroyObject(session, derived_key) };
     }
 
-    let _ = functions::C_DestroyObject(session, pub_key);
-    let _ = functions::C_DestroyObject(session, priv_key);
+    let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+    let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     close_session(session);
 }
 
@@ -242,14 +248,16 @@ fn fuzz_derive_random_mechanism(data: &[u8]) {
     let mut derived_key: CK_OBJECT_HANDLE = 0;
 
     // Random mechanism + random base key handle = should error
-    let _rv = functions::C_DeriveKey(
-        session,
-        &mut mechanism,
-        0xDEADBEEF as CK_OBJECT_HANDLE,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut derived_key,
-    );
+    let _rv = unsafe {
+        functions::C_DeriveKey(
+            session,
+            &mut mechanism,
+            0xDEADBEEF as CK_OBJECT_HANDLE,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived_key,
+        )
+    };
 
     close_session(session);
 }
@@ -292,14 +300,16 @@ fn fuzz_derive_invalid_base_key(data: &[u8]) {
 
     let mut derived_key: CK_OBJECT_HANDLE = 0;
 
-    let _rv = functions::C_DeriveKey(
-        session,
-        &mut mechanism,
-        fake_key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut derived_key,
-    );
+    let _rv = unsafe {
+        functions::C_DeriveKey(
+            session,
+            &mut mechanism,
+            fake_key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived_key,
+        )
+    };
 
     close_session(session);
 }
@@ -326,26 +336,30 @@ fn fuzz_derive_null_pointers(data: &[u8]) {
         0 => {
             // Null mechanism
             let mut derived: CK_OBJECT_HANDLE = 0;
-            let rv = functions::C_DeriveKey(
-                session,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                0,
-                &mut derived,
-            );
+            let rv = unsafe {
+                functions::C_DeriveKey(
+                    session,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut derived,
+                )
+            };
             assert!(rv != CKR_OK, "C_DeriveKey succeeded with null mechanism");
         }
         1 => {
             // Null output handle
-            let rv = functions::C_DeriveKey(
-                session,
-                &mut mechanism,
-                0,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-            );
+            let rv = unsafe {
+                functions::C_DeriveKey(
+                    session,
+                    &mut mechanism,
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
             assert!(
                 rv != CKR_OK,
                 "C_DeriveKey succeeded with null output handle"
@@ -354,14 +368,16 @@ fn fuzz_derive_null_pointers(data: &[u8]) {
         2 => {
             // Null template with non-zero count
             let mut derived: CK_OBJECT_HANDLE = 0;
-            let rv = functions::C_DeriveKey(
-                session,
-                &mut mechanism,
-                0,
-                std::ptr::null_mut(),
-                5,
-                &mut derived,
-            );
+            let rv = unsafe {
+                functions::C_DeriveKey(
+                    session,
+                    &mut mechanism,
+                    0,
+                    std::ptr::null_mut(),
+                    5,
+                    &mut derived,
+                )
+            };
             assert!(
                 rv != CKR_OK,
                 "C_DeriveKey succeeded with null template + non-zero count"

@@ -15,7 +15,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 }
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -29,47 +29,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"WrapTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed");
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -128,13 +138,15 @@ fn generate_aes_key_with_attrs(
         },
     ];
     let mut key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "generate_aes_key_with_attrs failed: 0x{:08X}",
@@ -194,27 +206,31 @@ fn do_wrap(
 
     // First call: get required size
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        key_to_wrap,
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            key_to_wrap,
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_WrapKey size query failed: 0x{:08X}", rv);
     assert!(wrapped_len > 0);
 
     // Second call: perform wrap
     let mut wrapped = vec![0u8; wrapped_len as usize];
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        key_to_wrap,
-        wrapped.as_mut_ptr(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            key_to_wrap,
+            wrapped.as_mut_ptr(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_WrapKey failed: 0x{:08X}", rv);
     wrapped.truncate(wrapped_len as usize);
     wrapped
@@ -240,16 +256,18 @@ fn do_unwrap(
         build_unwrap_template(&class, &key_type, &value_len, &ck_true, &ck_true);
 
     let mut new_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_UnwrapKey(
-        session,
-        &mut mechanism,
-        unwrapping_key,
-        wrapped.as_ptr() as CK_BYTE_PTR,
-        wrapped.len() as CK_ULONG,
-        unwrap_template.as_mut_ptr(),
-        unwrap_template.len() as CK_ULONG,
-        &mut new_key,
-    );
+    let rv = unsafe {
+        C_UnwrapKey(
+            session,
+            &mut mechanism,
+            unwrapping_key,
+            wrapped.as_ptr() as CK_BYTE_PTR,
+            wrapped.len() as CK_ULONG,
+            unwrap_template.as_mut_ptr(),
+            unwrap_template.len() as CK_ULONG,
+            &mut new_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_UnwrapKey failed: 0x{:08X}", rv);
     new_key
 }
@@ -261,18 +279,20 @@ fn aes_gcm_encrypt(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE, plaintext:
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_EncryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_EncryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK, "C_EncryptInit failed: 0x{:08X}", rv);
 
     let mut encrypted = vec![0u8; plaintext.len() + 256];
     let mut enc_len: CK_ULONG = encrypted.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as CK_BYTE_PTR,
-        plaintext.len() as CK_ULONG,
-        encrypted.as_mut_ptr(),
-        &mut enc_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as CK_BYTE_PTR,
+            plaintext.len() as CK_ULONG,
+            encrypted.as_mut_ptr(),
+            &mut enc_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Encrypt failed: 0x{:08X}", rv);
     encrypted.truncate(enc_len as usize);
     encrypted
@@ -289,18 +309,20 @@ fn aes_gcm_decrypt(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DecryptInit(session, &mut mechanism, key);
+    let rv = unsafe { C_DecryptInit(session, &mut mechanism, key) };
     assert_eq!(rv, CKR_OK, "C_DecryptInit failed: 0x{:08X}", rv);
 
     let mut decrypted = vec![0u8; ciphertext.len() + 256];
     let mut dec_len: CK_ULONG = decrypted.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_ptr() as CK_BYTE_PTR,
-        ciphertext.len() as CK_ULONG,
-        decrypted.as_mut_ptr(),
-        &mut dec_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_ptr() as CK_BYTE_PTR,
+            ciphertext.len() as CK_ULONG,
+            decrypted.as_mut_ptr(),
+            &mut dec_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Decrypt failed: 0x{:08X}", rv);
     decrypted.truncate(dec_len as usize);
     decrypted
@@ -373,14 +395,16 @@ fn test_wrap_with_wrong_key_type() {
         parameter_len: 0,
     };
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        not_wrap_key,
-        target_key,
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            not_wrap_key,
+            target_key,
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(
         rv, CKR_KEY_FUNCTION_NOT_PERMITTED,
         "Wrapping with key lacking CKA_WRAP should fail, got 0x{:08X}",
@@ -416,16 +440,18 @@ fn test_unwrap_with_wrong_key() {
         build_unwrap_template(&class, &key_type, &value_len, &ck_true, &ck_true);
 
     let mut new_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_UnwrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key_b,
-        wrapped.as_ptr() as CK_BYTE_PTR,
-        wrapped.len() as CK_ULONG,
-        unwrap_template.as_mut_ptr(),
-        unwrap_template.len() as CK_ULONG,
-        &mut new_key,
-    );
+    let rv = unsafe {
+        C_UnwrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key_b,
+            wrapped.as_ptr() as CK_BYTE_PTR,
+            wrapped.len() as CK_ULONG,
+            unwrap_template.as_mut_ptr(),
+            unwrap_template.len() as CK_ULONG,
+            &mut new_key,
+        )
+    };
     // AES Key Unwrap with wrong key fails integrity check
     assert_eq!(
         rv, CKR_ENCRYPTED_DATA_INVALID,
@@ -451,14 +477,16 @@ fn test_wrap_non_extractable_key() {
         parameter_len: 0,
     };
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        non_extractable,
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            non_extractable,
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     // Implementation returns CKR_KEY_FUNCTION_NOT_PERMITTED for non-extractable keys
     assert_eq!(
         rv, CKR_KEY_FUNCTION_NOT_PERMITTED,
@@ -512,13 +540,15 @@ fn test_wrap_sensitive_key() {
         },
     ];
     let mut sensitive_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut sensitive_key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut sensitive_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Failed to generate sensitive+extractable key");
 
     // Wrapping a sensitive-but-extractable key should succeed
@@ -570,14 +600,16 @@ fn test_wrap_null_output_gets_size() {
     };
 
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        target_key,
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            target_key,
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Size query should succeed, got 0x{:08X}", rv);
     // AES Key Wrap of 32-byte key = 40 bytes
     assert_eq!(
@@ -605,14 +637,16 @@ fn test_wrap_buffer_too_small() {
 
     let mut tiny_buf = [0u8; 1];
     let mut wrapped_len: CK_ULONG = tiny_buf.len() as CK_ULONG;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        target_key,
-        tiny_buf.as_mut_ptr(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            target_key,
+            tiny_buf.as_mut_ptr(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(
         rv, CKR_BUFFER_TOO_SMALL,
         "Small buffer should return CKR_BUFFER_TOO_SMALL, got 0x{:08X}",
@@ -650,16 +684,18 @@ fn test_unwrap_invalid_data() {
     // Garbage data that is the correct length (40 bytes for a 32-byte key)
     let garbage = vec![0xDE_u8; 40];
     let mut new_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_UnwrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        garbage.as_ptr() as CK_BYTE_PTR,
-        garbage.len() as CK_ULONG,
-        unwrap_template.as_mut_ptr(),
-        unwrap_template.len() as CK_ULONG,
-        &mut new_key,
-    );
+    let rv = unsafe {
+        C_UnwrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            garbage.as_ptr() as CK_BYTE_PTR,
+            garbage.len() as CK_ULONG,
+            unwrap_template.as_mut_ptr(),
+            unwrap_template.len() as CK_ULONG,
+            &mut new_key,
+        )
+    };
     // AES Key Unwrap of garbage data fails integrity check
     assert_eq!(
         rv, CKR_ENCRYPTED_DATA_INVALID,
@@ -685,14 +721,16 @@ fn test_wrap_without_permission() {
         parameter_len: 0,
     };
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        no_wrap_key,
-        target_key,
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            no_wrap_key,
+            target_key,
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(
         rv, CKR_KEY_FUNCTION_NOT_PERMITTED,
         "Wrap without CKA_WRAP should fail, got 0x{:08X}",
@@ -728,16 +766,18 @@ fn test_unwrap_without_permission() {
         build_unwrap_template(&class, &key_type, &value_len, &ck_true, &ck_true);
 
     let mut new_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_UnwrapKey(
-        session,
-        &mut mechanism,
-        wrap_only_key,
-        wrapped.as_ptr() as CK_BYTE_PTR,
-        wrapped.len() as CK_ULONG,
-        unwrap_template.as_mut_ptr(),
-        unwrap_template.len() as CK_ULONG,
-        &mut new_key,
-    );
+    let rv = unsafe {
+        C_UnwrapKey(
+            session,
+            &mut mechanism,
+            wrap_only_key,
+            wrapped.as_ptr() as CK_BYTE_PTR,
+            wrapped.len() as CK_ULONG,
+            unwrap_template.as_mut_ptr(),
+            unwrap_template.len() as CK_ULONG,
+            &mut new_key,
+        )
+    };
     assert_eq!(
         rv, CKR_KEY_FUNCTION_NOT_PERMITTED,
         "Unwrap without CKA_UNWRAP should fail, got 0x{:08X}",
@@ -760,14 +800,16 @@ fn test_wrap_invalid_wrapping_key_handle() {
         parameter_len: 0,
     };
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        0xFFFFFFFF, // invalid handle
-        target_key,
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            0xFFFFFFFF, // invalid handle
+            target_key,
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     // ObjectStore returns ObjectHandleInvalid for unknown handles
     assert_eq!(
         rv, CKR_OBJECT_HANDLE_INVALID,
@@ -800,16 +842,18 @@ fn test_unwrap_invalid_wrapping_key_handle() {
         build_unwrap_template(&class, &key_type, &value_len, &ck_true, &ck_true);
 
     let mut new_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_UnwrapKey(
-        session,
-        &mut mechanism,
-        0xFFFFFFFF, // invalid handle
-        wrapped.as_ptr() as CK_BYTE_PTR,
-        wrapped.len() as CK_ULONG,
-        unwrap_template.as_mut_ptr(),
-        unwrap_template.len() as CK_ULONG,
-        &mut new_key,
-    );
+    let rv = unsafe {
+        C_UnwrapKey(
+            session,
+            &mut mechanism,
+            0xFFFFFFFF, // invalid handle
+            wrapped.as_ptr() as CK_BYTE_PTR,
+            wrapped.len() as CK_ULONG,
+            unwrap_template.as_mut_ptr(),
+            unwrap_template.len() as CK_ULONG,
+            &mut new_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OBJECT_HANDLE_INVALID,
         "Invalid unwrapping key handle should fail, got 0x{:08X}",
@@ -832,14 +876,16 @@ fn test_wrap_key_handle_invalid() {
         parameter_len: 0,
     };
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        0xFFFFFFFF, // invalid key-to-wrap handle
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            0xFFFFFFFF, // invalid key-to-wrap handle
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OBJECT_HANDLE_INVALID,
         "Invalid key-to-wrap handle should fail, got 0x{:08X}",
@@ -863,14 +909,16 @@ fn test_wrap_mechanism_invalid() {
         parameter_len: 0,
     };
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        target_key,
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            target_key,
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(
         rv, CKR_MECHANISM_INVALID,
         "SHA256 mechanism for wrap should be invalid, got 0x{:08X}",
@@ -914,14 +962,16 @@ fn test_wrap_null_mechanism() {
     let target_key = generate_aes_key_with_attrs(session, 32, true, true, false, false, true);
 
     let mut wrapped_len: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        ptr::null_mut(), // null mechanism
-        wrapping_key,
-        target_key,
-        ptr::null_mut(),
-        &mut wrapped_len,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            ptr::null_mut(), // null mechanism
+            wrapping_key,
+            target_key,
+            ptr::null_mut(),
+            &mut wrapped_len,
+        )
+    };
     assert_eq!(
         rv, CKR_ARGUMENTS_BAD,
         "Null mechanism should return CKR_ARGUMENTS_BAD, got 0x{:08X}",
@@ -955,16 +1005,18 @@ fn test_unwrap_template_applied() {
         build_unwrap_template(&class, &key_type, &value_len, &ck_true, &ck_true);
 
     let mut new_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_UnwrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        wrapped.as_ptr() as CK_BYTE_PTR,
-        wrapped.len() as CK_ULONG,
-        unwrap_template.as_mut_ptr(),
-        unwrap_template.len() as CK_ULONG,
-        &mut new_key,
-    );
+    let rv = unsafe {
+        C_UnwrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            wrapped.as_ptr() as CK_BYTE_PTR,
+            wrapped.len() as CK_ULONG,
+            unwrap_template.as_mut_ptr(),
+            unwrap_template.len() as CK_ULONG,
+            &mut new_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_UnwrapKey with template failed: 0x{:08X}", rv);
 
     // Verify the unwrapped key has CKA_ENCRYPT=true by using it to encrypt
@@ -1028,7 +1080,7 @@ fn test_wrap_then_destroy_then_unwrap() {
     let wrapped = do_wrap(session, wrapping_key, target_key);
 
     // Destroy the original target key
-    let rv = C_DestroyObject(session, target_key);
+    let rv = unsafe { C_DestroyObject(session, target_key) };
     assert_eq!(rv, CKR_OK, "C_DestroyObject failed: 0x{:08X}", rv);
 
     // Verify the original key handle is now invalid (encrypt should fail)
@@ -1037,7 +1089,7 @@ fn test_wrap_then_destroy_then_unwrap() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_EncryptInit(session, &mut enc_mechanism, target_key);
+    let rv = unsafe { C_EncryptInit(session, &mut enc_mechanism, target_key) };
     assert_ne!(rv, CKR_OK, "Destroyed key should not be usable for encrypt");
 
     // Unwrap to restore the key
@@ -1078,14 +1130,16 @@ fn test_wrap_aes_key_size_check() {
     // Generate a fresh target to avoid re-wrapping the same handle
     let target_key_128 = generate_aes_key_with_attrs(session, 16, true, true, false, false, true);
     let mut size_128: CK_ULONG = 0;
-    let rv = C_WrapKey(
-        session,
-        &mut mechanism,
-        wrapping_key,
-        target_key_128,
-        ptr::null_mut(),
-        &mut size_128,
-    );
+    let rv = unsafe {
+        C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapping_key,
+            target_key_128,
+            ptr::null_mut(),
+            &mut size_128,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     // 16-byte key -> 24-byte wrapped output
     assert_eq!(

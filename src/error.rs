@@ -229,9 +229,9 @@ impl From<HsmError> for CK_RV {
     }
 }
 
-/// `CKR_ACTION_PROHIBITED` (PKCS#11 v2.40+). Defined locally because the
-/// ABI constant table does not export it yet.
-pub const CKR_ACTION_PROHIBITED: CK_RV = 0x0000001B;
+/// `CKR_ACTION_PROHIBITED` (PKCS#11 v2.40+), re-exported from the ABI
+/// constant table for existing callers.
+pub use crate::pkcs11_abi::constants::CKR_ACTION_PROHIBITED;
 
 /// Convenience alias for Results using `HsmError`.
 pub type HsmResult<T> = Result<T, HsmError>;

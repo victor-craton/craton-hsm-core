@@ -12,7 +12,7 @@ use craton_hsm::pkcs11_abi::types::*;
 use std::ptr;
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -26,47 +26,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"InfoTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed");
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -78,7 +88,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
 fn test_get_info_returns_valid_version() {
     ensure_init();
     let mut info: CK_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetInfo(&mut info);
+    let rv = unsafe { C_GetInfo(&mut info) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         info.cryptoki_version.major, 3,
@@ -97,7 +107,7 @@ fn test_get_info_returns_valid_version() {
 fn test_get_info_library_description() {
     ensure_init();
     let mut info: CK_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetInfo(&mut info);
+    let rv = unsafe { C_GetInfo(&mut info) };
     assert_eq!(rv, CKR_OK);
     let desc = &info.library_description;
     let all_spaces = desc.iter().all(|&b| b == b' ');
@@ -111,7 +121,7 @@ fn test_get_info_library_description() {
 fn test_get_info_manufacturer() {
     ensure_init();
     let mut info: CK_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetInfo(&mut info);
+    let rv = unsafe { C_GetInfo(&mut info) };
     assert_eq!(rv, CKR_OK);
     let mfr = &info.manufacturer_id;
     let all_spaces = mfr.iter().all(|&b| b == b' ');
@@ -125,7 +135,7 @@ fn test_get_info_manufacturer() {
 fn test_get_slot_list_with_token() {
     ensure_init();
     let mut count: CK_ULONG = 0;
-    let rv = C_GetSlotList(CK_TRUE, ptr::null_mut(), &mut count);
+    let rv = unsafe { C_GetSlotList(CK_TRUE, ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(
         count >= 1,
@@ -134,7 +144,7 @@ fn test_get_slot_list_with_token() {
     );
 
     let mut slot_ids = vec![0 as CK_SLOT_ID; count as usize];
-    let rv = C_GetSlotList(CK_TRUE, slot_ids.as_mut_ptr(), &mut count);
+    let rv = unsafe { C_GetSlotList(CK_TRUE, slot_ids.as_mut_ptr(), &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(slot_ids.contains(&0), "Slot 0 should be in the list");
 }
@@ -146,7 +156,7 @@ fn test_get_slot_list_with_token() {
 fn test_get_slot_list_count_only() {
     ensure_init();
     let mut count: CK_ULONG = 0;
-    let rv = C_GetSlotList(CK_FALSE, ptr::null_mut(), &mut count);
+    let rv = unsafe { C_GetSlotList(CK_FALSE, ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(count >= 1, "Expected at least 1 slot, got {}", count);
 }
@@ -158,7 +168,7 @@ fn test_get_slot_list_count_only() {
 fn test_get_slot_info_valid_slot() {
     ensure_init();
     let mut slot_info: CK_SLOT_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetSlotInfo(0, &mut slot_info);
+    let rv = unsafe { C_GetSlotInfo(0, &mut slot_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         slot_info.flags & CKF_SLOT_TOKEN_PRESENT,
@@ -174,7 +184,7 @@ fn test_get_slot_info_valid_slot() {
 fn test_get_slot_info_invalid_slot() {
     ensure_init();
     let mut slot_info: CK_SLOT_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetSlotInfo(99, &mut slot_info);
+    let rv = unsafe { C_GetSlotInfo(99, &mut slot_info) };
     assert_eq!(
         rv, CKR_SLOT_ID_INVALID,
         "Expected CKR_SLOT_ID_INVALID for invalid slot 99"
@@ -188,7 +198,7 @@ fn test_get_slot_info_invalid_slot() {
 fn test_get_token_info_label() {
     let _session = setup_user_session();
     let mut token_info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetTokenInfo(0, &mut token_info);
+    let rv = unsafe { C_GetTokenInfo(0, &mut token_info) };
     assert_eq!(rv, CKR_OK);
     let label_str = std::str::from_utf8(&token_info.label).unwrap_or("");
     assert!(
@@ -205,7 +215,7 @@ fn test_get_token_info_label() {
 fn test_get_token_info_flags() {
     let _session = setup_user_session();
     let mut token_info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetTokenInfo(0, &mut token_info);
+    let rv = unsafe { C_GetTokenInfo(0, &mut token_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         token_info.flags & CKF_TOKEN_INITIALIZED,
@@ -221,7 +231,7 @@ fn test_get_token_info_flags() {
 fn test_get_token_info_session_count() {
     let _session = setup_user_session();
     let mut token_info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetTokenInfo(0, &mut token_info);
+    let rv = unsafe { C_GetTokenInfo(0, &mut token_info) };
     assert_eq!(rv, CKR_OK);
     // session_count should be > 0 since we have an open session,
     // unless the implementation reports CK_UNAVAILABLE_INFORMATION
@@ -240,7 +250,7 @@ fn test_get_token_info_session_count() {
 fn test_get_mechanism_list_count() {
     ensure_init();
     let mut count: CK_ULONG = 0;
-    let rv = C_GetMechanismList(0, ptr::null_mut(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK);
     assert!(
         count >= 30,
@@ -256,11 +266,11 @@ fn test_get_mechanism_list_count() {
 fn test_get_mechanism_list_contents() {
     ensure_init();
     let mut count: CK_ULONG = 0;
-    let rv = C_GetMechanismList(0, ptr::null_mut(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK);
 
     let mut mechs = vec![0 as CK_MECHANISM_TYPE; count as usize];
-    let rv = C_GetMechanismList(0, mechs.as_mut_ptr(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, mechs.as_mut_ptr(), &mut count) };
     assert_eq!(rv, CKR_OK);
 
     assert!(
@@ -284,7 +294,7 @@ fn test_get_mechanism_list_contents() {
 fn test_get_mechanism_info_rsa_pkcs() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_RSA_PKCS, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_RSA_PKCS, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     let min_key_size = mech_info.min_key_size;
     let max_key_size = mech_info.max_key_size;
@@ -313,7 +323,7 @@ fn test_get_mechanism_info_rsa_pkcs() {
 fn test_get_mechanism_info_rsa_keygen() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_RSA_PKCS_KEY_PAIR_GEN, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_RSA_PKCS_KEY_PAIR_GEN, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_GENERATE_KEY_PAIR_FLAG,
@@ -329,7 +339,7 @@ fn test_get_mechanism_info_rsa_keygen() {
 fn test_get_mechanism_info_aes_gcm() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_AES_GCM, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_AES_GCM, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_ENCRYPT_FLAG,
@@ -350,7 +360,7 @@ fn test_get_mechanism_info_aes_gcm() {
 fn test_get_mechanism_info_aes_keygen() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_AES_KEY_GEN, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_AES_KEY_GEN, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_GENERATE_FLAG,
@@ -366,7 +376,7 @@ fn test_get_mechanism_info_aes_keygen() {
 fn test_get_mechanism_info_ecdsa() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_ECDSA, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_ECDSA, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_SIGN_FLAG,
@@ -387,7 +397,7 @@ fn test_get_mechanism_info_ecdsa() {
 fn test_get_mechanism_info_sha256() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_SHA256, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_SHA256, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_DIGEST_FLAG,
@@ -403,7 +413,7 @@ fn test_get_mechanism_info_sha256() {
 fn test_get_mechanism_info_sha3_256() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_SHA3_256, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_SHA3_256, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_DIGEST_FLAG,
@@ -419,7 +429,7 @@ fn test_get_mechanism_info_sha3_256() {
 fn test_get_mechanism_info_ml_dsa() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_ML_DSA_44, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_ML_DSA_44, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_SIGN_FLAG,
@@ -440,7 +450,7 @@ fn test_get_mechanism_info_ml_dsa() {
 fn test_get_mechanism_info_ml_kem() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_ML_KEM_768, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_ML_KEM_768, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_GENERATE_KEY_PAIR_FLAG,
@@ -461,7 +471,7 @@ fn test_get_mechanism_info_ml_kem() {
 fn test_get_mechanism_info_invalid() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, 0xFFFFFFFF, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, 0xFFFFFFFF, &mut mech_info) };
     assert_eq!(
         rv, CKR_MECHANISM_INVALID,
         "Invalid mechanism 0xFFFFFFFF should return CKR_MECHANISM_INVALID"
@@ -475,7 +485,7 @@ fn test_get_mechanism_info_invalid() {
 fn test_get_mechanism_info_eddsa() {
     ensure_init();
     let mut mech_info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetMechanismInfo(0, CKM_EDDSA, &mut mech_info);
+    let rv = unsafe { C_GetMechanismInfo(0, CKM_EDDSA, &mut mech_info) };
     assert_eq!(rv, CKR_OK);
     assert_ne!(
         mech_info.flags & CKF_SIGN_FLAG,
@@ -496,7 +506,7 @@ fn test_get_mechanism_info_eddsa() {
 fn test_get_function_list() {
     // C_GetFunctionList should work even before C_Initialize
     let mut func_list: *mut CK_FUNCTION_LIST = ptr::null_mut();
-    let rv = C_GetFunctionList(&mut func_list);
+    let rv = unsafe { C_GetFunctionList(&mut func_list) };
     assert_eq!(rv, CKR_OK, "C_GetFunctionList should return CKR_OK");
     assert!(
         !func_list.is_null(),
@@ -511,7 +521,7 @@ fn test_get_function_list() {
 fn test_get_slot_info_firmware_version() {
     ensure_init();
     let mut slot_info: CK_SLOT_INFO = unsafe { std::mem::zeroed() };
-    let rv = C_GetSlotInfo(0, &mut slot_info);
+    let rv = unsafe { C_GetSlotInfo(0, &mut slot_info) };
     assert_eq!(rv, CKR_OK);
     // Verify that the firmware and hardware version structs were actually
     // populated by the implementation (not left as zeroed memory). The version

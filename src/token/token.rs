@@ -1164,6 +1164,33 @@ impl Token {
         Ok(auth.pin_epoch)
     }
 
+    /// Re-verify the PIN of the role that is **currently logged in**
+    /// (`CKU_CONTEXT_SPECIFIC` re-authentication, A2-20).
+    ///
+    /// Fails with `CKR_USER_NOT_LOGGED_IN` unless `user_type` is the active
+    /// role; otherwise applies the same lockout, rate-limit and failure
+    /// accounting as [`verify_pin`](Self::verify_pin) without changing the
+    /// login state.
+    pub fn verify_logged_in_pin(&self, user_type: CK_ULONG, pin: &[u8]) -> HsmResult<()> {
+        use crate::pkcs11_abi::constants::*;
+        let role = match user_type {
+            CKU_USER => Role::User,
+            CKU_SO => Role::So,
+            _ => return Err(HsmError::UserTypeInvalid),
+        };
+        {
+            let auth = self.auth.lock();
+            if auth.finalized {
+                return Err(HsmError::NotInitialized);
+            }
+            match (role, &auth.login) {
+                (Role::User, LoginState::UserLoggedIn) | (Role::So, LoginState::SoLoggedIn) => {}
+                _ => return Err(HsmError::UserNotLoggedIn),
+            }
+        }
+        self.verify_pin(user_type, pin)
+    }
+
     pub fn logout(&self) -> HsmResult<()> {
         let mut auth = self.auth.lock();
         if auth.login == LoginState::Public {

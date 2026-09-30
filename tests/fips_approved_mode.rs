@@ -36,7 +36,7 @@ fn init_fips_mode() {
         std::env::remove_var("CRATON_HSM_CONFIG");
     }
 
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed with 0x{:08X}",
@@ -52,48 +52,58 @@ fn setup_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"FIPSToken");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let user_pin = b"UsrP1n!Fips#2024";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     session
@@ -142,16 +152,18 @@ fn fips_mode_allows_ed25519_keygen() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "Ed25519 keygen should be allowed in FIPS mode (FIPS 186-5), got 0x{:08X}",
@@ -173,16 +185,16 @@ fn fips_mode_allows_sha256_digest() {
         parameter_len: 0,
     };
 
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK, "SHA-256 should be allowed in FIPS mode");
 
     let data = b"test data for FIPS digest";
-    let rv = C_DigestUpdate(session, data.as_ptr() as *mut _, data.len() as CK_ULONG);
+    let rv = unsafe { C_DigestUpdate(session, data.as_ptr() as *mut _, data.len() as CK_ULONG) };
     assert_eq!(rv, CKR_OK);
 
     let mut digest = [0u8; 32];
     let mut digest_len: CK_ULONG = 32;
-    let rv = C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len);
+    let rv = unsafe { C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(digest_len, 32);
 }
@@ -201,7 +213,7 @@ fn fips_mode_blocks_sha1_digest() {
         parameter_len: 0,
     };
 
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(
         rv, CKR_MECHANISM_INVALID,
         "SHA-1 should be blocked in FIPS approved mode, got 0x{:08X}",
@@ -262,13 +274,15 @@ fn fips_mode_allows_aes_keygen() {
     ];
 
     let mut key_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key_handle,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key_handle,
+        )
+    };
     assert_eq!(rv, CKR_OK, "AES-256 keygen should be allowed in FIPS mode");
 }
 
@@ -333,16 +347,18 @@ fn fips_mode_allows_rsa_sign_verify() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "RSA-2048 keygen should be allowed in FIPS mode");
 
     // Sign with SHA256-RSA-PKCS
@@ -352,7 +368,7 @@ fn fips_mode_allows_rsa_sign_verify() {
         parameter_len: 0,
     };
 
-    let rv = C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(
         rv, CKR_OK,
         "SHA256-RSA-PKCS sign should be allowed in FIPS mode"
@@ -361,29 +377,33 @@ fn fips_mode_allows_rsa_sign_verify() {
     let data = b"FIPS approved signing test data";
     let mut signature = vec![0u8; 256];
     let mut sig_len: CK_ULONG = 256;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Verify
-    let rv = C_VerifyInit(session, &mut sign_mechanism, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut sign_mechanism, pub_key) };
     assert_eq!(
         rv, CKR_OK,
         "SHA256-RSA-PKCS verify should be allowed in FIPS mode"
     );
 
-    let rv = C_Verify(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        signature.as_ptr() as *mut _,
-        sig_len,
-    );
+    let rv = unsafe {
+        C_Verify(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            signature.as_ptr() as *mut _,
+            sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -437,16 +457,18 @@ fn fips_mode_allows_ecdsa_p256() {
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "EC P-256 keygen should be allowed in FIPS mode");
 
     // Sign with ECDSA-SHA256
@@ -456,7 +478,7 @@ fn fips_mode_allows_ecdsa_p256() {
         parameter_len: 0,
     };
 
-    let rv = C_SignInit(session, &mut sign_mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut sign_mechanism, priv_key) };
     assert_eq!(
         rv, CKR_OK,
         "ECDSA-SHA256 sign should be allowed in FIPS mode"
@@ -465,13 +487,15 @@ fn fips_mode_allows_ecdsa_p256() {
     let data = b"FIPS approved ECDSA test";
     let mut signature = vec![0u8; 128];
     let mut sig_len: CK_ULONG = 128;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as *mut _,
-        data.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as *mut _,
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -507,16 +531,18 @@ fn fips_mode_blocks_pqc_keygen() {
 
         let mut pub_key: CK_OBJECT_HANDLE = 0;
         let mut priv_key: CK_OBJECT_HANDLE = 0;
-        let rv = C_GenerateKeyPair(
-            session,
-            &mut mechanism,
-            pub_template.as_mut_ptr(),
-            pub_template.len() as CK_ULONG,
-            priv_template.as_mut_ptr(),
-            priv_template.len() as CK_ULONG,
-            &mut pub_key,
-            &mut priv_key,
-        );
+        let rv = unsafe {
+            C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                pub_template.as_mut_ptr(),
+                pub_template.len() as CK_ULONG,
+                priv_template.as_mut_ptr(),
+                priv_template.len() as CK_ULONG,
+                &mut pub_key,
+                &mut priv_key,
+            )
+        };
         assert_eq!(
             rv, CKR_MECHANISM_INVALID,
             "PQC mechanism 0x{:08X} should be blocked in FIPS mode, got 0x{:08X}",
@@ -535,7 +561,7 @@ fn fips_mode_mechanism_list_excludes_non_approved() {
 
     // First call: get count
     let mut count: CK_ULONG = 0;
-    let rv = C_GetMechanismList(0, ptr::null_mut(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK);
 
     // Should have fewer mechanisms than the full list (SHA-1 and all PQC
@@ -548,7 +574,7 @@ fn fips_mode_mechanism_list_excludes_non_approved() {
 
     // Second call: get actual list
     let mut mechs = vec![0 as CK_MECHANISM_TYPE; count as usize];
-    let rv = C_GetMechanismList(0, mechs.as_mut_ptr(), &mut count);
+    let rv = unsafe { C_GetMechanismList(0, mechs.as_mut_ptr(), &mut count) };
     assert_eq!(rv, CKR_OK);
 
     // EdDSA (Ed25519) is approved by FIPS 186-5
@@ -686,13 +712,15 @@ fn fips_mode_allows_aes_gcm_encrypt_decrypt() {
     };
 
     let mut key_handle: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut gen_mechanism,
-        key_template.as_mut_ptr(),
-        key_template.len() as CK_ULONG,
-        &mut key_handle,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut gen_mechanism,
+            key_template.as_mut_ptr(),
+            key_template.len() as CK_ULONG,
+            &mut key_handle,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Encrypt with AES-GCM
@@ -702,35 +730,39 @@ fn fips_mode_allows_aes_gcm_encrypt_decrypt() {
         parameter_len: 0,
     };
 
-    let rv = C_EncryptInit(session, &mut gcm_mechanism, key_handle);
+    let rv = unsafe { C_EncryptInit(session, &mut gcm_mechanism, key_handle) };
     assert_eq!(rv, CKR_OK, "AES-GCM encrypt should be allowed in FIPS mode");
 
     let plaintext = b"FIPS approved AES-GCM test data!";
     let mut ciphertext = vec![0u8; 256];
     let mut ct_len: CK_ULONG = 256;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ciphertext.as_mut_ptr(),
-        &mut ct_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ct_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     ciphertext.truncate(ct_len as usize);
 
     // Decrypt
-    let rv = C_DecryptInit(session, &mut gcm_mechanism, key_handle);
+    let rv = unsafe { C_DecryptInit(session, &mut gcm_mechanism, key_handle) };
     assert_eq!(rv, CKR_OK, "AES-GCM decrypt should be allowed in FIPS mode");
 
     let mut decrypted = vec![0u8; 256];
     let mut pt_len: CK_ULONG = 256;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_ptr() as *mut _,
-        ciphertext.len() as CK_ULONG,
-        decrypted.as_mut_ptr(),
-        &mut pt_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_ptr() as *mut _,
+            ciphertext.len() as CK_ULONG,
+            decrypted.as_mut_ptr(),
+            &mut pt_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     assert_eq!(&decrypted[..pt_len as usize], plaintext);
 }

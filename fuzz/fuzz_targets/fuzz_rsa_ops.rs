@@ -27,34 +27,36 @@ mod common;
 use common::ensure_init;
 
 fn cleanup_sessions() {
-    let _ = functions::C_CloseAllSessions(0);
+    let _ = unsafe { functions::C_CloseAllSessions(0) };
 }
 
 /// Open an RW session and login. Returns session handle or None.
 fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = functions::C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION | CKF_RW_SESSION,
-        std::ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        functions::C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     if rv != CKR_OK {
         return None;
     }
     // Log in with the policy-compliant User PIN provisioned by
     // `common::ensure_init` (A3-13).
     if common::login_user(session) != CKR_OK {
-        let _ = functions::C_CloseSession(session);
+        let _ = unsafe { functions::C_CloseSession(session) };
         return None;
     }
     Some(session)
 }
 
 fn close_session(session: CK_SESSION_HANDLE) {
-    let _ = functions::C_Logout(session);
-    let _ = functions::C_CloseSession(session);
+    let _ = unsafe { functions::C_Logout(session) };
+    let _ = unsafe { functions::C_CloseSession(session) };
 }
 
 /// FIX #10: Pre-generated RSA key pair, created once and reused across all iterations.
@@ -133,16 +135,18 @@ fn get_rsa_keys() -> Option<&'static PregenRsaKeys> {
             let mut pub_key: CK_OBJECT_HANDLE = 0;
             let mut priv_key: CK_OBJECT_HANDLE = 0;
 
-            let rv = functions::C_GenerateKeyPair(
-                session,
-                &mut mechanism,
-                pub_template.as_mut_ptr(),
-                pub_template.len() as CK_ULONG,
-                priv_template.as_mut_ptr(),
-                priv_template.len() as CK_ULONG,
-                &mut pub_key,
-                &mut priv_key,
-            );
+            let rv = unsafe {
+                functions::C_GenerateKeyPair(
+                    session,
+                    &mut mechanism,
+                    pub_template.as_mut_ptr(),
+                    pub_template.len() as CK_ULONG,
+                    priv_template.as_mut_ptr(),
+                    priv_template.len() as CK_ULONG,
+                    &mut pub_key,
+                    &mut priv_key,
+                )
+            };
 
             close_session(session);
 
@@ -258,21 +262,23 @@ fn fuzz_rsa_keygen_random_params(data: &[u8]) {
     let mut priv_key: CK_OBJECT_HANDLE = 0;
 
     // Should return error for invalid params, not panic
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
 
     if rv == CKR_OK {
         // Clean up generated keys
-        let _ = functions::C_DestroyObject(session, pub_key);
-        let _ = functions::C_DestroyObject(session, priv_key);
+        let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+        let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     }
 
     close_session(session);
@@ -301,29 +307,33 @@ fn fuzz_rsa_sign_verify_pkcs1(data: &[u8]) {
         parameter_len: 0,
     };
 
-    let rv = functions::C_SignInit(session, &mut sign_mechanism, keys.priv_key);
+    let rv = unsafe { functions::C_SignInit(session, &mut sign_mechanism, keys.priv_key) };
     if rv == CKR_OK {
         let mut sig = [0u8; 512];
         let mut sig_len: CK_ULONG = 512;
-        let rv = functions::C_Sign(
-            session,
-            data.as_ptr() as *mut _,
-            data.len() as CK_ULONG,
-            sig.as_mut_ptr(),
-            &mut sig_len,
-        );
+        let rv = unsafe {
+            functions::C_Sign(
+                session,
+                data.as_ptr() as *mut _,
+                data.len() as CK_ULONG,
+                sig.as_mut_ptr(),
+                &mut sig_len,
+            )
+        };
 
         if rv == CKR_OK {
             // Verify the signature
-            let rv = functions::C_VerifyInit(session, &mut sign_mechanism, keys.pub_key);
+            let rv = unsafe { functions::C_VerifyInit(session, &mut sign_mechanism, keys.pub_key) };
             if rv == CKR_OK {
-                let rv = functions::C_Verify(
-                    session,
-                    data.as_ptr() as *mut _,
-                    data.len() as CK_ULONG,
-                    sig.as_mut_ptr(),
-                    sig_len,
-                );
+                let rv = unsafe {
+                    functions::C_Verify(
+                        session,
+                        data.as_ptr() as *mut _,
+                        data.len() as CK_ULONG,
+                        sig.as_mut_ptr(),
+                        sig_len,
+                    )
+                };
                 // FIX #11: Valid signature must verify successfully
                 assert!(
                     rv == CKR_OK,
@@ -333,16 +343,18 @@ fn fuzz_rsa_sign_verify_pkcs1(data: &[u8]) {
             }
 
             // Also verify with corrupted signature (must fail)
-            let rv = functions::C_VerifyInit(session, &mut sign_mechanism, keys.pub_key);
+            let rv = unsafe { functions::C_VerifyInit(session, &mut sign_mechanism, keys.pub_key) };
             if rv == CKR_OK && sig_len > 0 {
                 sig[0] ^= 0xFF; // Corrupt first byte
-                let rv = functions::C_Verify(
-                    session,
-                    data.as_ptr() as *mut _,
-                    data.len() as CK_ULONG,
-                    sig.as_mut_ptr(),
-                    sig_len,
-                );
+                let rv = unsafe {
+                    functions::C_Verify(
+                        session,
+                        data.as_ptr() as *mut _,
+                        data.len() as CK_ULONG,
+                        sig.as_mut_ptr(),
+                        sig_len,
+                    )
+                };
                 // FIX #11: Corrupted signature must NOT verify
                 assert!(rv != CKR_OK, "C_Verify accepted corrupted signature!");
             }
@@ -382,18 +394,20 @@ fn fuzz_rsa_sign_verify_pss(data: &[u8]) {
         parameter_len: params.len() as CK_ULONG,
     };
 
-    let rv = functions::C_SignInit(session, &mut mechanism, keys.priv_key);
+    let rv = unsafe { functions::C_SignInit(session, &mut mechanism, keys.priv_key) };
     if rv == CKR_OK {
         let message = &data[1 + param_len..];
         let mut sig = [0u8; 512];
         let mut sig_len: CK_ULONG = 512;
-        let _rv = functions::C_Sign(
-            session,
-            message.as_ptr() as *mut _,
-            message.len() as CK_ULONG,
-            sig.as_mut_ptr(),
-            &mut sig_len,
-        );
+        let _rv = unsafe {
+            functions::C_Sign(
+                session,
+                message.as_ptr() as *mut _,
+                message.len() as CK_ULONG,
+                sig.as_mut_ptr(),
+                &mut sig_len,
+            )
+        };
     }
 
     close_session(session);
@@ -431,31 +445,35 @@ fn fuzz_rsa_encrypt_decrypt_oaep(data: &[u8]) {
     };
 
     // Encrypt
-    let rv = functions::C_EncryptInit(session, &mut mechanism, keys.pub_key);
+    let rv = unsafe { functions::C_EncryptInit(session, &mut mechanism, keys.pub_key) };
     if rv == CKR_OK {
         let mut ciphertext = [0u8; 512];
         let mut ct_len: CK_ULONG = 512;
-        let rv = functions::C_Encrypt(
-            session,
-            plaintext.as_ptr() as *mut _,
-            plaintext.len() as CK_ULONG,
-            ciphertext.as_mut_ptr(),
-            &mut ct_len,
-        );
+        let rv = unsafe {
+            functions::C_Encrypt(
+                session,
+                plaintext.as_ptr() as *mut _,
+                plaintext.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                &mut ct_len,
+            )
+        };
 
         if rv == CKR_OK {
             // Decrypt
-            let rv = functions::C_DecryptInit(session, &mut mechanism, keys.priv_key);
+            let rv = unsafe { functions::C_DecryptInit(session, &mut mechanism, keys.priv_key) };
             if rv == CKR_OK {
                 let mut decrypted = [0u8; 512];
                 let mut dec_len: CK_ULONG = 512;
-                let _rv = functions::C_Decrypt(
-                    session,
-                    ciphertext.as_mut_ptr(),
-                    ct_len,
-                    decrypted.as_mut_ptr(),
-                    &mut dec_len,
-                );
+                let _rv = unsafe {
+                    functions::C_Decrypt(
+                        session,
+                        ciphertext.as_mut_ptr(),
+                        ct_len,
+                        decrypted.as_mut_ptr(),
+                        &mut dec_len,
+                    )
+                };
             }
         }
     }
@@ -485,27 +503,29 @@ fn fuzz_rsa_sign_random_key(data: &[u8]) {
     };
 
     // FIX #11: SignInit with invalid key handle — must return error
-    let rv = functions::C_SignInit(session, &mut mechanism, fake_key);
+    let rv = unsafe { functions::C_SignInit(session, &mut mechanism, fake_key) };
     if rv == CKR_OK {
         // Shouldn't happen but test gracefully if it does
         let mut sig = [0u8; 512];
         let mut sig_len: CK_ULONG = 512;
         let message = &data[8..];
-        let _rv = functions::C_Sign(
-            session,
-            message.as_ptr() as *mut _,
-            message.len() as CK_ULONG,
-            sig.as_mut_ptr(),
-            &mut sig_len,
-        );
+        let _rv = unsafe {
+            functions::C_Sign(
+                session,
+                message.as_ptr() as *mut _,
+                message.len() as CK_ULONG,
+                sig.as_mut_ptr(),
+                &mut sig_len,
+            )
+        };
     }
 
     // Also try PSS and OAEP with invalid key
     mechanism.mechanism = CKM_RSA_PKCS_PSS;
-    let _rv = functions::C_SignInit(session, &mut mechanism, fake_key);
+    let _rv = unsafe { functions::C_SignInit(session, &mut mechanism, fake_key) };
 
     mechanism.mechanism = CKM_RSA_PKCS_OAEP;
-    let _rv = functions::C_EncryptInit(session, &mut mechanism, fake_key);
+    let _rv = unsafe { functions::C_EncryptInit(session, &mut mechanism, fake_key) };
 
     close_session(session);
 }
@@ -533,18 +553,20 @@ fn fuzz_rsa_verify_random_sig(data: &[u8]) {
         parameter_len: 0,
     };
 
-    let rv = functions::C_VerifyInit(session, &mut mechanism, keys.pub_key);
+    let rv = unsafe { functions::C_VerifyInit(session, &mut mechanism, keys.pub_key) };
     if rv == CKR_OK {
         let mid = data.len() / 2;
         let message = &data[..mid];
         let random_sig = &data[mid..];
-        let rv = functions::C_Verify(
-            session,
-            message.as_ptr() as *mut _,
-            message.len() as CK_ULONG,
-            random_sig.as_ptr() as *mut _,
-            random_sig.len() as CK_ULONG,
-        );
+        let rv = unsafe {
+            functions::C_Verify(
+                session,
+                message.as_ptr() as *mut _,
+                message.len() as CK_ULONG,
+                random_sig.as_ptr() as *mut _,
+                random_sig.len() as CK_ULONG,
+            )
+        };
         // FIX #11: Random signature must NOT verify successfully
         assert!(rv != CKR_OK, "C_Verify accepted random signature data!");
     }

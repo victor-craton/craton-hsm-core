@@ -22,7 +22,7 @@ use craton_hsm::pkcs11_abi::types::*;
 use std::ptr;
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -36,47 +36,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..10].copy_from_slice(b"DigestTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed");
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -92,7 +102,7 @@ fn digest_single_part(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(
         rv, CKR_OK,
         "C_DigestInit failed for mechanism 0x{:08X}",
@@ -102,13 +112,15 @@ fn digest_single_part(
     // Use a generous buffer (128 bytes covers all digest sizes up to SHA-512)
     let mut digest = vec![0u8; 128];
     let mut out_len: CK_ULONG = digest.len() as CK_ULONG;
-    let rv = C_Digest(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        digest.as_mut_ptr(),
-        &mut out_len,
-    );
+    let rv = unsafe {
+        C_Digest(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            digest.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "C_Digest failed for mechanism 0x{:08X}",
@@ -129,7 +141,7 @@ fn digest_multi_part(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(
         rv, CKR_OK,
         "C_DigestInit failed for multi-part mechanism 0x{:08X}",
@@ -137,11 +149,13 @@ fn digest_multi_part(
     );
 
     for chunk in chunks {
-        let rv = C_DigestUpdate(
-            session,
-            chunk.as_ptr() as CK_BYTE_PTR,
-            chunk.len() as CK_ULONG,
-        );
+        let rv = unsafe {
+            C_DigestUpdate(
+                session,
+                chunk.as_ptr() as CK_BYTE_PTR,
+                chunk.len() as CK_ULONG,
+            )
+        };
         assert_eq!(
             rv, CKR_OK,
             "C_DigestUpdate failed for mechanism 0x{:08X}",
@@ -152,7 +166,7 @@ fn digest_multi_part(
     // Use a generous buffer (128 bytes covers all digest sizes up to SHA-512)
     let mut digest = vec![0u8; 128];
     let mut out_len: CK_ULONG = digest.len() as CK_ULONG;
-    let rv = C_DigestFinal(session, digest.as_mut_ptr(), &mut out_len);
+    let rv = unsafe { C_DigestFinal(session, digest.as_mut_ptr(), &mut out_len) };
     assert_eq!(
         rv, CKR_OK,
         "C_DigestFinal failed for mechanism 0x{:08X}",
@@ -171,7 +185,7 @@ fn test_sha256_single_part() {
     let data = b"hello world";
     let digest = digest_single_part(session, CKM_SHA256, data);
     assert_eq!(digest.len(), 32, "SHA-256 digest should be 32 bytes");
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -184,7 +198,7 @@ fn test_sha384_single_part() {
     let data = b"hello world";
     let digest = digest_single_part(session, CKM_SHA384, data);
     assert_eq!(digest.len(), 48, "SHA-384 digest should be 48 bytes");
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -197,7 +211,7 @@ fn test_sha512_single_part() {
     let data = b"hello world";
     let digest = digest_single_part(session, CKM_SHA512, data);
     assert_eq!(digest.len(), 64, "SHA-512 digest should be 64 bytes");
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -210,7 +224,7 @@ fn test_sha1_single_part() {
     let data = b"hello world";
     let digest = digest_single_part(session, CKM_SHA_1, data);
     assert_eq!(digest.len(), 20, "SHA-1 digest should be 20 bytes");
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -223,7 +237,7 @@ fn test_sha3_256_single_part() {
     let data = b"hello world";
     let digest = digest_single_part(session, CKM_SHA3_256, data);
     assert_eq!(digest.len(), 32, "SHA3-256 digest should be 32 bytes");
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -236,7 +250,7 @@ fn test_sha3_384_single_part() {
     let data = b"hello world";
     let digest = digest_single_part(session, CKM_SHA3_384, data);
     assert_eq!(digest.len(), 48, "SHA3-384 digest should be 48 bytes");
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -249,7 +263,7 @@ fn test_sha3_512_single_part() {
     let data = b"hello world";
     let digest = digest_single_part(session, CKM_SHA3_512, data);
     assert_eq!(digest.len(), 64, "SHA3-512 digest should be 64 bytes");
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -273,7 +287,7 @@ fn test_sha256_multipart() {
         digest_mp, digest_sp,
         "SHA-256 multi-part digest must match single-part digest"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -296,7 +310,7 @@ fn test_sha384_multipart() {
         digest_mp, digest_sp,
         "SHA-384 multi-part digest must match single-part digest"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -319,7 +333,7 @@ fn test_sha512_multipart() {
         digest_mp, digest_sp,
         "SHA-512 multi-part digest must match single-part digest"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -342,7 +356,7 @@ fn test_sha3_256_multipart() {
         digest_mp, digest_sp,
         "SHA3-256 multi-part digest must match single-part digest"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -365,7 +379,7 @@ fn test_sha256_empty_data() {
         digest, expected,
         "SHA-256 of empty string does not match known vector"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -388,7 +402,7 @@ fn test_sha256_known_vector() {
         digest, expected,
         "SHA-256('abc') does not match NIST known-answer vector"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -414,7 +428,7 @@ fn test_sha512_known_vector() {
         digest, expected,
         "SHA-512('abc') does not match NIST known-answer vector"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -431,24 +445,26 @@ fn test_digest_null_output_gets_size() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
     let mut digest_len: CK_ULONG = 0;
-    let rv = C_Digest(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut digest_len,
-    );
+    let rv = unsafe {
+        C_Digest(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            ptr::null_mut(),
+            &mut digest_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Digest with null output should return CKR_OK");
     assert_eq!(
         digest_len as usize, 32,
         "SHA-256 should report 32 bytes required"
     );
 
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -465,18 +481,20 @@ fn test_digest_buffer_too_small() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
     let mut tiny_buf = [0u8; 1];
     let mut buf_len: CK_ULONG = tiny_buf.len() as CK_ULONG;
-    let rv = C_Digest(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        tiny_buf.as_mut_ptr(),
-        &mut buf_len,
-    );
+    let rv = unsafe {
+        C_Digest(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            tiny_buf.as_mut_ptr(),
+            &mut buf_len,
+        )
+    };
     assert_eq!(
         rv, CKR_BUFFER_TOO_SMALL,
         "C_Digest with 1-byte buffer should return CKR_BUFFER_TOO_SMALL, got 0x{:08X}",
@@ -488,7 +506,7 @@ fn test_digest_buffer_too_small() {
         "Required size should be 32 for SHA-256"
     );
 
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -502,19 +520,21 @@ fn test_digest_without_init() {
 
     let mut digest = vec![0u8; 64];
     let mut digest_len: CK_ULONG = digest.len() as CK_ULONG;
-    let rv = C_Digest(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        digest.as_mut_ptr(),
-        &mut digest_len,
-    );
+    let rv = unsafe {
+        C_Digest(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            digest.as_mut_ptr(),
+            &mut digest_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "C_Digest without C_DigestInit should return CKR_OPERATION_NOT_INITIALIZED, got 0x{:08X}",
         rv
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -526,17 +546,19 @@ fn test_digest_update_without_init() {
     let session = setup_user_session();
     let data = b"hello";
 
-    let rv = C_DigestUpdate(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_DigestUpdate(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+        )
+    };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "C_DigestUpdate without C_DigestInit should return CKR_OPERATION_NOT_INITIALIZED, got 0x{:08X}",
         rv
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -549,13 +571,13 @@ fn test_digest_final_without_init() {
 
     let mut digest = vec![0u8; 64];
     let mut digest_len: CK_ULONG = digest.len() as CK_ULONG;
-    let rv = C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len);
+    let rv = unsafe { C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_len) };
     assert_eq!(
         rv, CKR_OPERATION_NOT_INITIALIZED,
         "C_DigestFinal without C_DigestInit should return CKR_OPERATION_NOT_INITIALIZED, got 0x{:08X}",
         rv
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -571,11 +593,11 @@ fn test_digest_double_init() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK);
 
     // Second init while first is still active
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(
         rv, CKR_OPERATION_ACTIVE,
         "Double C_DigestInit should return CKR_OPERATION_ACTIVE, got 0x{:08X}",
@@ -585,15 +607,17 @@ fn test_digest_double_init() {
     // Clean up: consume the active operation so the session is clean
     let mut digest = vec![0u8; 32];
     let mut digest_len: CK_ULONG = digest.len() as CK_ULONG;
-    let _ = C_Digest(
-        session,
-        b"x".as_ptr() as CK_BYTE_PTR,
-        1,
-        digest.as_mut_ptr(),
-        &mut digest_len,
-    );
+    let _ = unsafe {
+        C_Digest(
+            session,
+            b"x".as_ptr() as CK_BYTE_PTR,
+            1,
+            digest.as_mut_ptr(),
+            &mut digest_len,
+        )
+    };
 
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -619,7 +643,7 @@ fn test_digest_multipart_matches_single() {
         digest_sp, digest_mp,
         "SHA-256 multi-part and single-part must produce identical output for the same data"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -641,7 +665,7 @@ fn test_sha256_large_data() {
         digest.iter().any(|&b| b != 0),
         "Digest should not be all zeros"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -664,7 +688,7 @@ fn test_digest_single_byte_updates() {
         digest_mp, digest_sp,
         "Single-byte DigestUpdate results must match single-part Digest for the same data"
     );
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -678,23 +702,27 @@ fn test_sha256_no_login_required() {
     let mut label = [b' '; 32];
     label[..12].copy_from_slice(b"NoLoginTest!");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed for no-login test");
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_OpenSession failed for no-login test");
 
     // Do NOT login — digest should still work as a public operation
@@ -704,25 +732,27 @@ fn test_sha256_no_login_required() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(rv, CKR_OK, "C_DigestInit without login should succeed");
 
     let mut digest = vec![0u8; 32];
     let mut digest_len: CK_ULONG = digest.len() as CK_ULONG;
-    let rv = C_Digest(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        digest.as_mut_ptr(),
-        &mut digest_len,
-    );
+    let rv = unsafe {
+        C_Digest(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            digest.as_mut_ptr(),
+            &mut digest_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Digest without login should succeed");
     assert_eq!(
         digest_len as usize, 32,
         "SHA-256 output should be 32 bytes even without login"
     );
 
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -738,13 +768,13 @@ fn test_digest_invalid_mechanism() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_DigestInit(session, &mut mechanism);
+    let rv = unsafe { C_DigestInit(session, &mut mechanism) };
     assert_eq!(
         rv, CKR_MECHANISM_INVALID,
         "C_DigestInit with invalid mechanism 0xFFFFFFFF should return CKR_MECHANISM_INVALID, got 0x{:08X}",
         rv
     );
 
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }

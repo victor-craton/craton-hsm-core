@@ -22,33 +22,35 @@ mod common;
 use common::ensure_init;
 
 fn cleanup_sessions() {
-    let _ = functions::C_CloseAllSessions(0);
+    let _ = unsafe { functions::C_CloseAllSessions(0) };
 }
 
 fn open_rw_session() -> Option<CK_SESSION_HANDLE> {
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = functions::C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION | CKF_RW_SESSION,
-        std::ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        functions::C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     if rv != CKR_OK {
         return None;
     }
     // Log in with the policy-compliant User PIN provisioned by
     // `common::ensure_init` (A3-13).
     if common::login_user(session) != CKR_OK {
-        let _ = functions::C_CloseSession(session);
+        let _ = unsafe { functions::C_CloseSession(session) };
         return None;
     }
     Some(session)
 }
 
 fn close_session(session: CK_SESSION_HANDLE) {
-    let _ = functions::C_Logout(session);
-    let _ = functions::C_CloseSession(session);
+    let _ = unsafe { functions::C_Logout(session) };
+    let _ = unsafe { functions::C_CloseSession(session) };
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -126,16 +128,18 @@ fn fuzz_aes_keygen(data: &[u8]) {
 
     let mut key_handle: CK_OBJECT_HANDLE = 0;
 
-    let rv = functions::C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key_handle,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key_handle,
+        )
+    };
 
     if rv == CKR_OK {
-        let _ = functions::C_DestroyObject(session, key_handle);
+        let _ = unsafe { functions::C_DestroyObject(session, key_handle) };
     }
 
     close_session(session);
@@ -202,20 +206,22 @@ fn fuzz_ec_keygen_random_params(data: &[u8]) {
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
 
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
 
     if rv == CKR_OK {
-        let _ = functions::C_DestroyObject(session, pub_key);
-        let _ = functions::C_DestroyObject(session, priv_key);
+        let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+        let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     }
 
     close_session(session);
@@ -253,36 +259,40 @@ fn fuzz_keygen_random_mechanism(data: &[u8]) {
     let mut key_handle: CK_OBJECT_HANDLE = 0;
 
     // C_GenerateKey with random mechanism — should error for invalid mechanisms
-    let rv = functions::C_GenerateKey(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut key_handle,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKey(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key_handle,
+        )
+    };
 
     if rv == CKR_OK {
-        let _ = functions::C_DestroyObject(session, key_handle);
+        let _ = unsafe { functions::C_DestroyObject(session, key_handle) };
     }
 
     // Also try C_GenerateKeyPair
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
 
-    let rv = functions::C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
 
     if rv == CKR_OK {
-        let _ = functions::C_DestroyObject(session, pub_key);
-        let _ = functions::C_DestroyObject(session, priv_key);
+        let _ = unsafe { functions::C_DestroyObject(session, pub_key) };
+        let _ = unsafe { functions::C_DestroyObject(session, priv_key) };
     }
 
     close_session(session);
@@ -346,16 +356,18 @@ fn fuzz_keygen_conflicting_attrs(data: &[u8]) {
     };
 
     let mut key_handle: CK_OBJECT_HANDLE = 0;
-    let rv = functions::C_GenerateKey(
-        session,
-        &mut mechanism,
-        attrs.as_mut_ptr(),
-        attrs.len() as CK_ULONG,
-        &mut key_handle,
-    );
+    let rv = unsafe {
+        functions::C_GenerateKey(
+            session,
+            &mut mechanism,
+            attrs.as_mut_ptr(),
+            attrs.len() as CK_ULONG,
+            &mut key_handle,
+        )
+    };
 
     if rv == CKR_OK {
-        let _ = functions::C_DestroyObject(session, key_handle);
+        let _ = unsafe { functions::C_DestroyObject(session, key_handle) };
     }
 
     close_session(session);
@@ -383,13 +395,9 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
         0 => {
             // Null template with non-zero count
             let mut key: CK_OBJECT_HANDLE = 0;
-            let rv = functions::C_GenerateKey(
-                session,
-                &mut mechanism,
-                std::ptr::null_mut(),
-                5,
-                &mut key,
-            );
+            let rv = unsafe {
+                functions::C_GenerateKey(session, &mut mechanism, std::ptr::null_mut(), 5, &mut key)
+            };
             assert!(
                 rv != CKR_OK,
                 "C_GenerateKey succeeded with null template + non-zero count"
@@ -403,13 +411,15 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
                 p_value: &true_val as *const _ as *mut _,
                 value_len: 1,
             }];
-            let rv = functions::C_GenerateKey(
-                session,
-                &mut mechanism,
-                template.as_mut_ptr(),
-                1,
-                std::ptr::null_mut(),
-            );
+            let rv = unsafe {
+                functions::C_GenerateKey(
+                    session,
+                    &mut mechanism,
+                    template.as_mut_ptr(),
+                    1,
+                    std::ptr::null_mut(),
+                )
+            };
             assert!(
                 rv != CKR_OK,
                 "C_GenerateKey succeeded with null output handle"
@@ -418,28 +428,32 @@ fn fuzz_keygen_null_pointers(data: &[u8]) {
         2 => {
             // Null mechanism pointer
             let mut key: CK_OBJECT_HANDLE = 0;
-            let rv = functions::C_GenerateKey(
-                session,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-                &mut key,
-            );
+            let rv = unsafe {
+                functions::C_GenerateKey(
+                    session,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                    &mut key,
+                )
+            };
             assert!(rv != CKR_OK, "C_GenerateKey succeeded with null mechanism");
         }
         3 => {
             // GenerateKeyPair with null output handles
             mechanism.mechanism = CKM_RSA_PKCS_KEY_PAIR_GEN;
-            let rv = functions::C_GenerateKeyPair(
-                session,
-                &mut mechanism,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            let rv = unsafe {
+                functions::C_GenerateKeyPair(
+                    session,
+                    &mut mechanism,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
             assert!(
                 rv != CKR_OK,
                 "C_GenerateKeyPair succeeded with null output handles"

@@ -40,7 +40,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 
 /// Ensure HSM is initialized. Idempotent.
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -55,47 +55,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"RSATest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed");
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -156,16 +166,18 @@ fn generate_rsa_keypair(
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "RSA keygen failed for {} bits: 0x{:08X}",
@@ -186,18 +198,20 @@ fn sign_data(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(rv, CKR_OK, "C_SignInit failed: 0x{:08X}", rv);
 
     let mut signature = vec![0u8; 512];
     let mut sig_len: CK_ULONG = signature.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        signature.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_Sign failed: 0x{:08X}", rv);
     signature.truncate(sig_len as usize);
     signature
@@ -216,16 +230,18 @@ fn verify_data(
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_VerifyInit(session, &mut mechanism, pub_key);
+    let rv = unsafe { C_VerifyInit(session, &mut mechanism, pub_key) };
     assert_eq!(rv, CKR_OK, "C_VerifyInit failed: 0x{:08X}", rv);
 
-    C_Verify(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        signature.as_ptr() as CK_BYTE_PTR,
-        signature.len() as CK_ULONG,
-    )
+    unsafe {
+        C_Verify(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            signature.as_ptr() as CK_BYTE_PTR,
+            signature.len() as CK_ULONG,
+        )
+    }
 }
 
 /// Read CKA_MODULUS and CKA_PUBLIC_EXPONENT from a public key handle via C_GetAttributeValue.
@@ -239,7 +255,7 @@ fn read_rsa_public_components(
         p_value: ptr::null_mut(),
         value_len: 0,
     }];
-    let rv = C_GetAttributeValue(session, pub_key, mod_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, mod_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     let mod_len = mod_template[0].value_len as usize;
 
@@ -248,7 +264,7 @@ fn read_rsa_public_components(
         p_value: ptr::null_mut(),
         value_len: 0,
     }];
-    let rv = C_GetAttributeValue(session, pub_key, exp_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, exp_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     let exp_len = exp_template[0].value_len as usize;
 
@@ -256,13 +272,13 @@ fn read_rsa_public_components(
     let mut modulus = vec![0u8; mod_len];
     mod_template[0].p_value = modulus.as_mut_ptr() as CK_VOID_PTR;
     mod_template[0].value_len = mod_len as CK_ULONG;
-    let rv = C_GetAttributeValue(session, pub_key, mod_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, mod_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
 
     let mut pub_exp = vec![0u8; exp_len];
     exp_template[0].p_value = pub_exp.as_mut_ptr() as CK_VOID_PTR;
     exp_template[0].value_len = exp_len as CK_ULONG;
-    let rv = C_GetAttributeValue(session, pub_key, exp_template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, exp_template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
 
     (modulus, pub_exp)
@@ -337,18 +353,20 @@ fn test_rsa_2048_oaep_encrypt_decrypt() {
         p_parameter: &OAEP_SHA256_PARAMS as *const _ as CK_VOID_PTR,
         parameter_len: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
     };
-    let rv = C_DecryptInit(session, &mut dec_mechanism, priv_key);
+    let rv = unsafe { C_DecryptInit(session, &mut dec_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK, "DecryptInit failed: 0x{:08X}", rv);
 
     let mut decrypted = vec![0u8; 512];
     let mut dec_len: CK_ULONG = decrypted.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_ptr() as CK_BYTE_PTR,
-        ciphertext.len() as CK_ULONG,
-        decrypted.as_mut_ptr(),
-        &mut dec_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_ptr() as CK_BYTE_PTR,
+            ciphertext.len() as CK_ULONG,
+            decrypted.as_mut_ptr(),
+            &mut dec_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Decrypt failed: 0x{:08X}", rv);
     assert_eq!(&decrypted[..dec_len as usize], plaintext.as_slice());
 }
@@ -511,18 +529,20 @@ fn test_rsa_oaep_wrong_key_decrypt_fails() {
         p_parameter: &OAEP_SHA256_PARAMS as *const _ as CK_VOID_PTR,
         parameter_len: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
     };
-    let rv = C_DecryptInit(session, &mut dec_mechanism, priv_b);
+    let rv = unsafe { C_DecryptInit(session, &mut dec_mechanism, priv_b) };
     assert_eq!(rv, CKR_OK);
 
     let mut decrypted = vec![0u8; 512];
     let mut dec_len: CK_ULONG = decrypted.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_ptr() as CK_BYTE_PTR,
-        ciphertext.len() as CK_ULONG,
-        decrypted.as_mut_ptr(),
-        &mut dec_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_ptr() as CK_BYTE_PTR,
+            ciphertext.len() as CK_ULONG,
+            decrypted.as_mut_ptr(),
+            &mut dec_len,
+        )
+    };
     assert_ne!(rv, CKR_OK, "Decrypt with wrong private key should fail");
 }
 
@@ -549,18 +569,20 @@ fn test_rsa_oaep_tampered_ciphertext_fails() {
         p_parameter: &OAEP_SHA256_PARAMS as *const _ as CK_VOID_PTR,
         parameter_len: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
     };
-    let rv = C_DecryptInit(session, &mut dec_mechanism, priv_key);
+    let rv = unsafe { C_DecryptInit(session, &mut dec_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let mut decrypted = vec![0u8; 512];
     let mut dec_len: CK_ULONG = decrypted.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_mut_ptr(),
-        ciphertext.len() as CK_ULONG,
-        decrypted.as_mut_ptr(),
-        &mut dec_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            ciphertext.len() as CK_ULONG,
+            decrypted.as_mut_ptr(),
+            &mut dec_len,
+        )
+    };
     assert_ne!(rv, CKR_OK, "Tampered ciphertext should fail decryption");
 }
 
@@ -579,18 +601,20 @@ fn test_rsa_sign_null_output_gets_size() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     // First call with null output to get size
     let mut sig_len: CK_ULONG = 0;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            ptr::null_mut(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Null output call should succeed");
     assert_eq!(
         sig_len as usize, 256,
@@ -613,18 +637,20 @@ fn test_rsa_sign_buffer_too_small() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, priv_key);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     let mut small_buf = [0u8; 1];
     let mut sig_len: CK_ULONG = small_buf.len() as CK_ULONG;
-    let rv = C_Sign(
-        session,
-        data.as_ptr() as CK_BYTE_PTR,
-        data.len() as CK_ULONG,
-        small_buf.as_mut_ptr(),
-        &mut sig_len,
-    );
+    let rv = unsafe {
+        C_Sign(
+            session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            small_buf.as_mut_ptr(),
+            &mut sig_len,
+        )
+    };
     assert_eq!(rv, CKR_BUFFER_TOO_SMALL, "Should return BUFFER_TOO_SMALL");
     assert_eq!(sig_len as usize, 256, "Should report required size");
 }
@@ -649,18 +675,20 @@ fn test_rsa_decrypt_null_output_gets_size() {
         p_parameter: &OAEP_SHA256_PARAMS as *const _ as CK_VOID_PTR,
         parameter_len: std::mem::size_of::<CkRsaPkcsOaepParams>() as CK_ULONG,
     };
-    let rv = C_DecryptInit(session, &mut dec_mechanism, priv_key);
+    let rv = unsafe { C_DecryptInit(session, &mut dec_mechanism, priv_key) };
     assert_eq!(rv, CKR_OK);
 
     // First call with null output to get size
     let mut dec_len: CK_ULONG = 0;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_ptr() as CK_BYTE_PTR,
-        ciphertext.len() as CK_ULONG,
-        ptr::null_mut(),
-        &mut dec_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_ptr() as CK_BYTE_PTR,
+            ciphertext.len() as CK_ULONG,
+            ptr::null_mut(),
+            &mut dec_len,
+        )
+    };
     assert_eq!(rv, CKR_OK, "Null output call should succeed");
     assert!(dec_len > 0, "Should report non-zero decrypted size");
 }
@@ -681,7 +709,7 @@ fn test_rsa_keygen_attributes_correct() {
         p_value: &mut modulus_bits_val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "GetAttributeValue failed: 0x{:08X}", rv);
     assert_eq!(modulus_bits_val, 2048, "Modulus bits should be 2048");
 }
@@ -701,7 +729,7 @@ fn test_rsa_keygen_public_exponent() {
         p_value: ptr::null_mut(),
         value_len: 0,
     }];
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     assert_eq!(
         rv, CKR_OK,
         "GetAttributeValue size query failed: 0x{:08X}",
@@ -714,7 +742,7 @@ fn test_rsa_keygen_public_exponent() {
     let mut exp_buf = vec![0u8; exp_len];
     template[0].p_value = exp_buf.as_mut_ptr() as CK_VOID_PTR;
     template[0].value_len = exp_len as CK_ULONG;
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     assert_eq!(
         rv, CKR_OK,
         "GetAttributeValue value query failed: 0x{:08X}",
@@ -742,7 +770,7 @@ fn test_rsa_private_key_is_sensitive() {
         p_value: &mut sensitive_val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, priv_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, priv_key, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK, "GetAttributeValue failed: 0x{:08X}", rv);
     assert_eq!(sensitive_val, CK_TRUE, "Private key should be sensitive");
 }
@@ -762,7 +790,7 @@ fn test_rsa_public_key_not_sensitive() {
         p_value: &mut sensitive_val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     // Either CKR_OK with CK_FALSE, or CKR_ATTRIBUTE_TYPE_INVALID for public keys
     if rv == CKR_OK {
         assert_eq!(
@@ -789,23 +817,27 @@ fn test_rsa_sign_without_login_fails() {
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"NoLogin");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Do NOT login -- try to SignInit with a bogus key handle
@@ -814,13 +846,13 @@ fn test_rsa_sign_without_login_fails() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut mechanism, 999);
+    let rv = unsafe { C_SignInit(session, &mut mechanism, 999) };
     assert_eq!(
         rv, CKR_USER_NOT_LOGGED_IN,
         "SignInit without login should fail"
     );
 
-    let rv = C_CloseSession(session);
+    let rv = unsafe { C_CloseSession(session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -835,62 +867,74 @@ fn test_rsa_keygen_on_ro_session_fails() {
     let mut label = [b' '; 32];
     label[..6].copy_from_slice(b"ROTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Set up user PIN via SO session first
     let mut rw_session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut rw_session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut rw_session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        rw_session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            rw_session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        rw_session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            rw_session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(rw_session);
+    let rv = unsafe { C_Logout(rw_session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_CloseSession(rw_session);
+    let rv = unsafe { C_CloseSession(rw_session) };
     assert_eq!(rv, CKR_OK);
 
     // Open RO session (CKF_SERIAL_SESSION only, no CKF_RW_SESSION)
     let mut ro_session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut ro_session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut ro_session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Login as user on RO session
-    let rv = C_Login(
-        ro_session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            ro_session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Try to generate RSA keypair
@@ -926,22 +970,24 @@ fn test_rsa_keygen_on_ro_session_fails() {
     }];
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        ro_session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            ro_session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(
         rv, CKR_SESSION_READ_ONLY,
         "Keygen on RO session should fail"
     );
 
-    let rv = C_CloseSession(ro_session);
+    let rv = unsafe { C_CloseSession(ro_session) };
     assert_eq!(rv, CKR_OK);
 }
 
@@ -974,13 +1020,15 @@ fn test_rsa_sign_init_wrong_key_type() {
         },
     ];
     let mut aes_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut aes_mechanism,
-        aes_template.as_mut_ptr(),
-        aes_template.len() as CK_ULONG,
-        &mut aes_key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut aes_mechanism,
+            aes_template.as_mut_ptr(),
+            aes_template.len() as CK_ULONG,
+            &mut aes_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "AES keygen failed");
 
     // Try to use AES key for RSA signing
@@ -989,20 +1037,22 @@ fn test_rsa_sign_init_wrong_key_type() {
         p_parameter: ptr::null_mut(),
         parameter_len: 0,
     };
-    let rv = C_SignInit(session, &mut rsa_sign_mechanism, aes_key);
+    let rv = unsafe { C_SignInit(session, &mut rsa_sign_mechanism, aes_key) };
 
     if rv == CKR_OK {
         // SignInit succeeded, the error will come from C_Sign
         let data = b"wrong key type test";
         let mut sig_buf = vec![0u8; 512];
         let mut sig_len: CK_ULONG = sig_buf.len() as CK_ULONG;
-        let rv = C_Sign(
-            session,
-            data.as_ptr() as CK_BYTE_PTR,
-            data.len() as CK_ULONG,
-            sig_buf.as_mut_ptr(),
-            &mut sig_len,
-        );
+        let rv = unsafe {
+            C_Sign(
+                session,
+                data.as_ptr() as CK_BYTE_PTR,
+                data.len() as CK_ULONG,
+                sig_buf.as_mut_ptr(),
+                &mut sig_len,
+            )
+        };
         assert_ne!(
             rv, CKR_OK,
             "RSA sign with AES key should fail: 0x{:08X}",
@@ -1032,7 +1082,7 @@ fn test_rsa_2048_keygen_modulus_size() {
         p_value: ptr::null_mut(),
         value_len: 0,
     }];
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     assert_eq!(
         rv, CKR_OK,
         "GetAttributeValue size query failed: 0x{:08X}",
@@ -1045,7 +1095,7 @@ fn test_rsa_2048_keygen_modulus_size() {
     let mut modulus_buf = vec![0u8; modulus_len];
     template[0].p_value = modulus_buf.as_mut_ptr() as CK_VOID_PTR;
     template[0].value_len = modulus_len as CK_ULONG;
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     assert_eq!(
         rv, CKR_OK,
         "GetAttributeValue value query failed: 0x{:08X}",
@@ -1130,7 +1180,7 @@ fn test_rsa_keygen_produces_unique_keys() {
             p_value: ptr::null_mut(),
             value_len: 0,
         }];
-        let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+        let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
         assert_eq!(
             rv, CKR_OK,
             "GetAttributeValue size query failed: 0x{:08X}",
@@ -1143,7 +1193,7 @@ fn test_rsa_keygen_produces_unique_keys() {
         let mut buf = vec![0u8; modulus_len];
         template[0].p_value = buf.as_mut_ptr() as CK_VOID_PTR;
         template[0].value_len = modulus_len as CK_ULONG;
-        let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+        let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
         assert_eq!(
             rv, CKR_OK,
             "GetAttributeValue value query failed: 0x{:08X}",

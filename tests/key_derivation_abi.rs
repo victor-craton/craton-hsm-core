@@ -12,7 +12,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 }
 
 fn ensure_init() {
-    let rv = C_Initialize(ptr::null_mut());
+    let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(
         rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED,
         "C_Initialize failed: 0x{:08X}",
@@ -26,47 +26,57 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"DervTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    let rv = C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    let rv = unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_InitToken failed");
 
     let mut session: CK_SESSION_HANDLE = 0;
-    let rv = C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    let rv = unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     let user_pin = b"userpin1";
-    let rv = C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Logout(session);
+    let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
-    let rv = C_Login(
-        session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    let rv = unsafe {
+        C_Login(
+            session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
     assert_eq!(rv, CKR_OK);
     session
 }
@@ -119,16 +129,18 @@ fn generate_ec_keypair(
 
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "EC keygen failed: 0x{:08X}", rv);
     (pub_key, priv_key)
 }
@@ -141,7 +153,7 @@ fn read_ec_point(session: CK_SESSION_HANDLE, pub_key: CK_OBJECT_HANDLE) -> Vec<u
         p_value: ptr::null_mut(),
         value_len: 0,
     }];
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     assert_eq!(
         rv, CKR_OK,
         "GetAttributeValue(EC_POINT) size failed: 0x{:08X}",
@@ -152,7 +164,7 @@ fn read_ec_point(session: CK_SESSION_HANDLE, pub_key: CK_OBJECT_HANDLE) -> Vec<u
     let mut buf = vec![0u8; size];
     template[0].p_value = buf.as_mut_ptr() as CK_VOID_PTR;
     template[0].value_len = size as CK_ULONG;
-    let rv = C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, pub_key, template.as_mut_ptr(), 1) };
     assert_eq!(
         rv, CKR_OK,
         "GetAttributeValue(EC_POINT) data failed: 0x{:08X}",
@@ -209,14 +221,16 @@ fn do_ecdh_derive(
     ];
 
     let mut derived_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_DeriveKey(
-        session,
-        &mut mechanism,
-        base_key,
-        derive_template.as_mut_ptr(),
-        derive_template.len() as CK_ULONG,
-        &mut derived_key,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            &mut mechanism,
+            base_key,
+            derive_template.as_mut_ptr(),
+            derive_template.len() as CK_ULONG,
+            &mut derived_key,
+        )
+    };
     assert_eq!(rv, CKR_OK, "C_DeriveKey failed: 0x{:08X}", rv);
     derived_key
 }
@@ -250,7 +264,7 @@ fn test_ecdh_p256_derived_key_is_secret() {
         p_value: &mut class_val as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, derived, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, derived, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         class_val, CKO_SECRET_KEY,
@@ -274,7 +288,7 @@ fn test_ecdh_p256_derived_key_usable() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, derived);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, derived) };
     assert_eq!(rv, CKR_OK, "Derived key should be usable for encryption");
 }
 
@@ -300,31 +314,35 @@ fn test_ecdh_p256_both_sides_derive_same() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, derived_1);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, derived_1) };
     assert_eq!(rv, CKR_OK);
     let mut ciphertext = vec![0u8; 256];
     let mut ct_len: CK_ULONG = ciphertext.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ciphertext.as_mut_ptr(),
-        &mut ct_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ct_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Decrypt with the second derived key — should recover plaintext
-    let rv = C_DecryptInit(session, &mut mech, derived_2);
+    let rv = unsafe { C_DecryptInit(session, &mut mech, derived_2) };
     assert_eq!(rv, CKR_OK, "DecryptInit with derived_2 should succeed");
     let mut recovered = vec![0u8; 256];
     let mut rec_len: CK_ULONG = recovered.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_mut_ptr(),
-        ct_len,
-        recovered.as_mut_ptr(),
-        &mut rec_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            ct_len,
+            recovered.as_mut_ptr(),
+            &mut rec_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "Same ECDH inputs must derive the same key (cross-decrypt must succeed)"
@@ -365,7 +383,7 @@ fn test_ecdh_p384_derived_key_usable() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, derived);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, derived) };
     assert_eq!(rv, CKR_OK, "Derived P-384 key should be usable");
 }
 
@@ -411,14 +429,16 @@ fn test_derive_invalid_base_key() {
         },
     ];
     let mut derived: CK_OBJECT_HANDLE = 0;
-    let rv = C_DeriveKey(
-        session,
-        &mut mechanism,
-        0xFFFFFFFF,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut derived,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            &mut mechanism,
+            0xFFFFFFFF,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived,
+        )
+    };
     assert_ne!(rv, CKR_OK, "Invalid base key handle should fail");
 }
 
@@ -446,13 +466,15 @@ fn test_derive_with_aes_key_fails() {
         },
     ];
     let mut aes_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKey(
-        session,
-        &mut aes_mech,
-        aes_tmpl.as_mut_ptr(),
-        aes_tmpl.len() as CK_ULONG,
-        &mut aes_key,
-    );
+    let rv = unsafe {
+        C_GenerateKey(
+            session,
+            &mut aes_mech,
+            aes_tmpl.as_mut_ptr(),
+            aes_tmpl.len() as CK_ULONG,
+            &mut aes_key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Try ECDH derive with AES key
@@ -488,14 +510,16 @@ fn test_derive_with_aes_key_fails() {
         },
     ];
     let mut derived: CK_OBJECT_HANDLE = 0;
-    let rv = C_DeriveKey(
-        session,
-        &mut mechanism,
-        aes_key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut derived,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            &mut mechanism,
+            aes_key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived,
+        )
+    };
     assert_ne!(rv, CKR_OK, "ECDH derive with AES key should fail");
 }
 
@@ -530,14 +554,16 @@ fn test_derive_null_mechanism() {
         },
     ];
     let mut derived: CK_OBJECT_HANDLE = 0;
-    let rv = C_DeriveKey(
-        session,
-        ptr::null_mut(),
-        priv_key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut derived,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            ptr::null_mut(),
+            priv_key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived,
+        )
+    };
     assert_eq!(
         rv, CKR_ARGUMENTS_BAD,
         "Null mechanism should return CKR_ARGUMENTS_BAD"
@@ -551,22 +577,26 @@ fn test_derive_without_login() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"NoLgDerv");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
 
     let mut session: CK_SESSION_HANDLE = 0;
-    C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
+    unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
     // Don't login
 
     let fake_point = vec![0u8; 65];
@@ -602,14 +632,16 @@ fn test_derive_without_login() {
         },
     ];
     let mut derived: CK_OBJECT_HANDLE = 0;
-    let rv = C_DeriveKey(
-        session,
-        &mut mechanism,
-        1,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut derived,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            &mut mechanism,
+            1,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived,
+        )
+    };
     assert_ne!(rv, CKR_OK, "DeriveKey without login should fail");
 }
 
@@ -652,14 +684,16 @@ fn test_derive_invalid_mechanism() {
         },
     ];
     let mut derived: CK_OBJECT_HANDLE = 0;
-    let rv = C_DeriveKey(
-        session,
-        &mut mechanism,
-        priv_key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut derived,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            &mut mechanism,
+            priv_key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived,
+        )
+    };
     assert_ne!(rv, CKR_OK, "Invalid derive mechanism should fail");
 }
 
@@ -700,16 +734,18 @@ fn test_derive_without_derive_permission() {
     ];
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        session,
-        &mut mechanism,
-        pub_template.as_mut_ptr(),
-        pub_template.len() as CK_ULONG,
-        priv_template.as_mut_ptr(),
-        priv_template.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            pub_template.as_mut_ptr(),
+            pub_template.len() as CK_ULONG,
+            priv_template.as_mut_ptr(),
+            priv_template.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     let (peer_pub, _) = generate_ec_keypair(session, &P256_OID);
@@ -746,14 +782,16 @@ fn test_derive_without_derive_permission() {
         },
     ];
     let mut derived: CK_OBJECT_HANDLE = 0;
-    let rv = C_DeriveKey(
-        session,
-        &mut derive_mech,
-        priv_key,
-        template.as_mut_ptr(),
-        template.len() as CK_ULONG,
-        &mut derived,
-    );
+    let rv = unsafe {
+        C_DeriveKey(
+            session,
+            &mut derive_mech,
+            priv_key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived,
+        )
+    };
     assert_ne!(
         rv, CKR_OK,
         "Derive without CKA_DERIVE permission should fail"
@@ -778,7 +816,7 @@ fn test_derived_key_value_len() {
         p_value: &mut val_len as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, derived, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, derived, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(
         val_len, 32,
@@ -800,7 +838,7 @@ fn test_derived_key_type() {
         p_value: &mut kt as *mut _ as CK_VOID_PTR,
         value_len: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
     }];
-    let rv = C_GetAttributeValue(session, derived, template.as_mut_ptr(), 1);
+    let rv = unsafe { C_GetAttributeValue(session, derived, template.as_mut_ptr(), 1) };
     assert_eq!(rv, CKR_OK);
     assert_eq!(kt, CKK_AES, "Derived key should have type CKK_AES");
 }
@@ -831,31 +869,35 @@ fn test_derive_twice_same_keys_same_result() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, derived1);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, derived1) };
     assert_eq!(rv, CKR_OK);
     let mut ciphertext = vec![0u8; 256];
     let mut ct_len: CK_ULONG = ciphertext.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ciphertext.as_mut_ptr(),
-        &mut ct_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ct_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     // Decrypt with derived2 — should succeed since both have same key material
-    let rv = C_DecryptInit(session, &mut mech, derived2);
+    let rv = unsafe { C_DecryptInit(session, &mut mech, derived2) };
     assert_eq!(rv, CKR_OK);
     let mut recovered = vec![0u8; 256];
     let mut rec_len: CK_ULONG = recovered.len() as CK_ULONG;
-    let rv = C_Decrypt(
-        session,
-        ciphertext.as_mut_ptr(),
-        ct_len,
-        recovered.as_mut_ptr(),
-        &mut rec_len,
-    );
+    let rv = unsafe {
+        C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            ct_len,
+            recovered.as_mut_ptr(),
+            &mut rec_len,
+        )
+    };
     assert_eq!(
         rv, CKR_OK,
         "Same ECDH derivation should produce same key (cross-decrypt must succeed)"
@@ -888,30 +930,34 @@ fn test_derive_different_peers_different_keys() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, derived_ab);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, derived_ab) };
     assert_eq!(rv, CKR_OK);
     let mut ct1 = vec![0u8; 256];
     let mut ct1_len: CK_ULONG = ct1.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ct1.as_mut_ptr(),
-        &mut ct1_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ct1.as_mut_ptr(),
+            &mut ct1_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
-    let rv = C_EncryptInit(session, &mut mech, derived_ac);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, derived_ac) };
     assert_eq!(rv, CKR_OK);
     let mut ct2 = vec![0u8; 256];
     let mut ct2_len: CK_ULONG = ct2.len() as CK_ULONG;
-    let rv = C_Encrypt(
-        session,
-        plaintext.as_ptr() as *mut _,
-        plaintext.len() as CK_ULONG,
-        ct2.as_mut_ptr(),
-        &mut ct2_len,
-    );
+    let rv = unsafe {
+        C_Encrypt(
+            session,
+            plaintext.as_ptr() as *mut _,
+            plaintext.len() as CK_ULONG,
+            ct2.as_mut_ptr(),
+            &mut ct2_len,
+        )
+    };
     assert_eq!(rv, CKR_OK);
 
     assert_ne!(
@@ -933,7 +979,7 @@ fn test_destroy_derived_key() {
     let ec_point_b = read_ec_point(session, pub_b);
     let derived = do_ecdh_derive(session, priv_a, &ec_point_b);
 
-    let rv = C_DestroyObject(session, derived);
+    let rv = unsafe { C_DestroyObject(session, derived) };
     assert_eq!(rv, CKR_OK, "Should be able to destroy derived key");
 
     // Verify destroyed key can't be used
@@ -943,7 +989,7 @@ fn test_destroy_derived_key() {
         p_parameter: iv.as_ptr() as CK_VOID_PTR,
         parameter_len: iv.len() as CK_ULONG,
     };
-    let rv = C_EncryptInit(session, &mut mech, derived);
+    let rv = unsafe { C_EncryptInit(session, &mut mech, derived) };
     assert_ne!(rv, CKR_OK, "Destroyed derived key should be unusable");
 }
 
@@ -954,53 +1000,65 @@ fn test_derive_on_ro_session_fails() {
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"RODrvTst");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
-    let _ = C_CloseAllSessions(0);
-    C_InitToken(
-        0,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-        label.as_ptr() as *mut _,
-    );
+    let _ = unsafe { C_CloseAllSessions(0) };
+    unsafe {
+        C_InitToken(
+            0,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+            label.as_ptr() as *mut _,
+        )
+    };
 
     let mut session: CK_SESSION_HANDLE = 0;
     // RW session for SO setup
-    C_OpenSession(
-        0,
-        CKF_RW_SESSION | CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut session,
-    );
-    C_Login(
-        session,
-        CKU_SO,
-        so_pin.as_ptr() as *mut _,
-        so_pin.len() as CK_ULONG,
-    );
+    unsafe {
+        C_OpenSession(
+            0,
+            CKF_RW_SESSION | CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut session,
+        )
+    };
+    unsafe {
+        C_Login(
+            session,
+            CKU_SO,
+            so_pin.as_ptr() as *mut _,
+            so_pin.len() as CK_ULONG,
+        )
+    };
     let user_pin = b"userpin1";
-    C_InitPIN(
-        session,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
-    C_Logout(session);
-    C_CloseSession(session);
+    unsafe {
+        C_InitPIN(
+            session,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
+    unsafe { C_Logout(session) };
+    unsafe { C_CloseSession(session) };
 
     // Open RO session
     let mut ro_session: CK_SESSION_HANDLE = 0;
-    C_OpenSession(
-        0,
-        CKF_SERIAL_SESSION,
-        ptr::null_mut(),
-        None,
-        &mut ro_session,
-    );
-    C_Login(
-        ro_session,
-        CKU_USER,
-        user_pin.as_ptr() as *mut _,
-        user_pin.len() as CK_ULONG,
-    );
+    unsafe {
+        C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION,
+            ptr::null_mut(),
+            None,
+            &mut ro_session,
+        )
+    };
+    unsafe {
+        C_Login(
+            ro_session,
+            CKU_USER,
+            user_pin.as_ptr() as *mut _,
+            user_pin.len() as CK_ULONG,
+        )
+    };
 
     // Try to generate key (needed for derive) on RO session
     let mut ec_mech = CK_MECHANISM {
@@ -1035,16 +1093,18 @@ fn test_derive_on_ro_session_fails() {
     ];
     let mut pub_key: CK_OBJECT_HANDLE = 0;
     let mut priv_key: CK_OBJECT_HANDLE = 0;
-    let rv = C_GenerateKeyPair(
-        ro_session,
-        &mut ec_mech,
-        pub_tmpl.as_mut_ptr(),
-        pub_tmpl.len() as CK_ULONG,
-        priv_tmpl.as_mut_ptr(),
-        priv_tmpl.len() as CK_ULONG,
-        &mut pub_key,
-        &mut priv_key,
-    );
+    let rv = unsafe {
+        C_GenerateKeyPair(
+            ro_session,
+            &mut ec_mech,
+            pub_tmpl.as_mut_ptr(),
+            pub_tmpl.len() as CK_ULONG,
+            priv_tmpl.as_mut_ptr(),
+            priv_tmpl.len() as CK_ULONG,
+            &mut pub_key,
+            &mut priv_key,
+        )
+    };
     assert_ne!(rv, CKR_OK, "Key generation on RO session should fail");
 }
 
@@ -1057,7 +1117,7 @@ fn test_derive_get_object_size() {
     let derived = do_ecdh_derive(session, priv_a, &ec_point_b);
 
     let mut size: CK_ULONG = 0;
-    let rv = C_GetObjectSize(session, derived, &mut size);
+    let rv = unsafe { C_GetObjectSize(session, derived, &mut size) };
     assert_eq!(rv, CKR_OK, "GetObjectSize on derived key should succeed");
     assert!(size > 0, "Derived key size should be > 0");
 }
