@@ -28,7 +28,7 @@ fn ensure_init() {
 /// login as SO, init user PIN, logout SO, login as user.
 fn setup_user_session() -> CK_SESSION_HANDLE {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"PQCTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -64,7 +64,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
         )
     };
     assert_eq!(rv, CKR_OK, "C_Login SO failed: 0x{:08X}", rv);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,
@@ -589,7 +589,7 @@ fn test_ml_dsa_sign_without_login() {
     ensure_init();
 
     // Init token so we have a clean state
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"NoLoginTk");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -791,7 +791,7 @@ fn test_ml_dsa_44_multiple_signs() {
 fn test_ml_dsa_keygen_on_ro_session() {
     ensure_init();
 
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..6].copy_from_slice(b"ROTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -1101,7 +1101,7 @@ fn test_ml_dsa_destroy_key_then_sign() {
 fn test_pqc_mechanism_in_mechanism_list() {
     ensure_init();
 
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"MechList");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.

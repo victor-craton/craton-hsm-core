@@ -22,7 +22,7 @@ fn ensure_init() {
 
 fn setup_user_session() -> CK_SESSION_HANDLE {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"DervTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -58,7 +58,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
         )
     };
     assert_eq!(rv, CKR_OK);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,
@@ -573,7 +573,7 @@ fn test_derive_null_mechanism() {
 #[test]
 fn test_derive_without_login() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"NoLgDerv");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -996,7 +996,7 @@ fn test_destroy_derived_key() {
 #[test]
 fn test_derive_on_ro_session_fails() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"RODrvTst");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -1029,7 +1029,7 @@ fn test_derive_on_ro_session_fails() {
             so_pin.len() as CK_ULONG,
         )
     };
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     unsafe {
         C_InitPIN(
             session,

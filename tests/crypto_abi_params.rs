@@ -43,7 +43,7 @@ fn ck_ulong_bytes(val: CK_ULONG) -> Vec<u8> {
 fn setup_user_session() -> CK_SESSION_HANDLE {
     let rv = unsafe { C_Initialize(ptr::null_mut()) };
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"CryptPar");
     let rv = unsafe {
@@ -75,7 +75,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
         )
     };
     assert_eq!(rv, CKR_OK);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,

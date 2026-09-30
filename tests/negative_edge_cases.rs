@@ -29,7 +29,7 @@ fn ensure_init() {
 /// Returns session handle.
 fn setup_user_session() -> CK_SESSION_HANDLE {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"EdgeTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -65,7 +65,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
         )
     };
     assert_eq!(rv, CKR_OK);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,
@@ -1785,7 +1785,7 @@ fn test_rsa_4096_keygen_sign_verify() {
 #[test]
 fn test_login_empty_pin() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"EmptyPIN1");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -1908,7 +1908,7 @@ fn test_login_overlength_pin() {
 #[test]
 fn test_set_attribute_on_ro_session() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"ROSess1");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.

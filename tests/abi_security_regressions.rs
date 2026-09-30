@@ -10,8 +10,8 @@ use craton_hsm::pkcs11_abi::functions::*;
 use craton_hsm::pkcs11_abi::types::*;
 use std::ptr;
 
-const SO_PIN: &[u8] = b"sopin123";
-const USER_PIN: &[u8] = b"userpin1";
+const SO_PIN: &[u8] = b"S0pin-47";
+const USER_PIN: &[u8] = b"Us3rpin9";
 
 fn ensure_init() {
     let rv = unsafe { C_Initialize(ptr::null_mut()) };

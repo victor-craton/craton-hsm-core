@@ -38,7 +38,7 @@ fn ensure_init() {
 /// Initialize token, open RW session, set up user PIN, login as user.
 fn setup_user_session() -> CK_SESSION_HANDLE {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"ConformTe");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -74,7 +74,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
         )
     };
     assert_eq!(rv, CKR_OK);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,
@@ -184,7 +184,7 @@ fn test_aes_ctr_zero_iv_rejected() {
 #[test]
 fn test_double_session_close() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"DblClose");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -277,7 +277,7 @@ fn test_pin_complexity_single_class() {
 fn test_pin_complexity_valid() {
     ensure_init();
     // PIN with two classes and >=3 distinct bytes should succeed
-    let good_pin = b"sopin123";
+    let good_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"PinGood!");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -475,7 +475,7 @@ fn test_login_invalid_user_type() {
     let session = setup_user_session();
     let _ = unsafe { C_Logout(session) };
 
-    let pin = b"userpin1";
+    let pin = b"Us3rpin9";
     let rv = unsafe {
         C_Login(
             session,
@@ -701,7 +701,7 @@ fn test_session_info_state() {
 #[test]
 fn test_logout_without_login() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LgOutNoL");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -761,7 +761,7 @@ fn test_get_function_list_null_arg() {
 #[test]
 fn test_close_all_sessions() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"ClsAllSs");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -1412,7 +1412,7 @@ fn test_multipart_digest_sha256() {
 #[test]
 fn test_login_lockout() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LockTst!");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -1449,7 +1449,7 @@ fn test_login_lockout() {
         )
     };
     assert_eq!(rv, CKR_OK);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,

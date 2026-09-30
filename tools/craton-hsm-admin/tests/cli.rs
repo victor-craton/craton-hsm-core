@@ -348,7 +348,7 @@ fn init_then_login_state_persists() {
     // A weak new SO PIN is rejected by the core PIN policy before anything
     // is written.
     let o = env.run_secrets(
-        &["sopin123", "sopin123"],
+        &["S0pin-47", "S0pin-47"],
         &["token", "init", "--label", "T"],
     );
     assert_eq!(code(&o), EXIT_USAGE, "{}", stderr(&o));

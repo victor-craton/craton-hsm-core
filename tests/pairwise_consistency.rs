@@ -14,7 +14,7 @@ fn init_and_login() -> CK_SESSION_HANDLE {
     assert!(rv == CKR_OK || rv == CKR_CRYPTOKI_ALREADY_INITIALIZED);
 
     // Init token with SO PIN
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"TestToken");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.

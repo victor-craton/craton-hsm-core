@@ -181,7 +181,7 @@ fn test_session_manager_missing_serial_flag() {
     let mgr = SessionManager::new();
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"TestTok"))
+        .init_token(b"S0pin-47", &padded_label(b"TestTok"))
         .unwrap();
     let err = mgr.open_session(0, CKF_RW_SESSION, &token).unwrap_err();
     assert!(matches!(err, HsmError::SessionParallelNotSupported));
@@ -192,7 +192,7 @@ fn test_session_manager_ro_session_while_so_logged_in() {
     let mgr = SessionManager::new();
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"TestTok"))
+        .init_token(b"S0pin-47", &padded_label(b"TestTok"))
         .unwrap();
 
     // Open RW session
@@ -200,7 +200,7 @@ fn test_session_manager_ro_session_while_so_logged_in() {
         .open_session(0, CKF_RW_SESSION | CKF_SERIAL_SESSION, &token)
         .unwrap();
     // Login as SO via token
-    token.login(CKU_SO, b"sopin123").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
     mgr.login_all(0, CKU_SO).unwrap();
 
     // Now try to open RO session — should fail
@@ -218,7 +218,7 @@ fn test_session_manager_invalid_handle_close() {
     let mgr = SessionManager::new();
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"TestTok"))
+        .init_token(b"S0pin-47", &padded_label(b"TestTok"))
         .unwrap();
     let err = mgr.close_session(999999, &token).unwrap_err();
     assert!(matches!(err, HsmError::SessionHandleInvalid));
@@ -235,10 +235,10 @@ fn test_session_manager_login_all_affects_all_sessions() {
     let mgr = SessionManager::new();
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"TestTok"))
+        .init_token(b"S0pin-47", &padded_label(b"TestTok"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
 
     // Open two sessions
@@ -248,7 +248,7 @@ fn test_session_manager_login_all_affects_all_sessions() {
         .unwrap();
 
     // Login user via token and manager
-    token.login(CKU_USER, b"userpin1").unwrap();
+    token.login(CKU_USER, b"Us3rpin9").unwrap();
     mgr.login_all(0, CKU_USER).unwrap();
 
     // Both sessions should be in user state
@@ -272,12 +272,12 @@ fn test_new_session_inherits_user_login_state() {
     let mgr = SessionManager::new();
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"Inherit"))
+        .init_token(b"S0pin-47", &padded_label(b"Inherit"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
-    token.login(CKU_USER, b"userpin1").unwrap();
+    token.login(CKU_USER, b"Us3rpin9").unwrap();
 
     // Open new session while token is UserLoggedIn
     let h = mgr.open_session(0, CKF_SERIAL_SESSION, &token).unwrap();
@@ -292,7 +292,7 @@ fn test_close_all_sessions() {
     let mgr = SessionManager::new();
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"CloseAll"))
+        .init_token(b"S0pin-47", &padded_label(b"CloseAll"))
         .unwrap();
 
     let _h1 = mgr.open_session(0, CKF_SERIAL_SESSION, &token).unwrap();
@@ -365,10 +365,10 @@ fn test_pin_too_long() {
 fn test_user_lockout_after_max_failures() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"Lockout"))
+        .init_token(b"S0pin-47", &padded_label(b"Lockout"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
 
     // Default max_failed_logins is 5 (from Token::new() hardcoded default).
@@ -392,7 +392,7 @@ fn test_user_lockout_after_max_failures() {
     ));
 
     // Subsequent correct PIN also fails because locked
-    let err = token.login(CKU_USER, b"userpin1").unwrap_err();
+    let err = token.login(CKU_USER, b"Us3rpin9").unwrap_err();
     assert!(matches!(
         err,
         HsmError::PinLocked | HsmError::PinRateLimited
@@ -403,7 +403,7 @@ fn test_user_lockout_after_max_failures() {
 fn test_so_lockout_after_max_failures() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"SOLock"))
+        .init_token(b"S0pin-47", &padded_label(b"SOLock"))
         .unwrap();
 
     for _ in 0..4 {
@@ -424,10 +424,10 @@ fn test_so_lockout_after_max_failures() {
 fn test_successful_login_resets_failure_count() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"Reset"))
+        .init_token(b"S0pin-47", &padded_label(b"Reset"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
 
     // Fail 3 times (below the max of 5 for Token::new())
@@ -437,7 +437,7 @@ fn test_successful_login_resets_failure_count() {
     // Wait for rate-limit backoff to expire before trying the correct PIN
     std::thread::sleep(std::time::Duration::from_secs(6));
     // Succeed — resets counter
-    token.login(CKU_USER, b"userpin1").unwrap();
+    token.login(CKU_USER, b"Us3rpin9").unwrap();
     token.logout().unwrap();
 
     // Fail 4 more times — should NOT lock (counter was reset, max is 5)
@@ -454,12 +454,12 @@ fn test_successful_login_resets_failure_count() {
 fn test_set_pin_wrong_old_pin() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"SetPin"))
+        .init_token(b"S0pin-47", &padded_label(b"SetPin"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
-    token.login(CKU_USER, b"userpin1").unwrap();
+    token.login(CKU_USER, b"Us3rpin9").unwrap();
 
     let err = token.set_pin(b"wrongold", b"newpin12").unwrap_err();
     assert!(matches!(err, HsmError::PinIncorrect));
@@ -469,17 +469,17 @@ fn test_set_pin_wrong_old_pin() {
 fn test_set_pin_while_public_fails() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"PubSet"))
+        .init_token(b"S0pin-47", &padded_label(b"PubSet"))
         .unwrap();
 
-    let err = token.set_pin(b"sopin123", b"newpin12").unwrap_err();
+    let err = token.set_pin(b"S0pin-47", b"newpin12").unwrap_err();
     assert!(matches!(err, HsmError::UserNotLoggedIn));
 }
 
 #[test]
 fn test_login_on_uninitialized_token_fails() {
     let token = Token::new();
-    let err = token.login(CKU_USER, b"userpin1").unwrap_err();
+    let err = token.login(CKU_USER, b"Us3rpin9").unwrap_err();
     assert!(matches!(err, HsmError::TokenNotInitialized));
 }
 
@@ -487,9 +487,9 @@ fn test_login_on_uninitialized_token_fails() {
 fn test_login_user_without_pin_initialized() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"NoUser"))
+        .init_token(b"S0pin-47", &padded_label(b"NoUser"))
         .unwrap();
-    let err = token.login(CKU_USER, b"userpin1").unwrap_err();
+    let err = token.login(CKU_USER, b"Us3rpin9").unwrap_err();
     assert!(matches!(err, HsmError::UserPinNotInitialized));
 }
 
@@ -497,9 +497,9 @@ fn test_login_user_without_pin_initialized() {
 fn test_init_pin_requires_so_login() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"InitPin"))
+        .init_token(b"S0pin-47", &padded_label(b"InitPin"))
         .unwrap();
-    let err = token.init_pin(b"userpin1").unwrap_err();
+    let err = token.init_pin(b"Us3rpin9").unwrap_err();
     assert!(matches!(err, HsmError::UserNotLoggedIn));
 }
 
@@ -507,9 +507,9 @@ fn test_init_pin_requires_so_login() {
 fn test_invalid_user_type() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"InvType"))
+        .init_token(b"S0pin-47", &padded_label(b"InvType"))
         .unwrap();
-    let err = token.login(99, b"sopin123").unwrap_err();
+    let err = token.login(99, b"S0pin-47").unwrap_err();
     assert!(matches!(err, HsmError::UserTypeInvalid));
 }
 
@@ -517,12 +517,12 @@ fn test_invalid_user_type() {
 fn test_user_login_while_so_logged_in() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"Cross"))
+        .init_token(b"S0pin-47", &padded_label(b"Cross"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
 
-    let err = token.login(CKU_USER, b"userpin1").unwrap_err();
+    let err = token.login(CKU_USER, b"Us3rpin9").unwrap_err();
     assert!(matches!(err, HsmError::UserAnotherAlreadyLoggedIn));
 }
 
@@ -530,14 +530,14 @@ fn test_user_login_while_so_logged_in() {
 fn test_so_login_while_user_logged_in() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"Cross2"))
+        .init_token(b"S0pin-47", &padded_label(b"Cross2"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
-    token.login(CKU_USER, b"userpin1").unwrap();
+    token.login(CKU_USER, b"Us3rpin9").unwrap();
 
-    let err = token.login(CKU_SO, b"sopin123").unwrap_err();
+    let err = token.login(CKU_SO, b"S0pin-47").unwrap_err();
     assert!(matches!(err, HsmError::UserAnotherAlreadyLoggedIn));
 }
 
@@ -545,17 +545,17 @@ fn test_so_login_while_user_logged_in() {
 fn test_token_reinit_resets_lockout() {
     let token = Token::new();
     token
-        .init_token(b"sopin123", &padded_label(b"ReInit"))
+        .init_token(b"S0pin-47", &padded_label(b"ReInit"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
 
     // Lock out user (max_failed_logins = 5 for Token::new())
     for _ in 0..5 {
         let _ = token.login(CKU_USER, b"wrongpin");
     }
-    let err = token.login(CKU_USER, b"userpin1").unwrap_err();
+    let err = token.login(CKU_USER, b"Us3rpin9").unwrap_err();
     assert!(matches!(
         err,
         HsmError::PinLocked | HsmError::PinRateLimited
@@ -563,12 +563,12 @@ fn test_token_reinit_resets_lockout() {
 
     // Re-init token should clear lockout (including rate-limit state)
     token
-        .init_token(b"sopin123", &padded_label(b"ReInit2"))
+        .init_token(b"S0pin-47", &padded_label(b"ReInit2"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
-    token.login(CKU_USER, b"userpin1").unwrap(); // should succeed now
+    token.login(CKU_USER, b"Us3rpin9").unwrap(); // should succeed now
     assert_eq!(token.login_state(), LoginState::UserLoggedIn);
 }
 
@@ -580,14 +580,14 @@ fn test_token_flags() {
     assert_eq!(flags & CKF_TOKEN_INITIALIZED, 0);
 
     token
-        .init_token(b"sopin123", &padded_label(b"Flags"))
+        .init_token(b"S0pin-47", &padded_label(b"Flags"))
         .unwrap();
     let flags = token.flags();
     assert_ne!(flags & CKF_TOKEN_INITIALIZED, 0);
     assert_eq!(flags & CKF_USER_PIN_INITIALIZED, 0); // user PIN not set yet
 
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
     let flags = token.flags();
     assert_ne!(flags & CKF_USER_PIN_INITIALIZED, 0);
@@ -603,12 +603,12 @@ fn test_login_all_only_affects_matching_slot() {
     let token0 = Token::new();
     let token1 = Token::new();
     token0
-        .init_token(b"sopin123", &padded_label(b"Slot0"))
+        .init_token(b"S0pin-47", &padded_label(b"Slot0"))
         .unwrap();
     token1
         .init_token(b"sopin456", &padded_label(b"Slot1"))
         .unwrap();
-    token0.login(CKU_SO, b"sopin123").unwrap();
+    token0.login(CKU_SO, b"S0pin-47").unwrap();
     token0.init_pin(b"userpin0").unwrap();
     token0.logout().unwrap();
 
@@ -644,7 +644,7 @@ fn test_close_all_sessions_only_affects_matching_slot() {
     let token0 = Token::new();
     let token1 = Token::new();
     token0
-        .init_token(b"sopin123", &padded_label(b"SlotA"))
+        .init_token(b"S0pin-47", &padded_label(b"SlotA"))
         .unwrap();
     token1
         .init_token(b"sopin456", &padded_label(b"SlotB"))
@@ -674,10 +674,10 @@ fn test_pin_lockout_concurrent_attempts() {
 
     let token = Arc::new(Token::new());
     token
-        .init_token(b"sopin123", &padded_label(b"ConcLock"))
+        .init_token(b"S0pin-47", &padded_label(b"ConcLock"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
 
     // With per-account rate limiting, concurrent threads within the same
@@ -701,7 +701,7 @@ fn test_pin_lockout_concurrent_attempts() {
     std::thread::sleep(std::time::Duration::from_secs(6));
 
     // After 6 failed attempts (>5 threshold), the PIN must be locked.
-    let result = token.login(CKU_USER, b"userpin1");
+    let result = token.login(CKU_USER, b"Us3rpin9");
     assert!(
         result.is_err(),
         "After enough wrong PINs, account must be locked"
@@ -718,10 +718,10 @@ fn test_pin_lockout_counter_not_bypassed_by_concurrency() {
 
     let token = Arc::new(Token::new());
     token
-        .init_token(b"sopin123", &padded_label(b"ConcBy"))
+        .init_token(b"S0pin-47", &padded_label(b"ConcBy"))
         .unwrap();
-    token.login(CKU_SO, b"sopin123").unwrap();
-    token.init_pin(b"userpin1").unwrap();
+    token.login(CKU_SO, b"S0pin-47").unwrap();
+    token.init_pin(b"Us3rpin9").unwrap();
     token.logout().unwrap();
 
     // Use a barrier so all 15 threads start at the exact same moment
@@ -740,7 +740,7 @@ fn test_pin_lockout_counter_not_bypassed_by_concurrency() {
     }
 
     // After 15 concurrent wrong PINs (>10 limit), must be locked
-    let result = token.login(CKU_USER, b"userpin1");
+    let result = token.login(CKU_USER, b"Us3rpin9");
     assert!(
         result.is_err(),
         "PIN must be locked after concurrent brute force"

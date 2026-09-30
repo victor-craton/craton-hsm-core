@@ -29,7 +29,7 @@ fn ensure_init() {
 /// Re-initialize token, open RW session, set up user PIN and login.
 fn setup_user_session() -> CK_SESSION_HANDLE {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..9].copy_from_slice(b"ConcTests");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -65,7 +65,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
         )
     };
     assert_eq!(rv, CKR_OK);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,
@@ -96,7 +96,7 @@ fn test_concurrent_session_open_close() {
 
     // Re-init token for clean state
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"ConcOC1");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -238,7 +238,7 @@ fn test_session_handle_uniqueness_under_contention() {
     unsafe { C_CloseAllSessions(0) };
 
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..6].copy_from_slice(b"Unique");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -381,7 +381,7 @@ fn test_concurrent_encrypt_different_sessions() {
                 if rv != CKR_OK {
                     return false; // session limit
                 }
-                let user_pin = b"userpin1";
+                let user_pin = b"Us3rpin9";
                 let rv = unsafe {
                     C_Login(
                         session,
@@ -530,7 +530,7 @@ fn test_concurrent_session_login_logout() {
     unsafe { C_CloseAllSessions(0) };
 
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..8].copy_from_slice(b"LoginOut");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -563,7 +563,7 @@ fn test_concurrent_session_login_logout() {
             so_pin.len() as CK_ULONG,
         )
     };
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     unsafe {
         C_InitPIN(
             rw_session,
@@ -597,7 +597,7 @@ fn test_concurrent_session_login_logout() {
                 }
 
                 for _ in 0..3 {
-                    let user_pin = b"userpin1";
+                    let user_pin = b"Us3rpin9";
                     let rv = unsafe {
                         C_Login(
                             session,

@@ -32,7 +32,7 @@ fn ensure_init() {
 
 fn setup_user_session() -> CK_SESSION_HANDLE {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..10].copy_from_slice(b"DigestTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -68,7 +68,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
         )
     };
     assert_eq!(rv, CKR_OK);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,
@@ -698,7 +698,7 @@ fn test_digest_single_byte_updates() {
 #[test]
 fn test_sha256_no_login_required() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..12].copy_from_slice(b"NoLoginTest!");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.

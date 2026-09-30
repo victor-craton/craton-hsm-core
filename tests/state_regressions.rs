@@ -13,8 +13,8 @@ use craton_hsm::pkcs11_abi::types::*;
 use craton_hsm::store::attributes::ObjectContext;
 use std::ptr;
 
-const SO_PIN: &[u8] = b"sopin123";
-const USER_PIN: &[u8] = b"userpin1";
+const SO_PIN: &[u8] = b"S0pin-47";
+const USER_PIN: &[u8] = b"Us3rpin9";
 
 fn label(s: &[u8]) -> [u8; 32] {
     let mut l = [b' '; 32];

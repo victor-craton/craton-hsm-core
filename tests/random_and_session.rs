@@ -18,7 +18,7 @@ fn ensure_init() {
 
 fn setup_token() {
     ensure_init();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut label = [b' '; 32];
     label[..7].copy_from_slice(b"RndTest");
     // PKCS#11: C_InitToken fails with CKR_SESSION_EXISTS while sessions are open.
@@ -36,7 +36,7 @@ fn setup_token() {
 
 fn setup_user_session() -> CK_SESSION_HANDLE {
     setup_token();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
 
     let mut session: CK_SESSION_HANDLE = 0;
     let rv = unsafe {
@@ -59,7 +59,7 @@ fn setup_user_session() -> CK_SESSION_HANDLE {
         )
     };
     assert_eq!(rv, CKR_OK);
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_InitPIN(
             session,
@@ -332,7 +332,7 @@ fn test_session_invalid_slot() {
 #[test]
 fn test_double_login_fails() {
     let session = setup_user_session();
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     // Already logged in as user, try again
     let rv = unsafe {
         C_Login(
@@ -377,7 +377,7 @@ fn test_login_wrong_pin() {
 #[test]
 fn test_set_pin() {
     let session = setup_user_session();
-    let old_pin = b"userpin1";
+    let old_pin = b"Us3rpin9";
     let new_pin = b"newuserpin";
 
     let rv = unsafe {
@@ -398,7 +398,7 @@ fn test_logout_and_re_login() {
     let rv = unsafe { C_Logout(session) };
     assert_eq!(rv, CKR_OK);
 
-    let user_pin = b"userpin1";
+    let user_pin = b"Us3rpin9";
     let rv = unsafe {
         C_Login(
             session,
@@ -456,7 +456,7 @@ fn test_random_after_logout() {
 #[test]
 fn test_so_login_session_state() {
     setup_token();
-    let so_pin = b"sopin123";
+    let so_pin = b"S0pin-47";
     let mut session: CK_SESSION_HANDLE = 0;
     unsafe {
         C_OpenSession(
