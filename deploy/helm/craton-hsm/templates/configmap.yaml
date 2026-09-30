@@ -3,6 +3,9 @@
 {{- include "craton-hsm.validateMtls" . -}}
 {{- include "craton-hsm.validateAudit" . -}}
 {{- $l := .Values.daemon.limits -}}
+{{- if and .Values.config.fipsApprovedOnly (ne (int .Values.config.userLockoutDurationSecs) 0) }}
+{{- fail "config.userLockoutDurationSecs must be 0 when config.fipsApprovedOnly=true" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -25,6 +28,7 @@ data:
     pin_min_length = {{ int .Values.config.pinMinLength }}
     pin_max_length = {{ int .Values.config.pinMaxLength }}
     max_failed_logins = {{ int .Values.config.maxFailedLogins }}
+    user_lockout_duration_secs = {{ int .Values.config.userLockoutDurationSecs }}
 
     [algorithms]
     fips_approved_only = {{ .Values.config.fipsApprovedOnly }}
@@ -37,7 +41,11 @@ data:
     {{- end }}
     enabled = true
     log_path = {{ .Values.config.auditLogPath | quote }}
-    log_level = "all"
+    log_level = {{ .Values.config.auditLogLevel | quote }}
+    fail_closed = {{ or .Values.config.auditFailClosed .Values.config.fipsApprovedOnly }}
+    {{- if .Values.config.auditKeyPath }}
+    key_path = {{ .Values.config.auditKeyPath | quote }}
+    {{- end }}
 
     [daemon]
     bind = {{ .Values.daemon.bind | quote }}

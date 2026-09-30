@@ -6,7 +6,7 @@
 //! match it; a mismatch is rejected before any cryptographic operation. The
 //! EC curve is identified by an exact DER OID match.
 
-use craton_hsm::crypto::sign::HashAlg;
+use craton_hsm::crypto::sign::{EcCurve, HashAlg};
 use craton_hsm::pkcs11_abi::constants::*;
 use craton_hsm::pkcs11_abi::types::CK_ULONG;
 use craton_hsm::store::object::StoredObject;
@@ -55,8 +55,9 @@ fn unsupported(what: &str) -> Status {
 pub enum SignAlg {
     RsaPkcs1(HashAlg2),
     RsaPss(HashAlg2),
-    EcdsaP256Sha256,
-    EcdsaP384Sha384,
+    /// ECDSA on `curve`; `None` = `CKM_ECDSA` (the data is the caller's
+    /// hash), otherwise the module hashes the data (H4-08).
+    Ecdsa(Curve, Option<HashAlg2>),
     Ed25519,
 }
 
@@ -74,6 +75,15 @@ impl HashAlg2 {
             HashAlg2::Sha256 => HashAlg::Sha256,
             HashAlg2::Sha384 => HashAlg::Sha384,
             HashAlg2::Sha512 => HashAlg::Sha512,
+        }
+    }
+}
+
+impl Curve {
+    pub fn to_core(self) -> EcCurve {
+        match self {
+            Curve::P256 => EcCurve::P256,
+            Curve::P384 => EcCurve::P384,
         }
     }
 }
@@ -104,7 +114,7 @@ pub fn sign_alg_for(
                 "Generic CKM_RSA_PKCS_PSS (use CKM_SHA*_RSA_PKCS_PSS)",
             ))
         }
-        CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 => {
+        CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
             if key_type != Some(CKK_EC) {
                 return Err(mismatch());
             }
@@ -113,14 +123,16 @@ pub fn sign_alg_for(
                 .as_deref()
                 .and_then(curve_from_params)
                 .ok_or_else(|| Status::invalid_argument("Key has unsupported EC parameters"))?;
-            return match (mech, curve) {
-                (CKM_ECDSA_SHA256, Curve::P256) => Ok(SignAlg::EcdsaP256Sha256),
-                (CKM_ECDSA_SHA384, Curve::P384) => Ok(SignAlg::EcdsaP384Sha384),
-                _ => Err(unsupported("This ECDSA hash/curve combination")),
+            // Any hash on any supported curve (FIPS 186-5 / SP 800-57): the
+            // core hashes with the mechanism's hash and truncates per
+            // bits2int (H4-08).
+            let hash = match mech {
+                CKM_ECDSA => None,
+                CKM_ECDSA_SHA256 => Some(HashAlg2::Sha256),
+                CKM_ECDSA_SHA384 => Some(HashAlg2::Sha384),
+                _ => Some(HashAlg2::Sha512),
             };
-        }
-        CKM_ECDSA | CKM_ECDSA_SHA512 => {
-            return Err(unsupported("CKM_ECDSA (pre-hashed) / CKM_ECDSA_SHA512"))
+            return Ok(SignAlg::Ecdsa(curve, hash));
         }
         CKM_EDDSA => {
             if key_type != Some(CKK_EC_EDWARDS) {
@@ -136,13 +148,44 @@ pub fn sign_alg_for(
     Ok(alg)
 }
 
-/// Cipher actually executed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Cipher actually executed, with its validated parameters.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CipherAlg {
-    AesGcm,
-    AesCbcPad,
-    AesCtr,
+    /// `CKM_AES_GCM`. `None`: the module generates the IV (required in FIPS
+    /// approved mode) and the ciphertext is framed `IV || ct || tag`.
+    /// `Some(iv)`: caller-supplied 96-bit IV, output `ct || tag` (128-bit
+    /// tag, no AAD); refused in FIPS approved mode.
+    AesGcm(Option<[u8; 12]>),
+    /// `CKM_AES_CBC` (`pad == false`, block-aligned input) or
+    /// `CKM_AES_CBC_PAD` (PKCS#7).
+    AesCbc { iv: [u8; 16], pad: bool },
+    /// `CKM_AES_CTR` with a 16-byte initial counter block (128-bit counter).
+    AesCtr([u8; 16]),
+    /// `CKM_RSA_PKCS_OAEP` with SHA-256 / MGF1-SHA-256, no label.
     RsaOaepSha256,
+}
+
+// Never print IVs / counter blocks in logs or audit records.
+impl std::fmt::Debug for CipherAlg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CipherAlg::AesGcm(None) => f.write_str("AesGcm(module-iv)"),
+            CipherAlg::AesGcm(Some(_)) => f.write_str("AesGcm(caller-iv)"),
+            CipherAlg::AesCbc { pad: true, .. } => f.write_str("AesCbcPad"),
+            CipherAlg::AesCbc { pad: false, .. } => f.write_str("AesCbc"),
+            CipherAlg::AesCtr(_) => f.write_str("AesCtr"),
+            CipherAlg::RsaOaepSha256 => f.write_str("RsaOaepSha256"),
+        }
+    }
+}
+
+fn iv16(parameter: &[u8], what: &str) -> Result<[u8; 16], Status> {
+    parameter.try_into().map_err(|_| {
+        Status::invalid_argument(format!(
+            "{} requires a 16-byte IV / counter block in the mechanism parameter",
+            what
+        ))
+    })
 }
 
 /// Bind an encrypt/decrypt mechanism to the key (and validate parameters).
@@ -153,35 +196,29 @@ pub fn cipher_alg_for(
     decrypt: bool,
 ) -> Result<CipherAlg, Status> {
     let aes_key = key.key_type == Some(CKK_AES) && key.class == CKO_SECRET_KEY;
-    match mech {
-        CKM_AES_GCM => {
-            if !parameter.is_empty() {
+    let alg = match mech {
+        CKM_AES_GCM => match parameter.len() {
+            0 => CipherAlg::AesGcm(None),
+            12 => {
+                let mut iv = [0u8; 12];
+                iv.copy_from_slice(parameter);
+                CipherAlg::AesGcm(Some(iv))
+            }
+            _ => {
                 return Err(Status::invalid_argument(
-                    "CKM_AES_GCM parameters are not supported: the IV is generated internally \
-                     and prepended to the ciphertext",
-                ));
+                    "CKM_AES_GCM parameter must be empty (module-generated IV) or a 12-byte IV",
+                ))
             }
-            if !aes_key {
-                return Err(mismatch());
-            }
-            Ok(CipherAlg::AesGcm)
-        }
-        CKM_AES_CBC_PAD | CKM_AES_CTR => {
-            if parameter.len() != 16 {
-                return Err(Status::invalid_argument(
-                    "AES-CBC/CTR requires a 16-byte IV in the mechanism parameter",
-                ));
-            }
-            if !aes_key {
-                return Err(mismatch());
-            }
-            Ok(if mech == CKM_AES_CTR {
-                CipherAlg::AesCtr
-            } else {
-                CipherAlg::AesCbcPad
-            })
-        }
-        CKM_AES_CBC => Err(unsupported("Unpadded CKM_AES_CBC (use CKM_AES_CBC_PAD)")),
+        },
+        CKM_AES_CBC_PAD => CipherAlg::AesCbc {
+            iv: iv16(parameter, "CKM_AES_CBC_PAD")?,
+            pad: true,
+        },
+        CKM_AES_CBC => CipherAlg::AesCbc {
+            iv: iv16(parameter, "CKM_AES_CBC")?,
+            pad: false,
+        },
+        CKM_AES_CTR => CipherAlg::AesCtr(iv16(parameter, "CKM_AES_CTR")?),
         CKM_RSA_PKCS_OAEP => {
             if !parameter.is_empty() {
                 return Err(Status::invalid_argument(
@@ -194,10 +231,14 @@ pub fn cipher_alg_for(
             if decrypt && key.class != CKO_PRIVATE_KEY {
                 return Err(mismatch());
             }
-            Ok(CipherAlg::RsaOaepSha256)
+            return Ok(CipherAlg::RsaOaepSha256);
         }
-        _ => Err(unsupported("This encryption mechanism")),
+        _ => return Err(unsupported("This encryption mechanism")),
+    };
+    if !aes_key {
+        return Err(mismatch());
     }
+    Ok(alg)
 }
 
 #[cfg(test)]
@@ -224,15 +265,24 @@ mod tests {
         let p256 = key(CKO_PRIVATE_KEY, CKK_EC, Some(P256_OID));
         assert_eq!(
             sign_alg_for(CKM_ECDSA_SHA256, &[], &p256).unwrap(),
-            SignAlg::EcdsaP256Sha256
+            SignAlg::Ecdsa(Curve::P256, Some(HashAlg2::Sha256))
         );
-        assert!(sign_alg_for(CKM_ECDSA_SHA384, &[], &p256).is_err());
-        assert!(sign_alg_for(CKM_ECDSA, &[], &p256).is_err());
+        // (H4-08) Every hash on every curve, and pre-hashed CKM_ECDSA.
+        assert_eq!(
+            sign_alg_for(CKM_ECDSA_SHA384, &[], &p256).unwrap(),
+            SignAlg::Ecdsa(Curve::P256, Some(HashAlg2::Sha384))
+        );
+        assert_eq!(
+            sign_alg_for(CKM_ECDSA, &[], &p256).unwrap(),
+            SignAlg::Ecdsa(Curve::P256, None)
+        );
         let p384 = key(CKO_PRIVATE_KEY, CKK_EC, Some(P384_OID));
         assert_eq!(
-            sign_alg_for(CKM_ECDSA_SHA384, &[], &p384).unwrap(),
-            SignAlg::EcdsaP384Sha384
+            sign_alg_for(CKM_ECDSA_SHA512, &[], &p384).unwrap(),
+            SignAlg::Ecdsa(Curve::P384, Some(HashAlg2::Sha512))
         );
+        let rsa = key(CKO_PRIVATE_KEY, CKK_RSA, None);
+        assert!(sign_alg_for(CKM_ECDSA_SHA256, &[], &rsa).is_err());
     }
 
     #[test]
@@ -250,12 +300,32 @@ mod tests {
         let rsa_pub = key(CKO_PUBLIC_KEY, CKK_RSA, None);
         assert_eq!(
             cipher_alg_for(CKM_AES_GCM, &[], &aes, false).unwrap(),
-            CipherAlg::AesGcm
+            CipherAlg::AesGcm(None)
         );
+        assert_eq!(
+            cipher_alg_for(CKM_AES_GCM, &[7; 12], &aes, false).unwrap(),
+            CipherAlg::AesGcm(Some([7; 12]))
+        );
+        assert!(cipher_alg_for(CKM_AES_GCM, &[7; 16], &aes, false).is_err());
         assert!(cipher_alg_for(CKM_AES_GCM, &[], &rsa_pub, false).is_err());
         assert!(cipher_alg_for(CKM_RSA_PKCS_OAEP, &[], &aes, false).is_err());
         assert!(cipher_alg_for(CKM_RSA_PKCS_OAEP, &[], &rsa_pub, true).is_err());
         assert!(cipher_alg_for(CKM_RSA_PKCS_OAEP, &[], &rsa_pub, false).is_ok());
-        assert!(cipher_alg_for(CKM_AES_CBC, &[0; 16], &aes, false).is_err());
+        // Unpadded CKM_AES_CBC is distinct from CKM_AES_CBC_PAD.
+        assert_eq!(
+            cipher_alg_for(CKM_AES_CBC, &[1; 16], &aes, false).unwrap(),
+            CipherAlg::AesCbc {
+                iv: [1; 16],
+                pad: false
+            }
+        );
+        assert_eq!(
+            cipher_alg_for(CKM_AES_CBC_PAD, &[1; 16], &aes, false).unwrap(),
+            CipherAlg::AesCbc {
+                iv: [1; 16],
+                pad: true
+            }
+        );
+        assert!(cipher_alg_for(CKM_AES_CBC, &[1; 15], &aes, false).is_err());
     }
 }

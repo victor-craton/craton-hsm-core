@@ -32,11 +32,6 @@ use crate::store::encrypted_store::{fill_random, EncryptedStore};
 use crate::store::lockout_store::LockoutData;
 use crate::token::pin::{unwrap_key, wrap_key, PinVerifier};
 
-/// Minimum number of distinct byte values required in a PIN.
-const PIN_MIN_DISTINCT_BYTES: usize = 3;
-/// Minimum number of character classes (lower, upper, digit, other) required.
-/// Only enforced for ASCII-text PINs; binary PINs skip this check.
-const PIN_MIN_CHAR_CLASSES: usize = 2;
 /// Base delay (ms) after a failed login attempt; doubles with each consecutive failure.
 const FAILED_LOGIN_BASE_DELAY_MS: u64 = 100;
 /// Maximum delay cap (ms) for exponential backoff on failed logins.
@@ -82,6 +77,9 @@ struct AuthState {
     failed_init_token_logins: u32,
     user_pin_locked: bool,
     so_pin_locked: bool,
+    /// Wall-clock time (UNIX seconds) at which the user PIN was locked; used
+    /// by the optional time-based lockout (`user_lockout_duration_secs`).
+    user_locked_at: Option<u64>,
     /// Earliest time the next user login attempt is allowed (per-account rate limit).
     user_next_allowed: Option<Instant>,
     /// Earliest time the next SO authentication attempt is allowed.
@@ -111,6 +109,7 @@ impl AuthState {
             failed_init_token_logins: 0,
             user_pin_locked: false,
             so_pin_locked: false,
+            user_locked_at: None,
             user_next_allowed: None,
             so_next_allowed: None,
             so_pin: None,
@@ -131,7 +130,17 @@ impl AuthState {
             failed_init_token_logins: self.failed_init_token_logins,
             user_pin_locked: self.user_pin_locked,
             so_pin_locked: self.so_pin_locked,
+            user_locked_at: self.user_locked_at,
         }
+    }
+
+    fn apply_lockout(&mut self, l: &LockoutData) {
+        self.failed_user_logins = l.failed_user_logins;
+        self.failed_so_logins = l.failed_so_logins;
+        self.failed_init_token_logins = l.failed_init_token_logins;
+        self.user_pin_locked = l.user_pin_locked;
+        self.so_pin_locked = l.so_pin_locked;
+        self.user_locked_at = l.user_locked_at;
     }
 
     fn failures_mut(&mut self, role: Role) -> (&mut u32, &mut bool, &mut Option<Instant>) {
@@ -173,6 +182,8 @@ pub struct Token {
     pin_min_len: usize,
     pin_max_len: usize,
     max_failed_logins: u32,
+    /// Time-based user PIN lockout (seconds, 0 = permanent), H4-11.
+    user_lockout_duration_secs: u64,
     /// PBKDF2 iteration count from config (used for new verifiers).
     pbkdf2_iterations: u32,
     /// Persistent store (token record, lockout counters, DEK keyring).
@@ -231,6 +242,9 @@ impl Token {
             max_failed_logins: config
                 .map(|c| c.security.max_failed_logins)
                 .unwrap_or(DEFAULT_MAX_FAILED_LOGINS),
+            user_lockout_duration_secs: config
+                .map(|c| c.security.user_lockout_duration_secs)
+                .unwrap_or(0),
             pbkdf2_iterations: config
                 .map(|c| c.security.pbkdf2_iterations)
                 .unwrap_or(DEFAULT_PBKDF2_ITERATIONS),
@@ -258,7 +272,22 @@ impl Token {
                 tracing::error!("token record for slot {} is corrupt: {}", slot_id, e);
                 HsmError::DeviceError
             })?,
-            None => return Ok(token),
+            None => {
+                // No token record, but lockout counters exist (H5-01): keep
+                // them, so a removed token record cannot be used to clear an
+                // SO lockout through a "first-time" C_InitToken.
+                if let Ok(Some(b)) = store.get_meta(&Self::lockout_key(slot_id)) {
+                    match serde_json::from_slice::<LockoutData>(&b) {
+                        Ok(l) => token.auth.lock().apply_lockout(&l),
+                        Err(_) => token.auth.lock().apply_lockout(&LockoutData::locked()),
+                    }
+                    tracing::warn!(
+                        "slot {} has lockout counters but no token record — keeping them",
+                        slot_id
+                    );
+                }
+                return Ok(token);
+            }
         };
         {
             let mut auth = token.auth.lock();
@@ -285,13 +314,7 @@ impl Token {
                 _ => None,
             };
             match lockout {
-                Some(l) => {
-                    auth.failed_user_logins = l.failed_user_logins;
-                    auth.failed_so_logins = l.failed_so_logins;
-                    auth.failed_init_token_logins = l.failed_init_token_logins;
-                    auth.user_pin_locked = l.user_pin_locked;
-                    auth.so_pin_locked = l.so_pin_locked;
-                }
+                Some(l) => auth.apply_lockout(&l),
                 None if auth.initialized => {
                     tracing::error!(
                         "lockout record for initialised slot {} missing or corrupt — \
@@ -382,45 +405,16 @@ impl Token {
         aad
     }
 
+    /// Core PIN policy for new PINs (H5-12), see [`crate::token::pin_policy`].
     fn validate_pin(&self, pin: &[u8]) -> HsmResult<()> {
-        if pin.len() < self.pin_min_len || pin.len() > self.pin_max_len {
-            return Err(HsmError::PinLenRange);
-        }
-        // PIN complexity: require minimum distinct byte values
-        let mut seen = [false; 256];
-        let mut distinct = 0usize;
-        let mut has_lower = false;
-        let mut has_upper = false;
-        let mut has_digit = false;
-        let mut has_other = false;
-        let mut has_non_ascii = false;
-        for &b in pin {
-            if !seen[b as usize] {
-                seen[b as usize] = true;
-                distinct += 1;
-            }
-            match b {
-                b'a'..=b'z' => has_lower = true,
-                b'A'..=b'Z' => has_upper = true,
-                b'0'..=b'9' => has_digit = true,
-                0x20..=0x7E => has_other = true,
-                _ => has_non_ascii = true,
-            }
-        }
-        if distinct < PIN_MIN_DISTINCT_BYTES {
-            return Err(HsmError::PinInvalid);
-        }
-        // Character-class check only applies to ASCII-text PINs.
-        if !has_non_ascii {
-            let class_count = [has_lower, has_upper, has_digit, has_other]
-                .iter()
-                .filter(|&&c| c)
-                .count();
-            if class_count < PIN_MIN_CHAR_CLASSES {
-                return Err(HsmError::PinInvalid);
-            }
-        }
-        Ok(())
+        crate::token::pin_policy::validate_new_pin(pin, self.pin_min_len, self.pin_max_len)
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
     }
 
     /// Compute the exponential backoff duration for a given failure count.
@@ -455,6 +449,22 @@ impl Token {
     /// pre-increment and persist the failure counter, snapshot the verifier.
     fn begin_attempt(&self, auth: &mut AuthState, role: Role) -> HsmResult<AuthAttempt> {
         let max = self.max_failed_logins;
+        // Optional time-based user lockout (H4-11): the lock expires after
+        // `user_lockout_duration_secs`; the SO lock is always permanent.
+        if role == Role::User && auth.user_pin_locked && self.user_lockout_duration_secs > 0 {
+            if let Some(at) = auth.user_locked_at {
+                if Self::unix_now() >= at.saturating_add(self.user_lockout_duration_secs) {
+                    tracing::warn!(
+                        "user PIN lockout on slot {} expired — failure counter reset",
+                        self.slot_id
+                    );
+                    auth.user_pin_locked = false;
+                    auth.failed_user_logins = 0;
+                    auth.user_locked_at = None;
+                    self.persist_lockout(auth)?;
+                }
+            }
+        }
         let (failed, locked, next) = auth.failures_mut(role);
         if *locked || *failed >= max {
             *locked = true;
@@ -516,10 +526,14 @@ impl Token {
         let max = self.max_failed_logins;
         let (failed, locked, _) = auth.failures_mut(role);
         let failures = *failed;
+        let newly_locked = failures >= max && !*locked;
         if failures >= max {
             *locked = true;
         }
         let locked = *locked;
+        if newly_locked && role == Role::User {
+            auth.user_locked_at = Some(Self::unix_now());
+        }
         if let Err(e) = self.persist_lockout(auth) {
             return e;
         }
@@ -688,6 +702,9 @@ impl Token {
                 let att = self.begin_attempt(&mut auth, Role::So)?;
                 auth.failed_init_token_logins = auth.failed_init_token_logins.saturating_add(1);
                 Some(att)
+            } else if auth.so_pin_locked {
+                // Persisted SO lockout without a token record (H5-01).
+                return Err(HsmError::PinLocked);
             } else {
                 None
             }
@@ -797,6 +814,7 @@ impl Token {
         auth.failed_init_token_logins = 0;
         auth.user_pin_locked = false;
         auth.so_pin_locked = false;
+        auth.user_locked_at = None;
         auth.user_next_allowed = None;
         auth.so_next_allowed = None;
         auth.pin_epoch = auth.pin_epoch.wrapping_add(1);
@@ -822,13 +840,49 @@ impl Token {
                 return Err(HsmError::UserNotLoggedIn);
             }
         }
+        self.set_user_pin_checked(pin, |auth| {
+            if auth.login == LoginState::SoLoggedIn {
+                Ok(())
+            } else {
+                Err(HsmError::UserNotLoggedIn)
+            }
+        })
+    }
+
+    /// `C_InitPIN` for front ends that authenticate the SO per request
+    /// instead of keeping the token logged in (H4-01, gRPC daemon): the SO
+    /// PIN is verified under the SO lockout / rate-limit policy (the token's
+    /// login state is not changed) and the user PIN is then set, atomically
+    /// with respect to concurrent PIN changes and re-initialisation.
+    pub fn init_pin_with_so_pin(&self, so_pin: &[u8], new_pin: &[u8]) -> HsmResult<()> {
+        use crate::pkcs11_abi::constants::CKU_SO;
+        // Validate first: no SO attempt is consumed for an invalid new PIN.
+        self.validate_pin(new_pin)?;
+        let epoch = self.verify_pin_epoch(CKU_SO, so_pin)?;
+        self.set_user_pin_checked(new_pin, |auth| {
+            if auth.pin_epoch == epoch {
+                Ok(())
+            } else {
+                Err(HsmError::PinIncorrect)
+            }
+        })
+    }
+
+    /// Shared body of `C_InitPIN`: PBKDF2 outside the lock, then commit if
+    /// `still_authorized` holds.
+    fn set_user_pin_checked(
+        &self,
+        pin: &[u8],
+        still_authorized: impl Fn(&AuthState) -> HsmResult<()>,
+    ) -> HsmResult<()> {
         self.validate_pin(pin)?;
         let (verifier, kek) = PinVerifier::create(pin, self.pbkdf2_iterations)?;
 
         let mut auth = self.auth.lock();
-        if auth.login != LoginState::SoLoggedIn {
-            return Err(HsmError::UserNotLoggedIn);
+        if auth.finalized {
+            return Err(HsmError::NotInitialized);
         }
+        still_authorized(&auth)?;
         let wrapped = self.wrap_current_dek(&auth, &kek, Role::User)?;
         let prev = (auth.user_pin.clone(), auth.wrapped_dek_user.clone());
         auth.user_pin = Some(verifier);
@@ -843,11 +897,12 @@ impl Token {
         auth.user_pin_initialized = true;
         auth.failed_user_logins = 0;
         auth.user_pin_locked = false;
+        auth.user_locked_at = None;
         auth.user_next_allowed = None;
         auth.pin_epoch = auth.pin_epoch.wrapping_add(1);
         self.persist_lockout(&auth)?;
 
-        tracing::info!("user PIN initialized by SO");
+        tracing::info!("user PIN initialized by SO on slot {}", self.slot_id);
         Ok(())
     }
 
@@ -1045,6 +1100,70 @@ impl Token {
         Ok(())
     }
 
+    /// Verify a PIN **without** logging the token in (H4-01).
+    ///
+    /// For front ends that keep login state per client (the gRPC daemon):
+    /// the same lockout counters, rate limiting, constant-time comparison and
+    /// PBKDF2-outside-the-lock behaviour as [`login`](Self::login) apply, and
+    /// in persistent mode the slot storage key is unwrapped and installed so
+    /// the slot's token objects become available. The token's own login
+    /// state is left untouched, and — unlike `C_Login` — an SO verification
+    /// is not refused because other clients hold read-only sessions.
+    pub fn verify_pin(&self, user_type: CK_ULONG, pin: &[u8]) -> HsmResult<()> {
+        self.verify_pin_epoch(user_type, pin).map(|_| ())
+    }
+
+    /// [`verify_pin`](Self::verify_pin) returning the PIN epoch at commit.
+    fn verify_pin_epoch(&self, user_type: CK_ULONG, pin: &[u8]) -> HsmResult<u64> {
+        use crate::pkcs11_abi::constants::*;
+        let role = match user_type {
+            CKU_USER => Role::User,
+            CKU_SO => Role::So,
+            _ => return Err(HsmError::UserTypeInvalid),
+        };
+        let _v = self.verify_lock(role).lock();
+        let precheck = |auth: &AuthState| -> HsmResult<()> {
+            if auth.finalized {
+                return Err(HsmError::NotInitialized);
+            }
+            if !auth.initialized {
+                return Err(HsmError::TokenNotInitialized);
+            }
+            if role == Role::User && !auth.user_pin_initialized {
+                return Err(HsmError::UserPinNotInitialized);
+            }
+            Ok(())
+        };
+        let att = {
+            let mut auth = self.auth.lock();
+            precheck(&auth)?;
+            self.begin_attempt(&mut auth, role)?
+        };
+        let verified = self.verify_attempt(&att, role, pin);
+        let mut auth = self.auth.lock();
+        if att.epoch != auth.pin_epoch {
+            self.undo_attempt(&mut auth, role);
+            return Err(HsmError::GeneralError);
+        }
+        if let Err(e) = precheck(&auth) {
+            self.undo_attempt(&mut auth, role);
+            return Err(e);
+        }
+        let dek = match verified {
+            Ok(Some(dek)) => dek,
+            Ok(None) => return Err(self.record_failure(&mut auth, role)),
+            Err(e) => {
+                let _ = self.record_failure(&mut auth, role);
+                return Err(e);
+            }
+        };
+        self.record_success(&mut auth, role)?;
+        if let Some(dek) = dek {
+            self.install_dek(&mut auth, dek);
+        }
+        Ok(auth.pin_epoch)
+    }
+
     pub fn logout(&self) -> HsmResult<()> {
         let mut auth = self.auth.lock();
         if auth.login == LoginState::Public {
@@ -1163,5 +1282,88 @@ impl Token {
         if let Some(store) = &self.store {
             store.clear_slot_key(self.slot_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pkcs11_abi::constants::{CKU_SO, CKU_USER};
+
+    fn token(duration: u64) -> Token {
+        let mut cfg = crate::config::config::HsmConfig::default();
+        cfg.security.pbkdf2_iterations = 10_000;
+        cfg.security.max_failed_logins = 3;
+        cfg.security.user_lockout_duration_secs = duration;
+        let t = Token::build(Some(&cfg), 0, None);
+        let mut label = [b' '; 32];
+        label[..1].copy_from_slice(b"t");
+        t.init_token(b"Tok-So#77120", &label).unwrap();
+        t.init_pin_with_so_pin(b"Tok-So#77120", b"Tok-User#6620")
+            .unwrap();
+        t
+    }
+
+    fn lock_user(t: &Token) {
+        for _ in 0..3 {
+            // Clear the back-off window so every attempt is evaluated.
+            t.auth.lock().user_next_allowed = None;
+            let _ = t.verify_pin(CKU_USER, b"Wrong-Pin#000");
+        }
+        t.auth.lock().user_next_allowed = None;
+        assert!(matches!(
+            t.verify_pin(CKU_USER, b"Tok-User#6620"),
+            Err(HsmError::PinLocked)
+        ));
+    }
+
+    /// H4-11: the optional time-based user lockout expires; the default
+    /// lock is permanent until the SO resets the user PIN.
+    #[test]
+    fn user_lockout_expires_only_when_configured() {
+        let t = token(60);
+        lock_user(&t);
+        {
+            let mut a = t.auth.lock();
+            a.user_locked_at = Some(Token::unix_now() - 61);
+            a.user_next_allowed = None;
+        }
+        t.verify_pin(CKU_USER, b"Tok-User#6620").unwrap();
+
+        let t = token(0);
+        lock_user(&t);
+        {
+            let mut a = t.auth.lock();
+            a.user_locked_at = Some(0);
+            a.user_next_allowed = None;
+        }
+        assert!(matches!(
+            t.verify_pin(CKU_USER, b"Tok-User#6620"),
+            Err(HsmError::PinLocked)
+        ));
+        // SO reset (C_InitPIN) clears the lock.
+        t.init_pin_with_so_pin(b"Tok-So#77120", b"Tok-User#6621")
+            .unwrap();
+        t.verify_pin(CKU_USER, b"Tok-User#6621").unwrap();
+        // verify_pin never logs the token in.
+        assert_eq!(t.login_state(), LoginState::Public);
+        t.verify_pin(CKU_SO, b"Tok-So#77120").unwrap();
+        assert_eq!(t.login_state(), LoginState::Public);
+    }
+
+    /// H5-12: the core PIN policy applies to C_InitToken / C_SetPIN too.
+    #[test]
+    fn weak_pins_are_refused_when_set() {
+        let t = Token::build(None, 0, None);
+        let mut label = [b' '; 32];
+        label[..1].copy_from_slice(b"t");
+        assert!(matches!(
+            t.init_token(b"sopin123", &label),
+            Err(HsmError::PinInvalid)
+        ));
+        assert!(matches!(
+            t.init_token(b"12345678", &label),
+            Err(HsmError::PinInvalid)
+        ));
     }
 }

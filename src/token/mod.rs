@@ -3,5 +3,6 @@
 #![forbid(unsafe_code)]
 
 pub mod pin;
+pub mod pin_policy;
 pub mod slot;
 pub mod token;

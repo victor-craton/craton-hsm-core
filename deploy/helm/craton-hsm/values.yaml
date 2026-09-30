@@ -80,9 +80,21 @@ tls:
 
 config:
   tokenLabel: "Craton HSM Token"
-  # Relative to the working directory /data (the core rejects absolute paths).
+  # Relative to the working directory /data (the PVC). The encrypted token
+  # store and the audit log are single-writer: one daemon (replicas: 1) per
+  # volume, and craton-hsm-admin can only open them while the daemon is
+  # stopped.
   storagePath: "craton_hsm_store"
   auditLogPath: "craton_hsm_audit.jsonl"
+  # all | crypto (every event) or auth | admin (authentication, token and key
+  # management events only).
+  auditLogLevel: "all"
+  # Refuse audited operations once the audit trail cannot be written
+  # (forced on when fipsApprovedOnly=true).
+  auditFailClosed: false
+  # Optional audit chain key file (default <auditLogPath>.key), e.g. on a
+  # separate volume. Relative to /data.
+  auditKeyPath: ""
   maxSessions: 100
   maxRwSessions: 10
 
@@ -90,6 +102,9 @@ config:
   pinMinLength: 8
   pinMaxLength: 64
   maxFailedLogins: 5
+  # 0 = a locked User PIN stays locked until the SO resets it; otherwise the
+  # lock expires after this many seconds (must be 0 with fipsApprovedOnly).
+  userLockoutDurationSecs: 0
 
   # [algorithms]
   fipsApprovedOnly: false
@@ -103,8 +118,9 @@ service:
   port: 5696
 
 persistence:
-  # NOTE: key material survives restarts only when the HSM core provides a
-  # persistent object store; until then the daemon refuses token objects.
+  # Token state (initialisation, PIN verifiers, lockout counters) and token
+  # objects are stored encrypted on this volume and survive restarts. With
+  # persistence disabled the daemon refuses token objects (CKA_TOKEN=true).
   enabled: true
   storageClass: ""
   size: 1Gi

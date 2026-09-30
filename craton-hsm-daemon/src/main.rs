@@ -29,8 +29,8 @@ pub mod proto {
 
 use proto::hsm_service_server::HsmServiceServer;
 
-/// (H4-27) `RUST_LOG=<level>` selects the level (the core library caps
-/// levels at INFO at compile time); `CRATON_HSM_LOG_FORMAT=json` emits
+/// (H4-27) `RUST_LOG=<level>` selects the level (the daemon binary is
+/// compiled with `tracing`'s `max_level_info`); `CRATON_HSM_LOG_FORMAT=json` emits
 /// structured JSON for SIEM ingestion.
 fn init_logging() {
     let level = std::env::var("RUST_LOG")
@@ -128,12 +128,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let dcfg = full_config.daemon;
 
-    if let Err(e) = craton_hsm::crypto::self_test::run_post() {
-        tracing::error!("FIPS POST self-tests failed: {:?}", e);
-        std::process::exit(1);
-    }
-    tracing::info!("FIPS POST self-tests passed");
-
+    // Opens the persistent state and runs the pre-operational self-tests
+    // (software CASTs, integrity test, backend CASTs — A1-06).
     let hsm = core_open::open_core(&hsm_config).unwrap_or_else(|e| {
         tracing::error!("{}", e);
         std::process::exit(1);
@@ -373,10 +369,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // (H4-16) Make every queued audit event durable before exiting.
+    // (H4-16, A1-10) Zeroize all SSPs and make every queued audit event
+    // durable before exiting.
     let sh = shared.clone();
-    let _ = tokio::task::spawn_blocking(move || sh.flush_audit()).await;
-    tracing::info!("audit log flushed; shutdown complete");
+    let _ = tokio::task::spawn_blocking(move || sh.finalize()).await;
+    tracing::info!("keys zeroized and audit log flushed; shutdown complete");
     Ok(())
 }
 

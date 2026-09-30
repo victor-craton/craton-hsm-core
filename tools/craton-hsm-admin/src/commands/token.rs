@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Craton Software Company
 use super::Ctx;
-use crate::admin_core::{open_core, prompt_new_pin, AdminCore, CoreMode, Role};
+use crate::admin_core::{open_core, prompt_new_pin, AdminCore, CoreMode, SLOT};
 use crate::error::{CliError, CliResult};
 use crate::output;
-use craton_hsm::audit::log::AuditOperation;
+use craton_hsm::error::HsmError;
 
 /// PKCS#11 `CK_TOKEN_INFO.label` length.
 const LABEL_LEN: usize = 32;
@@ -27,12 +27,17 @@ pub fn validate_label(label: &str) -> CliResult<[u8; LABEL_LEN]> {
     Ok(padded)
 }
 
-/// Initialize (or re-initialize) the token.
+/// Initialize (or re-initialize) the token (`C_InitToken` semantics of the
+/// core, H5-01/H3-14):
 ///
-/// - Re-initialization requires the current SO PIN.
-/// - First-time initialization is refused if persisted lockout state exists,
-///   because that state can then not be tied to a verifiable SO (H5-01).
-/// - A typed confirmation is required (or `--yes`).
+/// - re-initialization requires the current SO PIN, verified by the core
+///   under the SO lockout policy *before* anything is destroyed;
+/// - a locked SO PIN (also a persisted lockout without a token record) is
+///   refused — recovery is out-of-band;
+/// - refused while sessions are open (another process cannot hold any: the
+///   store is single-writer locked);
+/// - a typed confirmation is required (or `--yes`); the event is audited
+///   synchronously with the invoking OS user.
 pub fn init(ctx: &Ctx, label: &str) -> CliResult {
     let label_bytes = validate_label(label)?;
     let cfg = ctx.load_config()?;
@@ -42,21 +47,9 @@ pub fn init(ctx: &Ctx, label: &str) -> CliResult {
     let token = core.token()?;
 
     let so_pin = if token.is_initialized() {
-        // Verify the current SO PIN before anything is reset. C_InitToken
-        // semantics: the SO PIN is kept.
-        let (guard, pin) = core.login_with_pin(Role::So)?;
-        drop(guard);
-        pin
+        // C_InitToken semantics: the current SO PIN is re-used.
+        crate::prompt::read_secret("Enter current SO PIN: ")?
     } else {
-        let lockout = cfg.storage_dir().join("lockout_state.json");
-        if std::fs::symlink_metadata(&lockout).is_ok() {
-            return Err(CliError::Refused(format!(
-                "Token reports no SO PIN but persisted lockout state exists at '{}'. \
-                 Refusing to clear it without SO verification; investigate and remove it \
-                 manually if the token really is new.",
-                lockout.display()
-            )));
-        }
         prompt_new_pin(&cfg, "SO")?
     };
 
@@ -66,15 +59,30 @@ pub fn init(ctx: &Ctx, label: &str) -> CliResult {
         ctx.yes,
     )?;
 
-    let res = token.init_token(so_pin.as_bytes(), &label_bytes);
-    core.record(
-        AuditOperation::InitToken { slot_id: 0 },
-        res.as_ref().map(|_| ()),
-        "token-init",
-    )?;
-    res.map_err(|e| CliError::Auth(format!("Token initialization failed: {e}")))?;
-    // Per PKCS#11, C_InitToken destroys all objects on the token.
-    core.hsm().object_store().clear();
+    core.hsm()
+        .init_token_by(
+            SLOT,
+            so_pin.as_bytes(),
+            &label_bytes,
+            Some(&core.actor("token-init")),
+        )
+        .map_err(|e| match e {
+            HsmError::PinIncorrect => CliError::Auth("SO PIN verification failed.".into()),
+            HsmError::PinLocked => CliError::Auth(
+                "SO PIN is locked; re-initialization is refused (out-of-band recovery required)."
+                    .into(),
+            ),
+            HsmError::PinRateLimited => {
+                CliError::Auth("Too many recent attempts; try again later.".into())
+            }
+            HsmError::PinInvalid | HsmError::PinLenRange => {
+                CliError::Usage(format!("SO PIN rejected by the PIN policy: {e}"))
+            }
+            HsmError::SessionExists => {
+                CliError::Refused("Sessions are open on the token; close them first.".into())
+            }
+            other => CliError::General(format!("Token initialization failed: {other}")),
+        })?;
 
     println!("Token initialized successfully.");
     println!("  Label: {label}");
@@ -84,8 +92,8 @@ pub fn init(ctx: &Ctx, label: &str) -> CliResult {
 fn warn_if_ephemeral(core: &AdminCore, json: bool) {
     if core.mode() == CoreMode::Ephemeral && !json {
         eprintln!(
-            "Note: standalone mode — token state below is NOT loaded from persistent storage \
-             (fresh in-memory core)."
+            "Note: token.persist_objects = false — the token below is ephemeral (nothing is \
+             loaded from or saved to persistent storage)."
         );
     }
 }
@@ -161,6 +169,12 @@ pub fn status(ctx: &Ctx) -> CliResult {
     warn_if_ephemeral(&core, ctx.json);
     let audit_tamper = core.hsm().audit_log().is_tamper_detected();
     let config = &cfg.config;
+    let backend = core.hsm().crypto_backend();
+    // Approved-mode status (A1-24): build property, configured mode and
+    // whether the serving backend is a validated module.
+    let fips_build = cfg!(feature = "fips");
+    let approved_mode = config.algorithms.fips_approved_only && backend.is_fips_validated();
+    let mlock_failures = craton_hsm::crypto::mlock::mlock_failure_count();
 
     if ctx.json {
         let value = serde_json::json!({
@@ -170,6 +184,13 @@ pub fn status(ctx: &Ctx) -> CliResult {
             "token_initialized": token.is_initialized(),
             "audit_enabled": config.audit.enabled,
             "audit_tamper_detected": audit_tamper,
+            "fips_build": fips_build,
+            "fips_approved_only": config.algorithms.fips_approved_only,
+            "crypto_backend": backend.name(),
+            "backend_fips_validated": backend.is_fips_validated(),
+            "approved_mode": approved_mode,
+            "self_tests": "passed",
+            "mlock_failures": mlock_failures,
             "config": {
                 "max_sessions": config.token.max_sessions,
                 "pqc_enabled": config.algorithms.enable_pqc,
@@ -186,6 +207,11 @@ pub fn status(ctx: &Ctx) -> CliResult {
             ("Token Init:", token.is_initialized().to_string()),
             ("Audit Enabled:", config.audit.enabled.to_string()),
             ("Audit Tamper:", audit_tamper.to_string()),
+            ("FIPS Build:", fips_build.to_string()),
+            ("Approved Mode:", approved_mode.to_string()),
+            ("Crypto Backend:", backend.name().to_string()),
+            ("Self-Tests:", "passed".to_string()),
+            ("mlock Failures:", mlock_failures.to_string()),
             ("Max Sessions:", config.token.max_sessions.to_string()),
             ("PQC Enabled:", config.algorithms.enable_pqc.to_string()),
         ]);

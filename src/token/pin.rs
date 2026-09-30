@@ -61,13 +61,34 @@ fn hmac_label(key: &[u8], label: &[u8]) -> Zeroizing<[u8; 32]> {
 
 fn stretch(pin: &[u8], salt: &[u8], iterations: u32) -> Zeroizing<[u8; 32]> {
     let mut master = Zeroizing::new([0u8; 32]);
-    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(pin, salt, iterations, master.as_mut());
+    // Iterations are validated (>= MIN_VERIFY_ITERATIONS / config bounds)
+    // before we get here, so the only error (0 iterations) cannot occur.
+    if crate::store::encrypted_store::pbkdf2_hmac_sha256(
+        pin,
+        salt,
+        iterations.max(1),
+        master.as_mut(),
+    )
+    .is_err()
+    {
+        master.iter_mut().for_each(|b| *b = 0);
+    }
     master
 }
 
 impl PinVerifier {
     /// Create a verifier for `pin`. Returns the verifier and the KEK.
     pub fn create(pin: &[u8], iterations: u32) -> HsmResult<(Self, Zeroizing<[u8; KEY_LEN]>)> {
+        // A verifier that `verify` would refuse makes the account unusable:
+        // reject weak parameters when the PIN is set, not at the next login.
+        if iterations < MIN_VERIFY_ITERATIONS {
+            tracing::error!(
+                "PBKDF2 iteration count {} below the minimum of {}",
+                iterations,
+                MIN_VERIFY_ITERATIONS
+            );
+            return Err(HsmError::ArgumentsBad);
+        }
         let mut salt = [0u8; SALT_LEN];
         fill_random(&mut salt)?;
         let master = stretch(pin, &salt, iterations);

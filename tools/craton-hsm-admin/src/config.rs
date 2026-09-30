@@ -13,11 +13,9 @@ use crate::error::{CliError, CliResult};
 use craton_hsm::config::HsmConfig;
 use std::path::{Path, PathBuf};
 
-/// Absolute default configuration path (matches `docs/operator-runbook.md`).
-#[cfg(not(windows))]
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/craton_hsm/craton_hsm.toml";
-#[cfg(windows)]
-pub const DEFAULT_CONFIG_PATH: &str = r"C:\ProgramData\craton_hsm\craton_hsm.toml";
+/// Absolute default configuration path: the same system configuration the
+/// core library and the container image use (`SYSTEM_CONFIG_PATH`).
+pub const DEFAULT_CONFIG_PATH: &str = craton_hsm::config::config::SYSTEM_CONFIG_PATH;
 
 /// Upper bound on the config file size.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -31,9 +29,11 @@ pub struct LoadedConfig {
 }
 
 impl LoadedConfig {
-    /// Directory holding persistent token state (lockout file, replay guard).
-    pub fn storage_dir(&self) -> &Path {
-        &self.config.token.storage_path
+    /// Audit chain key file (`audit.key_path`, default `<log_path>.key`).
+    pub fn audit_key_path(&self) -> PathBuf {
+        self.config.audit.key_path.clone().unwrap_or_else(|| {
+            craton_hsm::audit::log::default_key_path(&self.config.audit.log_path)
+        })
     }
 }
 
@@ -65,12 +65,14 @@ pub fn load_strict(path: &Path) -> CliResult<LoadedConfig> {
 
     check_ownership_and_mode(&file, &dir, path)?;
 
-    let config = parse(file, path)?;
+    // Anchor relative paths to the config directory first, so validation
+    // (symlink / system-directory checks) sees the paths actually used.
+    let mut config = anchor_paths(parse(file, path)?, &dir);
+    // Non-overridable build policy (FIPS builds force approved mode).
+    config.enforce_build_policy();
     config
         .validate()
         .map_err(|e| config_err(path, format!("validation failed: {e}")))?;
-
-    let config = anchor_paths(config, &dir);
     Ok(LoadedConfig {
         config,
         path: canonical,
@@ -162,6 +164,11 @@ fn anchor_paths(mut config: HsmConfig, dir: &Path) -> HsmConfig {
     }
     if config.audit.log_path.is_relative() {
         config.audit.log_path = dir.join(&config.audit.log_path);
+    }
+    if let Some(kp) = config.audit.key_path.as_mut() {
+        if kp.is_relative() {
+            *kp = dir.join(&*kp);
+        }
     }
     config
 }

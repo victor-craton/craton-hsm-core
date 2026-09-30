@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::config::defaults::{DEFAULT_PBKDF2_ITERATIONS, NONCE_LEN, SALT_LEN};
-use crate::error::{HsmError, HsmResult};
+use crate::error::{BackupRejection, HsmError, HsmResult};
 use crate::store::attributes::{sanitize_restored_object, ZeroizingObjects};
 use crate::store::encrypted_store::{derive_key_from_pin, fill_random};
 use crate::store::object::StoredObject;
@@ -45,8 +45,9 @@ const BACKUP_VERSION: u32 = 2;
 const KDF_PBKDF2_SHA256: u8 = 1;
 const HEADER_LEN: usize = 4 + 4 + 1 + 4 + SALT_LEN + NONCE_LEN; // 57 bytes
 const MIN_PASSPHRASE_LEN: usize = 16;
-/// Bounds on the iteration count accepted from a backup header.
-const MIN_BACKUP_ITERATIONS: u32 = 100_000;
+/// Minimum PBKDF2 iteration count for backup passphrases (create and restore).
+pub const MIN_BACKUP_ITERATIONS: u32 = 100_000;
+/// Maximum iteration count accepted from a backup header (DoS bound).
 const MAX_BACKUP_ITERATIONS: u32 = 10_000_000;
 
 /// Inner JSON payload that gets encrypted in the backup file (borrowing
@@ -171,8 +172,10 @@ pub fn create_backup(
 /// Every returned object has passed [`sanitize_restored_object`]. Callers
 /// must allocate fresh handles when inserting them.
 ///
-/// Returns `HsmError::DataInvalid` for format/replay/policy errors and
-/// `HsmError::PinIncorrect` for a wrong passphrase.
+/// Returns `HsmError::BackupRejected(reason)` (`CKR_DATA_INVALID`) for
+/// format, binding, replay, age and policy errors — with a distinct reason
+/// each (H5-04) — and `HsmError::PinIncorrect` for a wrong passphrase or a
+/// corrupted ciphertext.
 pub fn restore_backup(
     data: &[u8],
     passphrase: &str,
@@ -181,22 +184,31 @@ pub fn restore_backup(
     pbkdf2_iterations: Option<u32>,
     consumed_ids: Option<&mut HashSet<String>>,
 ) -> HsmResult<Vec<StoredObject>> {
+    let reject = |r: BackupRejection| HsmError::BackupRejected(r);
     if data.len() < HEADER_LEN {
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::Malformed));
     }
     if &data[0..4] != BACKUP_MAGIC {
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::Malformed));
     }
-    let version = u32::from_le_bytes(data[4..8].try_into().map_err(|_| HsmError::DataInvalid)?);
+    let version = u32::from_le_bytes(
+        data[4..8]
+            .try_into()
+            .map_err(|_| reject(BackupRejection::Malformed))?,
+    );
     if version != BACKUP_VERSION || data[8] != KDF_PBKDF2_SHA256 {
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::UnsupportedFormat));
     }
-    let iterations = u32::from_le_bytes(data[9..13].try_into().map_err(|_| HsmError::DataInvalid)?);
+    let iterations = u32::from_le_bytes(
+        data[9..13]
+            .try_into()
+            .map_err(|_| reject(BackupRejection::Malformed))?,
+    );
     let floor = pbkdf2_iterations
         .unwrap_or(MIN_BACKUP_ITERATIONS)
         .max(MIN_BACKUP_ITERATIONS);
     if iterations < floor || iterations > MAX_BACKUP_ITERATIONS {
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::KdfParameters));
     }
     let salt = &data[13..13 + SALT_LEN];
     let nonce_bytes = &data[13 + SALT_LEN..HEADER_LEN];
@@ -216,18 +228,18 @@ pub fn restore_backup(
     );
 
     let payload: BackupPayload =
-        serde_json::from_slice(&plaintext).map_err(|_| HsmError::DataInvalid)?;
+        serde_json::from_slice(&plaintext).map_err(|_| reject(BackupRejection::Malformed))?;
     drop(plaintext);
     // From here on every exit path zeroizes the restored objects.
     let objects = ZeroizingObjects::new(payload.objects);
 
     if payload.version != BACKUP_VERSION || payload.object_count != objects.len() {
         tracing::warn!("Backup restore rejected: payload/header mismatch");
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::Malformed));
     }
     if payload.token_serial != expected_serial {
         tracing::warn!("Backup restore rejected: token binding mismatch");
-        return Err(HsmError::DataInvalid);
+        return Err(reject(BackupRejection::BindingMismatch));
     }
     match &consumed_ids {
         Some(ids) if ids.contains(&payload.backup_id) => {
@@ -235,7 +247,7 @@ pub fn restore_backup(
                 "Backup restore rejected: backup_id {} has already been consumed (replay attack?)",
                 payload.backup_id
             );
-            return Err(HsmError::DataInvalid);
+            return Err(reject(BackupRejection::Replayed));
         }
         Some(_) => {}
         None => tracing::warn!(
@@ -256,11 +268,11 @@ pub fn restore_backup(
             .as_secs();
         if payload.created_epoch > now + 300 {
             tracing::warn!("Backup restore rejected: timestamp is in the future");
-            return Err(HsmError::DataInvalid);
+            return Err(reject(BackupRejection::FromFuture));
         }
         if now.saturating_sub(payload.created_epoch) > max {
             tracing::warn!("Backup restore rejected: backup is too old");
-            return Err(HsmError::DataInvalid);
+            return Err(reject(BackupRejection::TooOld));
         }
     }
 
@@ -273,7 +285,7 @@ pub fn restore_backup(
                 e
             );
             drop(ZeroizingObjects::new(objects));
-            return Err(HsmError::DataInvalid);
+            return Err(reject(BackupRejection::PolicyViolation));
         }
     }
 
@@ -288,50 +300,110 @@ pub fn restore_backup(
     Ok(objects)
 }
 
-/// Persistent replay guard — tracks consumed backup IDs across restarts.
+/// File-based persistent replay guard — tracks consumed backup IDs across
+/// restarts.
 ///
-/// The file (one hex ID per line) is created with mode 0600 and
-/// `O_NOFOLLOW`. [`check_and_record`](Self::check_and_record) re-reads the
-/// file under an exclusive lock, so two concurrent restores cannot both pass
-/// the check (H3-16). Deleting the file resets the guard — keep it on
-/// storage the operator cannot trivially rewrite, and record IDs only after
-/// the restored objects were committed.
+/// **Prefer [`crate::core::HsmCore::restore_backup`]**, which keeps the
+/// consumed IDs authenticated inside the single-writer encrypted store and
+/// records them in the same transaction as the restored objects (H5-06).
+///
+/// This guard is for embedders without a persistent core. The file (one ID
+/// per line) is opened with `O_NOFOLLOW`, created 0600 and ownership/mode
+/// are validated on the descriptor; [`check_and_record`](Self::check_and_record)
+/// takes an exclusive lock and re-reads the IDs **through the locked
+/// descriptor**, so load → check → append → fsync is atomic with respect to
+/// other guards. With [`with_key`](Self::with_key) every line carries an
+/// HMAC-SHA256 under a caller-supplied (token-bound) key and a line that fails
+/// verification makes the guard fail closed. Deleting the whole file still
+/// resets the guard — keep it on storage the operator cannot trivially
+/// rewrite, and record IDs only after the restored objects were committed.
 pub struct PersistentReplayGuard {
     ids: HashSet<String>,
     path: Option<std::path::PathBuf>,
+    key: Option<Zeroizing<[u8; 32]>>,
 }
 
 impl PersistentReplayGuard {
     /// Create a replay guard backed by a file at `path`.
     pub fn new(path: std::path::PathBuf) -> Self {
-        let ids = Self::read_ids(&path);
+        let ids = Self::read_ids(&path, None).unwrap_or_default();
         Self {
             ids,
             path: Some(path),
+            key: None,
         }
     }
 
-    fn read_ids(path: &std::path::Path) -> HashSet<String> {
+    /// Create a replay guard whose entries are authenticated with
+    /// HMAC-SHA256 under `key` (e.g. derived from the token's storage key).
+    /// Fails if an existing entry does not verify.
+    pub fn with_key(path: std::path::PathBuf, key: &[u8; 32]) -> HsmResult<Self> {
+        let key = Zeroizing::new(*key);
+        let ids = Self::read_ids(&path, Some(&key))?;
+        Ok(Self {
+            ids,
+            path: Some(path),
+            key: Some(key),
+        })
+    }
+
+    fn line_mac(key: &[u8; 32], id: &str) -> String {
+        use hmac::Mac;
+        let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key)
+            .expect("HMAC accepts any key length");
+        mac.update(b"craton-hsm/replay-guard/v1");
+        mac.update(id.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn parse_ids(content: &[u8], key: Option<&[u8; 32]>) -> HsmResult<HashSet<String>> {
         let mut ids = HashSet::new();
-        match crate::store::fs_util::read_private(path) {
-            Ok(Some(content)) => {
-                for line in String::from_utf8_lossy(&content).lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        ids.insert(trimmed.to_string());
+        for line in String::from_utf8_lossy(content).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match key {
+                None => {
+                    // Accept authenticated lines too (keyless reader).
+                    let id = line.split(':').next().unwrap_or(line);
+                    ids.insert(id.to_string());
+                }
+                Some(k) => {
+                    let (id, mac) = line.split_once(':').ok_or_else(|| {
+                        tracing::error!("replay guard entry without MAC — tampered?");
+                        HsmError::DeviceError
+                    })?;
+                    use subtle::ConstantTimeEq;
+                    let expected = Self::line_mac(k, id);
+                    if !bool::from(expected.as_bytes().ct_eq(mac.as_bytes())) {
+                        tracing::error!("replay guard entry failed authentication — tampered?");
+                        return Err(HsmError::DeviceError);
                     }
+                    ids.insert(id.to_string());
                 }
             }
-            Ok(None) => {}
+        }
+        Ok(ids)
+    }
+
+    fn read_ids(path: &std::path::Path, key: Option<&[u8; 32]>) -> HsmResult<HashSet<String>> {
+        match crate::store::fs_util::read_private(path) {
+            Ok(Some(content)) => Self::parse_ids(&content, key),
+            Ok(None) => Ok(HashSet::new()),
             Err(e) => {
                 tracing::warn!(
                     "Could not read replay guard file {}: {:?}",
                     path.display(),
                     e
                 );
+                if key.is_some() {
+                    Err(e)
+                } else {
+                    Ok(HashSet::new())
+                }
             }
         }
-        ids
     }
 
     /// Create an in-memory-only replay guard (no persistence).
@@ -339,6 +411,7 @@ impl PersistentReplayGuard {
         Self {
             ids: HashSet::new(),
             path: None,
+            key: None,
         }
     }
 
@@ -347,25 +420,38 @@ impl PersistentReplayGuard {
         self.ids.contains(id)
     }
 
-    /// Atomically check that `id` is unused and record it (exclusive file
-    /// lock held across re-read, check and append).
+    /// Atomically check that `id` is unused and record it: exclusive lock,
+    /// re-read through the locked descriptor, check, append, fsync.
     pub fn check_and_record(&mut self, id: &str) -> HsmResult<()> {
+        if id.is_empty() || id.contains(['\n', '\r', ':']) {
+            return Err(HsmError::ArgumentsBad);
+        }
         if let Some(path) = self.path.clone() {
             use fs2::FileExt;
-            use std::io::Write;
+            use std::io::{Read, Seek, Write};
             let mut file = crate::store::fs_util::open_private(&path, true)?;
             file.lock_exclusive().map_err(|e| {
                 tracing::error!("Failed to lock replay guard file {}: {}", path.display(), e);
                 HsmError::DeviceError
             })?;
-            self.ids.extend(Self::read_ids(&path));
+            let mut content = Vec::new();
+            file.seek(std::io::SeekFrom::Start(0))
+                .and_then(|_| file.read_to_end(&mut content))
+                .map_err(|_| HsmError::DeviceError)?;
+            let key = self.key.as_ref().map(|k| &**k);
+            self.ids.extend(Self::parse_ids(&content, key)?);
             if self.ids.contains(id) {
-                return Err(HsmError::DataInvalid);
+                return Err(HsmError::BackupRejected(BackupRejection::Replayed));
             }
-            writeln!(file, "{}", id).map_err(|_| HsmError::DeviceError)?;
+            let line = match key {
+                Some(k) => format!("{}:{}", id, Self::line_mac(k, id)),
+                None => id.to_string(),
+            };
+            writeln!(file, "{}", line).map_err(|_| HsmError::DeviceError)?;
             file.sync_all().map_err(|_| HsmError::DeviceError)?;
+            // Lock released when `file` is dropped.
         } else if self.ids.contains(id) {
-            return Err(HsmError::DataInvalid);
+            return Err(HsmError::BackupRejected(BackupRejection::Replayed));
         }
         self.ids.insert(id.to_string());
         Ok(())
@@ -374,7 +460,7 @@ impl PersistentReplayGuard {
     /// Record a backup ID as consumed. Persists to file immediately.
     pub fn record(&mut self, id: String) -> HsmResult<()> {
         match self.check_and_record(&id) {
-            Ok(()) | Err(HsmError::DataInvalid) => Ok(()),
+            Ok(()) | Err(HsmError::BackupRejected(BackupRejection::Replayed)) => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -653,5 +739,30 @@ mod tests {
             Some(&mut consumed),
         );
         assert!(result.is_err(), "Replay of same backup should be rejected");
+    }
+
+    /// H5-06: authenticated guard entries; tampering fails closed; replays
+    /// are rejected with a distinct reason.
+    #[test]
+    fn authenticated_replay_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guard");
+        let key = [9u8; 32];
+        let mut g = PersistentReplayGuard::with_key(path.clone(), &key).unwrap();
+        g.check_and_record("abc").unwrap();
+        assert!(matches!(
+            g.check_and_record("abc"),
+            Err(HsmError::BackupRejected(BackupRejection::Replayed))
+        ));
+        // A second guard instance sees the persisted ID.
+        let mut g2 = PersistentReplayGuard::with_key(path.clone(), &key).unwrap();
+        assert!(g2.is_consumed("abc"));
+        assert!(g2.check_and_record("abc").is_err());
+        // Forged / edited entries fail closed.
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, content.replace("abc", "abd")).unwrap();
+        assert!(PersistentReplayGuard::with_key(path.clone(), &key).is_err());
+        assert!(PersistentReplayGuard::with_key(path, &[8u8; 32]).is_err());
+        assert!(g.check_and_record("bad:id").is_err());
     }
 }

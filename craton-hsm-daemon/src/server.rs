@@ -29,20 +29,20 @@ use craton_hsm::crypto::mechanisms::{is_fips_approved, validate_mechanism_for_po
 use craton_hsm::error::HsmError;
 use craton_hsm::pkcs11_abi::constants::*;
 use craton_hsm::pkcs11_abi::types::CK_ULONG;
+use craton_hsm::store::attributes::{ObjectContext, ObjectOrigin};
 use craton_hsm::store::object::StoredObject;
 use craton_hsm::token::token::{LoginState, Token};
 
 use crate::conn::{ConnInfo, RpcGuard};
 use crate::mechanism::{
-    cipher_alg_for, curve_from_params, is_ed25519_params, sign_alg_for, CipherAlg, Curve, SignAlg,
-    ED25519_OID, P256_OID, P384_OID,
+    cipher_alg_for, curve_from_params, is_ed25519_params, sign_alg_for, CipherAlg, Curve, HashAlg2,
+    SignAlg, ED25519_OID, P256_OID, P384_OID,
 };
 use crate::proto::hsm_service_server::HsmService;
 use crate::proto::*;
 use crate::registry::{Registry, Role, SessionView};
 use crate::template::{
-    proto_attrs_to_template, set_generated_provenance, validate, KeyKind, KeyTemplate,
-    MAX_LABEL_LEN, MAX_SEARCH_VALUE_LEN,
+    proto_attrs_to_template, validate, KeyKind, KeyTemplate, MAX_LABEL_LEN, MAX_SEARCH_VALUE_LEN,
 };
 use crate::throttle::Throttle;
 
@@ -268,26 +268,6 @@ impl Shared {
         Ok(())
     }
 
-    /// Destroy every object on a slot (InitToken). Returns the count.
-    fn wipe_slot_objects(&self, slot_id: CK_ULONG) -> usize {
-        let handles = self
-            .hsm
-            .object_store()
-            .find_objects_for_slot(&[], true, Some(slot_id));
-        let mut n = 0;
-        for h in handles {
-            match self.destroy_object_now(h) {
-                Ok(()) => n += 1,
-                Err(e) => tracing::error!(
-                    handle = h,
-                    "InitToken: failed to destroy object: {}",
-                    e.message()
-                ),
-            }
-        }
-        n
-    }
-
     /// Close a session: destroy its session objects, release the core
     /// session and end the owner's login when it was the last session.
     pub fn close_session(&self, handle: CK_ULONG) -> Result<(String, CK_ULONG), Status> {
@@ -353,6 +333,12 @@ impl Shared {
     /// Flush the audit log (shutdown, admin operations).
     pub fn flush_audit(&self) {
         self.hsm.audit_log().flush();
+    }
+
+    /// Shutdown: zeroize keys, PIN verifiers and storage keys, record the
+    /// Finalize event and flush the audit log (A1-10, H4-16).
+    pub fn finalize(&self) {
+        self.hsm.finalize();
     }
 
     /// Register ownership of a freshly inserted object; destroys it if the
@@ -726,11 +712,17 @@ impl HsmService for HsmServiceImpl {
         let pin = Zeroizing::new(std::mem::take(&mut request.get_mut().pin));
         let (conn, _rpc, req) = begin(request)?;
         let r = self.init_pin_inner(&conn, &req, so_pin, pin).await;
+        let slot = self
+            .shared
+            .registry
+            .authorize(req.session_handle as CK_ULONG, &conn.identity.id)
+            .map(|v| v.slot_id as u64)
+            .unwrap_or(0);
         self.audited(
             &conn,
             req.session_handle,
-            || AuditOperation::InitToken { slot_id: 0 },
-            Some("op=InitPIN".into()),
+            || AuditOperation::InitPin { slot_id: slot },
+            None,
             r,
         )
     }
@@ -1117,10 +1109,9 @@ impl HsmService for HsmServiceImpl {
         let random_data = self
             .blocking(move |sh| {
                 let mut buf = vec![0u8; length as usize];
-                // (Perf) Release the global DRBG lock between chunks.
+                // Module-wide approved DRBG, in bounded chunks.
                 for chunk in buf.chunks_mut(RANDOM_CHUNK) {
-                    let mut drbg = sh.hsm.drbg().lock();
-                    drbg.generate(chunk).map_err(|_| {
+                    sh.hsm.generate_random(chunk).map_err(|_| {
                         Status::internal("DRBG generation failed — health test failure")
                     })?;
                 }
@@ -1254,13 +1245,12 @@ impl HsmServiceImpl {
             let _g = lock_mutex(&gate.login);
             sh.login_throttle.check(&key)?;
             reset_core_login(&token);
-            // Verify-and-release: the core token only verifies the PIN (with
-            // its persistent lockout counters); the resulting login is kept
-            // per client in the registry, never on the shared token.
-            let r = token.login(user_type, &pin);
-            if r.is_ok() {
-                let _ = token.logout();
-            }
+            // (H4-01) The core only verifies the PIN (persistent lockout
+            // counters, rate limit, PBKDF2 outside the token lock) and, in
+            // persistent mode, unlocks the slot's token objects; the token's
+            // own login state is never changed. The resulting login is kept
+            // per client in the registry.
+            let r = sh.hsm.verify_pin(slot_id, user_type, &pin);
             drop(pin);
             match r {
                 Ok(()) => {
@@ -1313,6 +1303,7 @@ impl HsmServiceImpl {
         let gate = self.shared.gate(slot_id)?;
         let token = self.shared.token(slot_id)?;
         let key = format!("{}|{}|init", conn.identity.id, slot_id);
+        let actor = format!("client={}", conn.identity.id);
         let destroyed = self
             .blocking(move |sh| {
                 let _l = lock_mutex(&gate.login);
@@ -1325,12 +1316,23 @@ impl HsmServiceImpl {
                     ));
                 }
                 reset_core_login(&token);
-                match token.init_token(&so_pin, &label) {
+                // Core C_InitToken semantics shared with the C ABI (H4-09,
+                // H3-14): SessionExists while sessions are open, SO PIN
+                // verified under the SO lockout *before* the slot's objects
+                // (memory and persistent store) are destroyed; audited
+                // synchronously by the core with the client identity.
+                let before = sh
+                    .hsm
+                    .object_store()
+                    .find_objects_for_slot(&[], true, Some(slot_id));
+                match sh.hsm.init_token_by(slot_id, &so_pin, &label, Some(&actor)) {
                     Ok(()) => {
                         sh.init_throttle.clear(&key);
                         sh.registry.clear_slot_logins(slot_id);
-                        // Destroy only after the SO PIN has been verified.
-                        Ok(sh.wipe_slot_objects(slot_id))
+                        for h in &before {
+                            sh.registry.release_object(*h);
+                        }
+                        Ok(before.len())
                     }
                     Err(e) => {
                         if is_pin_failure(&e) {
@@ -1341,21 +1343,13 @@ impl HsmServiceImpl {
                 }
             })
             .await?;
-        self.shared.audit(
-            conn,
-            0,
-            AuditOperation::InitToken {
-                slot_id: req.slot_id,
-            },
-            AuditResult::Success,
-            Some(format!("destroyed_objects={}", destroyed)),
-        )?;
-        self.blocking(|sh| {
-            sh.flush_audit();
-            Ok(())
-        })
-        .await?;
-        tracing::warn!(slot_id, client = %conn.identity.id, "Token initialized via gRPC");
+        // The core has already recorded the InitToken event durably.
+        tracing::warn!(
+            slot_id,
+            client = %conn.identity.id,
+            destroyed_objects = destroyed,
+            "Token initialized via gRPC"
+        );
         Ok(Response::new(InitTokenResponse {}))
     }
 
@@ -1377,34 +1371,29 @@ impl HsmServiceImpl {
         let gate = self.shared.gate(slot_id)?;
         let token = self.shared.token(slot_id)?;
         let key = format!("{}|{}|{}", conn.identity.id, slot_id, CKU_SO);
+        let actor = format!("client={}", conn.identity.id);
         self.blocking(move |sh| {
             let _g = lock_mutex(&gate.login);
             sh.login_throttle.check(&key)?;
             reset_core_login(&token);
-            if let Err(e) = token.login(CKU_SO, &so_pin) {
-                if is_pin_failure(&e) {
-                    sh.login_throttle.record_failure(&key);
+            // (H4-01) SO PIN verified and user PIN set atomically by the
+            // core, without logging the shared token in; audited durably by
+            // the core as InitPin with the client identity.
+            match sh
+                .hsm
+                .init_pin_with_so_pin(slot_id, &so_pin, &pin, Some(&actor))
+            {
+                Ok(()) => {
+                    sh.login_throttle.clear(&key);
+                    Ok(())
                 }
-                return Err(hsm_err_to_status(e));
+                Err(e) => {
+                    if is_pin_failure(&e) {
+                        sh.login_throttle.record_failure(&key);
+                    }
+                    Err(hsm_err_to_status(e))
+                }
             }
-            let r = token.init_pin(&pin);
-            let _ = token.logout();
-            sh.login_throttle.clear(&key);
-            r.map_err(hsm_err_to_status)
-        })
-        .await?;
-        self.shared.audit(
-            conn,
-            req.session_handle,
-            AuditOperation::InitToken {
-                slot_id: slot_id as u64,
-            },
-            AuditResult::Success,
-            Some("op=InitPIN".into()),
-        )?;
-        self.blocking(|sh| {
-            sh.flush_audit();
-            Ok(())
         })
         .await?;
         Ok(Response::new(InitPinResponse {}))
@@ -1486,12 +1475,19 @@ impl HsmServiceImpl {
                     obj.extractable = false;
                     obj.private = true;
                     kt.apply(&mut obj);
-                    set_generated_provenance(&mut obj, CKM_AES_KEY_GEN);
                     let token_object = obj.token_object;
+                    // Slot, owning session and provenance (CKA_LOCAL etc.)
+                    // are assigned by the store (H1-09).
                     let h = sh
                         .hsm
                         .object_store()
-                        .insert_object(obj)
+                        .insert_object_in(
+                            obj,
+                            &ObjectContext::new(slot_id, session, false),
+                            ObjectOrigin::Generated {
+                                mechanism: CKM_AES_KEY_GEN,
+                            },
+                        )
                         .map_err(hsm_err_to_status)?;
                     sh.track_new_object(&owner2, h, token_object, session)?;
                     Ok(h)
@@ -1672,13 +1668,17 @@ impl HsmServiceImpl {
                     };
                     pub_t.apply(&mut pub_obj);
                     priv_t.apply(&mut priv_obj);
-                    set_generated_provenance(&mut pub_obj, mech_type);
-                    set_generated_provenance(&mut priv_obj, mech_type);
                     let pub_token = pub_obj.token_object;
                     let priv_token = priv_obj.token_object;
 
-                    let pub_h = store.insert_object(pub_obj).map_err(hsm_err_to_status)?;
-                    let priv_h = match store.insert_object(priv_obj) {
+                    let ctx = ObjectContext::new(slot_id, session, false);
+                    let origin = ObjectOrigin::Generated {
+                        mechanism: mech_type,
+                    };
+                    let pub_h = store
+                        .insert_object_in(pub_obj, &ctx, origin)
+                        .map_err(hsm_err_to_status)?;
+                    let priv_h = match store.insert_object_in(priv_obj, &ctx, origin) {
                         Ok(h) => h,
                         Err(e) => {
                             // No orphaned public key.
@@ -1776,8 +1776,10 @@ impl HsmServiceImpl {
         let alg = sign_alg_for(mech_type, param, &key.read())?;
         let data = req.data;
         let signature = self
-            .blocking(move |_| {
-                use craton_hsm::crypto::sign as s;
+            .blocking(move |sh| {
+                // All primitives run through the configured backend (the
+                // FIPS-validated AWS-LC module in `fips` builds).
+                let be = sh.hsm.crypto_backend();
                 let k = key.read();
                 let kb = k
                     .key_material
@@ -1785,11 +1787,13 @@ impl HsmServiceImpl {
                     .ok_or_else(|| Status::internal("Key has no material"))?
                     .as_bytes();
                 match alg {
-                    SignAlg::RsaPkcs1(h) => s::rsa_pkcs1v15_sign(kb, &data, Some(h.to_core())),
-                    SignAlg::RsaPss(h) => s::rsa_pss_sign(kb, &data, h.to_core()),
-                    SignAlg::EcdsaP256Sha256 => s::ecdsa_p256_sign(kb, &data),
-                    SignAlg::EcdsaP384Sha384 => s::ecdsa_p384_sign(kb, &data),
-                    SignAlg::Ed25519 => s::ed25519_sign(kb, &data),
+                    SignAlg::RsaPkcs1(h) => be.rsa_pkcs1v15_sign(kb, &data, Some(h.to_core())),
+                    SignAlg::RsaPss(h) => be.rsa_pss_sign(kb, &data, h.to_core()),
+                    // PKCS#11 raw r||s signatures (A2-07).
+                    SignAlg::Ecdsa(curve, h) => {
+                        be.ecdsa_sign(curve.to_core(), kb, &data, h.map(HashAlg2::to_core))
+                    }
+                    SignAlg::Ed25519 => be.ed25519_sign(kb, &data),
                 }
                 .map_err(hsm_err_to_status)
             })
@@ -1824,8 +1828,8 @@ impl HsmServiceImpl {
         let data = req.data;
         let signature = req.signature;
         let valid = self
-            .blocking(move |_| {
-                use craton_hsm::crypto::sign as s;
+            .blocking(move |sh| {
+                let be = sh.hsm.crypto_backend();
                 let k = key.read();
                 let missing = |what: &str| Status::internal(format!("Key missing {}", what));
                 match alg {
@@ -1836,22 +1840,24 @@ impl HsmServiceImpl {
                             .as_ref()
                             .ok_or_else(|| missing("public exponent"))?;
                         if matches!(alg, SignAlg::RsaPss(_)) {
-                            s::rsa_pss_verify(n, e, &data, &signature, h.to_core())
+                            be.rsa_pss_verify(n, e, &data, &signature, h.to_core())
                         } else {
-                            s::rsa_pkcs1v15_verify(n, e, &data, &signature, Some(h.to_core()))
+                            be.rsa_pkcs1v15_verify(n, e, &data, &signature, Some(h.to_core()))
                         }
                     }
-                    SignAlg::EcdsaP256Sha256 | SignAlg::EcdsaP384Sha384 => {
+                    SignAlg::Ecdsa(curve, h) => {
                         let pt = k.ec_point.as_ref().ok_or_else(|| missing("public point"))?;
-                        if alg == SignAlg::EcdsaP256Sha256 {
-                            s::ecdsa_p256_verify(pt, &data, &signature)
-                        } else {
-                            s::ecdsa_p384_verify(pt, &data, &signature)
-                        }
+                        be.ecdsa_verify(
+                            curve.to_core(),
+                            pt,
+                            &data,
+                            &signature,
+                            h.map(HashAlg2::to_core),
+                        )
                     }
                     SignAlg::Ed25519 => {
                         let pk = k.ec_point.as_ref().ok_or_else(|| missing("public key"))?;
-                        s::ed25519_verify(pk, &data, &signature)
+                        be.ed25519_verify(pk, &data, &signature)
                     }
                 }
                 .map_err(hsm_err_to_status)
@@ -1890,33 +1896,55 @@ impl HsmServiceImpl {
             Usage::Encrypt
         };
         let key = self.load_key(conn, &view, key_handle, usage)?;
-        let param = mechanism.map(|m| m.parameter).unwrap_or_default();
+        let param = Zeroizing::new(mechanism.map(|m| m.parameter).unwrap_or_default());
         let alg = cipher_alg_for(mech_type, &param, &key.read(), decrypt)?;
-        let out = self
-            .blocking(move |_| {
-                use craton_hsm::crypto::encrypt as e;
+        drop(param);
+        let fips_mode = self.shared.hsm.algorithm_config().fips_approved_only;
+        if matches!(alg, CipherAlg::AesGcm(Some(_)))
+            && !decrypt
+            && !self.shared.hsm.algorithm_config().caller_gcm_iv_allowed()
+        {
+            return Err(Status::invalid_argument(
+                "Caller-supplied GCM IVs are not permitted by policy; omit the parameter so the \
+                 module generates the IV",
+            ));
+        }
+        // Plaintext (input of encrypt, output of decrypt) stays in zeroizing
+        // buffers until the response message is built.
+        let input = Zeroizing::new(input);
+        let mut out: Zeroizing<Vec<u8>> = self
+            .blocking(move |sh| {
+                use craton_hsm::crypto::params::{CtrParams, GcmParams, OaepParams};
+                let be = sh.hsm.crypto_backend();
                 let k = key.read();
-                let material = || -> Result<&[u8], Status> {
-                    Ok(k.key_material
-                        .as_ref()
-                        .ok_or_else(|| Status::internal("Key has no material"))?
-                        .as_bytes())
+                let km = k.key_material.as_ref().map(|m| m.as_bytes());
+                let material = || km.ok_or(HsmError::KeyHandleInvalid);
+                let gcm = |iv: Option<[u8; 12]>| -> Result<GcmParams, HsmError> {
+                    match iv {
+                        // Module-generated IV (the backend generates a fresh
+                        // one per operation), framed IV || ct || tag.
+                        None => Ok(GcmParams::legacy([0u8; 12])),
+                        Some(iv) => GcmParams::new(&iv, &[], 128, false),
+                    }
                 };
-                match (alg, decrypt) {
-                    (CipherAlg::AesGcm, false) => e::aes_256_gcm_encrypt(material()?, &input),
-                    (CipherAlg::AesGcm, true) => {
-                        e::aes_256_gcm_decrypt(material()?, &input).map(|v| v.to_vec())
+                let r: Result<Zeroizing<Vec<u8>>, HsmError> = match (alg, decrypt) {
+                    (CipherAlg::AesGcm(iv), false) => gcm(iv)
+                        .and_then(|p| be.aes_gcm_encrypt(material()?, &p, &input, fips_mode))
+                        .map(Zeroizing::new),
+                    (CipherAlg::AesGcm(iv), true) => {
+                        gcm(iv).and_then(|p| be.aes_gcm_decrypt(material()?, &p, &input))
                     }
-                    (CipherAlg::AesCbcPad, false) => {
-                        e::aes_cbc_encrypt(material()?, &param, &input)
+                    (CipherAlg::AesCbc { iv, pad }, false) => material()
+                        .and_then(|m| be.aes_cbc_encrypt(m, &iv, &input, pad))
+                        .map(Zeroizing::new),
+                    (CipherAlg::AesCbc { iv, pad }, true) => {
+                        material().and_then(|m| be.aes_cbc_decrypt(m, &iv, &input, pad))
                     }
-                    (CipherAlg::AesCbcPad, true) => {
-                        e::aes_cbc_decrypt(material()?, &param, &input).map(|v| v.to_vec())
-                    }
-                    (CipherAlg::AesCtr, false) => e::aes_ctr_encrypt(material()?, &param, &input),
-                    (CipherAlg::AesCtr, true) => {
-                        e::aes_ctr_decrypt(material()?, &param, &input).map(|v| v.to_vec())
-                    }
+                    (CipherAlg::AesCtr(cb), false) => CtrParams::from_legacy_iv(&cb)
+                        .and_then(|p| be.aes_ctr_encrypt(material()?, &p, &input))
+                        .map(Zeroizing::new),
+                    (CipherAlg::AesCtr(cb), true) => CtrParams::from_legacy_iv(&cb)
+                        .and_then(|p| be.aes_ctr_decrypt(material()?, &p, &input)),
                     (CipherAlg::RsaOaepSha256, false) => {
                         let n = k
                             .modulus
@@ -1926,21 +1954,23 @@ impl HsmServiceImpl {
                             .public_exponent
                             .as_ref()
                             .ok_or_else(|| Status::internal("RSA key missing public exponent"))?;
-                        craton_hsm::crypto::sign::rsa_oaep_encrypt(
+                        be.rsa_oaep_encrypt(
                             n,
                             x,
                             &input,
-                            craton_hsm::crypto::sign::OaepHash::Sha256,
+                            &OaepParams::new(craton_hsm::crypto::sign::OaepHash::Sha256),
                         )
+                        .map(Zeroizing::new)
                     }
-                    (CipherAlg::RsaOaepSha256, true) => craton_hsm::crypto::sign::rsa_oaep_decrypt(
-                        material()?,
-                        &input,
-                        craton_hsm::crypto::sign::OaepHash::Sha256,
-                    )
-                    .map(|v| v.to_vec()),
-                }
-                .map_err(hsm_err_to_status)
+                    (CipherAlg::RsaOaepSha256, true) => material().and_then(|m| {
+                        be.rsa_oaep_decrypt(
+                            m,
+                            &input,
+                            &OaepParams::new(craton_hsm::crypto::sign::OaepHash::Sha256),
+                        )
+                    }),
+                };
+                r.map_err(hsm_err_to_status)
             })
             .await?;
         let op = if decrypt {
@@ -1961,7 +1991,8 @@ impl HsmServiceImpl {
             AuditResult::Success,
             Some(format!("key={} alg={:?}", key_handle, alg)),
         )?;
-        Ok(out)
+        // Hand the buffer to the response without another copy.
+        Ok(std::mem::take(&mut *out))
     }
 }
 
@@ -2071,6 +2102,7 @@ pub fn hsm_err_to_status(e: HsmError) -> Status {
         | HsmError::DeviceMemory
         | HsmError::ConfigError(_)
         | HsmError::AuditChainBroken(_) => Status::internal("Internal error"),
+        HsmError::BackupRejected(r) => Status::invalid_argument(format!("Backup rejected: {}", r)),
     }
 }
 
@@ -2088,7 +2120,8 @@ mod tests {
     fn service_with(fips: bool) -> HsmServiceImpl {
         let mut cfg = HsmConfig::default();
         cfg.audit.enabled = false;
-        cfg.security.pbkdf2_iterations = 1000;
+        // Lowest work factor a PIN verifier accepts (fast tests).
+        cfg.security.pbkdf2_iterations = 10_000;
         cfg.algorithms.fips_approved_only = fips;
         let hsm = Arc::new(HsmCore::try_new(&cfg).unwrap());
         HsmServiceImpl::new(
@@ -2221,6 +2254,295 @@ mod tests {
         let sh = open(svc, c).await.unwrap();
         login(svc, c, sh, CKU_USER, USER_PIN).await.unwrap();
         sh
+    }
+
+    /// Private temporary directory removed on drop (no extra dev-dependency).
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let mut rnd = [0u8; 16];
+            craton_hsm::crypto::drbg::fill_random(&mut rnd).unwrap();
+            let name: String = rnd.iter().map(|b| format!("{:02x}", b)).collect();
+            let p = std::env::temp_dir().join(format!("craton-hsm-daemon-test-{}", name));
+            std::fs::create_dir(&p).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(p)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn persistent_service(dir: &std::path::Path) -> HsmServiceImpl {
+        let mut cfg = HsmConfig::default();
+        cfg.audit.log_path = dir.join("audit.jsonl");
+        cfg.security.pbkdf2_iterations = 10_000;
+        cfg.token.persist_objects = true;
+        cfg.token.storage_path = dir.join("store");
+        let hsm = crate::core_open::open_core(&cfg).unwrap();
+        HsmServiceImpl::new(
+            hsm,
+            ServiceSettings {
+                max_random_length: 1024,
+                max_digest_length: 4096,
+                max_response_bytes: 1 << 20,
+                max_login_attempts: 3,
+                login_cooldown: Duration::from_secs(60),
+                max_sessions_per_client: 4,
+                max_objects_per_client: 16,
+                max_blocking_tasks: 2,
+            },
+        )
+    }
+
+    async fn find_all(svc: &HsmServiceImpl, c: &ConnInfo, sh: u64) -> Vec<u64> {
+        svc.find_objects(rq(
+            c,
+            FindObjectsRequest {
+                session_handle: sh,
+                template: vec![],
+                max_count: 0,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .object_handles
+    }
+
+    /// H4-03: token state and token objects survive a daemon restart; the
+    /// store is single-writer; ciphertexts decrypt after the restart.
+    #[tokio::test]
+    async fn token_state_and_objects_persist_across_restart() {
+        let dir = TestDir::new();
+        let a = client("a", false, 1);
+        let (key, ct) = {
+            let svc = persistent_service(dir.path());
+            provision(&svc).await;
+            // A second core on the same store is refused (single writer).
+            let mut cfg2 = HsmConfig::default();
+            cfg2.audit.enabled = false;
+            cfg2.audit.allow_disabled_insecure = true;
+            cfg2.token.persist_objects = true;
+            cfg2.token.storage_path = dir.path().join("store");
+            assert!(crate::core_open::open_core(&cfg2).is_err());
+
+            let sh = user_session(&svc, &a).await;
+            let key = svc
+                .generate_key(rq(
+                    &a,
+                    GenerateKeyRequest {
+                        session_handle: sh,
+                        mechanism: mech(CKM_AES_KEY_GEN),
+                        template: vec![
+                            Attribute {
+                                attr_type: CKA_VALUE_LEN as u64,
+                                value: ul(32),
+                            },
+                            Attribute {
+                                attr_type: CKA_TOKEN as u64,
+                                value: vec![1],
+                            },
+                        ],
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .key_handle;
+            let ct = svc
+                .encrypt(rq(
+                    &a,
+                    EncryptRequest {
+                        session_handle: sh,
+                        mechanism: mech(CKM_AES_GCM),
+                        key_handle: key,
+                        data: b"persist me".to_vec(),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .encrypted_data;
+            close(&svc, &a, sh).await.unwrap();
+            (key, ct)
+        };
+
+        let svc = persistent_service(dir.path());
+        let admin = client("admin", true, 100);
+        // Still initialised: InitToken now needs the (unchanged) SO PIN.
+        let sh = user_session(&svc, &a).await;
+        assert!(find_all(&svc, &a, sh).await.contains(&key));
+        let pt = svc
+            .decrypt(rq(
+                &a,
+                DecryptRequest {
+                    session_handle: sh,
+                    mechanism: mech(CKM_AES_GCM),
+                    key_handle: key,
+                    encrypted_data: ct,
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .data;
+        assert_eq!(pt, b"persist me");
+        close(&svc, &a, sh).await.unwrap();
+        let err = svc
+            .init_token(rq(
+                &admin,
+                InitTokenRequest {
+                    slot_id: 0,
+                    so_pin: b"Wrong-So-Pin-9".to_vec(),
+                    label: "x".into(),
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    /// H4-08: pre-hashed CKM_ECDSA and any hash on any curve; ECDSA
+    /// signatures are raw r||s. CKM_AES_CBC is unpadded.
+    #[tokio::test]
+    async fn ecdsa_variants_and_unpadded_cbc() {
+        let svc = service();
+        provision(&svc).await;
+        let a = client("a", false, 1);
+        let sh = user_session(&svc, &a).await;
+        let kp = svc
+            .generate_key_pair(rq(
+                &a,
+                GenerateKeyPairRequest {
+                    session_handle: sh,
+                    mechanism: mech(CKM_EC_KEY_PAIR_GEN),
+                    public_template: vec![Attribute {
+                        attr_type: CKA_EC_PARAMS as u64,
+                        value: P256_OID.to_vec(),
+                    }],
+                    private_template: vec![],
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        for (m, data) in [
+            (CKM_ECDSA, vec![0x5a; 32]),
+            (CKM_ECDSA_SHA384, b"msg".to_vec()),
+            (CKM_ECDSA_SHA512, b"msg".to_vec()),
+        ] {
+            let sig = svc
+                .sign(rq(
+                    &a,
+                    SignRequest {
+                        session_handle: sh,
+                        mechanism: mech(m),
+                        key_handle: kp.private_key_handle,
+                        data: data.clone(),
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .signature;
+            assert_eq!(sig.len(), 64, "raw r||s for P-256");
+            let valid = svc
+                .verify(rq(
+                    &a,
+                    VerifyRequest {
+                        session_handle: sh,
+                        mechanism: mech(m),
+                        key_handle: kp.public_key_handle,
+                        data,
+                        signature: sig,
+                    },
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .valid;
+            assert!(valid, "mechanism 0x{:X}", m);
+        }
+
+        let key = svc
+            .generate_key(rq(
+                &a,
+                GenerateKeyRequest {
+                    session_handle: sh,
+                    mechanism: mech(CKM_AES_KEY_GEN),
+                    template: vec![Attribute {
+                        attr_type: CKA_VALUE_LEN as u64,
+                        value: ul(32),
+                    }],
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .key_handle;
+        let cbc = |iv: u8| {
+            Some(Mechanism {
+                mechanism_type: CKM_AES_CBC as u64,
+                parameter: vec![iv; 16],
+            })
+        };
+        // Unpadded CBC requires block-aligned input and keeps its length.
+        let err = svc
+            .encrypt(rq(
+                &a,
+                EncryptRequest {
+                    session_handle: sh,
+                    mechanism: cbc(1),
+                    key_handle: key,
+                    data: vec![0; 15],
+                },
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+        let ct = svc
+            .encrypt(rq(
+                &a,
+                EncryptRequest {
+                    session_handle: sh,
+                    mechanism: cbc(2),
+                    key_handle: key,
+                    data: vec![7; 32],
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .encrypted_data;
+        assert_eq!(ct.len(), 32);
+        let pt = svc
+            .decrypt(rq(
+                &a,
+                DecryptRequest {
+                    session_handle: sh,
+                    mechanism: cbc(2),
+                    key_handle: key,
+                    encrypted_data: ct,
+                },
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .data;
+        assert_eq!(pt, vec![7; 32]);
     }
 
     #[tokio::test]

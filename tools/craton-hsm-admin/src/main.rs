@@ -9,14 +9,12 @@
 )]
 
 mod admin_core;
-mod audit_file;
 mod commands;
 mod config;
 mod error;
 mod fsutil;
 mod output;
 mod prompt;
-mod replay_guard;
 mod sys;
 
 use clap::{Parser, Subcommand};
@@ -45,6 +43,13 @@ struct Cli {
     /// Skip typed confirmation prompts (authentication is still required)
     #[arg(long, global = true, default_value_t = false)]
     yes: bool,
+
+    /// Read PINs and passphrases from standard input, one per line, instead
+    /// of the terminal (automation; secrets are never accepted from argv or
+    /// the environment). Typed confirmations then also come from stdin
+    /// unless --yes is given.
+    #[arg(long, global = true, default_value_t = false)]
+    secrets_from_stdin: bool,
 
     /// Increase diagnostic verbosity on stderr (-v info, -vv debug).
     /// RUST_LOG=<level> is also honoured. Default: warn.
@@ -90,6 +95,11 @@ enum Commands {
         /// Replace an existing output file
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Also export keys with CKA_EXTRACTABLE=FALSE (disaster recovery;
+        /// bypasses the object export policy — requires the typed
+        /// confirmation and is recorded in the audit log)
+        #[arg(long, default_value_t = false)]
+        include_non_extractable: bool,
     },
     /// Restore token objects from an encrypted backup (SO login required)
     Restore {
@@ -196,6 +206,7 @@ fn init_tracing(verbose: u8) {
 }
 
 fn run(cli: Cli) -> error::CliResult {
+    prompt::set_secrets_from_stdin(cli.secrets_from_stdin);
     let ctx = Ctx {
         config_path: cli.config,
         json: cli.json,
@@ -231,7 +242,16 @@ fn run(cli: Cli) -> error::CliResult {
             output,
             allow_empty,
             force,
-        } => commands::backup::create_backup(&ctx, &output, allow_empty, force),
+            include_non_extractable,
+        } => commands::backup::create_backup(
+            &ctx,
+            &output,
+            commands::backup::BackupOptions {
+                allow_empty,
+                force,
+                include_non_extractable,
+            },
+        ),
         Commands::Restore { input, verify_only } => {
             commands::backup::restore_backup(&ctx, &input, verify_only)
         }

@@ -2,33 +2,29 @@
 // Copyright 2026 Craton Software Company
 //! The single place where the admin CLI obtains an [`HsmCore`] (H5-02).
 //!
-//! # Standalone (ephemeral) mode
+//! [`open_core`] uses the persistent constructor `HsmCore::open`, which loads
+//! the token state (initialised flag, label, PIN verifiers, lockout counters,
+//! wrapped storage keys) from `token.storage_path` and takes the exclusive
+//! single-writer locks on the encrypted store and on the audit log. While the
+//! daemon (or another CLI instance) holds them, every command that needs the
+//! core fails with a clear "stop the daemon first" error instead of forking
+//! the audit chain or writing the store concurrently.
 //!
-//! The core library currently only offers `HsmCore::try_new`, which builds a
-//! fresh, in-memory object store and a token with no persisted PIN state.
-//! Anything a command changed through such a core would be lost when the
-//! process exits, while side files shared with a real deployment (lockout
-//! state, replay guard) would still be modified. Therefore every command that
-//! needs the persisted token state calls [`AdminCore::require_persistent`]
-//! and fails closed with [`CliError::Refused`] until [`open_core`] is switched
-//! to the persistent constructor.
+//! With `token.persist_objects = false` the configured token is ephemeral:
+//! nothing the CLI changed would survive, so every mutating command is
+//! refused ([`AdminCore::require_persistent`]).
 //!
-//! # Switching to the persistent core
-//!
-//! When the core exposes a persistent open API (e.g.
-//! `HsmCore::open_persistent(&HsmConfig) -> HsmResult<HsmCore>` that loads
-//! token/PIN state and uses `ObjectStore::with_persistence` + `load_from_store`
-//! under an exclusive single-writer lock), change the body of [`open_core`] to
-//! call it and return `CoreMode::Persistent`. No command needs to change:
-//! the refusals disappear and SO authentication, typed confirmation and
-//! audit recording become active automatically.
+//! Authentication uses the regular PKCS#11 session/login services of the
+//! core (lockout, rate limiting and audit records are applied there), and the
+//! pre-operational self-tests run before any command touches keys (A1-06).
 
 use crate::config::LoadedConfig;
 use crate::error::{CliError, CliResult};
 use craton_hsm::audit::log::{AuditOperation, AuditResult};
 use craton_hsm::core::HsmCore;
 use craton_hsm::error::HsmError;
-use craton_hsm::pkcs11_abi::constants::{CKU_SO, CKU_USER};
+use craton_hsm::pkcs11_abi::constants::{CKF_RW_SESSION, CKF_SERIAL_SESSION, CKU_SO, CKU_USER};
+use craton_hsm::pkcs11_abi::types::{CK_SESSION_HANDLE, CK_SLOT_ID};
 use craton_hsm::token::token::Token;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -36,6 +32,9 @@ use zeroize::Zeroizing;
 /// Maximum PIN prompts per invocation. The token's own persisted rate
 /// limiting and lockout remain the primary brute-force control.
 const MAX_AUTH_ATTEMPTS: u32 = 3;
+
+/// The CLI administers slot 0.
+pub const SLOT: CK_SLOT_ID = 0;
 
 /// PKCS#11 role used to authenticate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -62,14 +61,13 @@ impl Role {
     }
 }
 
-/// Whether the core the CLI operates on reflects the persisted token state.
+/// Whether the core the CLI operates on reflects persisted token state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreMode {
-    /// Fresh in-memory core: token state is NOT loaded from disk and changes
-    /// are NOT persisted.
+    /// `token.persist_objects = false`: token state is not persisted, so
+    /// changes would be lost when the CLI exits.
     Ephemeral,
     /// Core opened on the persisted token state.
-    #[allow(dead_code)] // becomes live once `open_core` uses the persistent constructor
     Persistent,
 }
 
@@ -80,17 +78,29 @@ pub struct AdminCore {
 
 /// Obtain the HSM core for a command. Every command goes through here.
 pub fn open_core(cfg: &LoadedConfig) -> CliResult<AdminCore> {
-    // HANDOFF: replace with the persistent constructor and CoreMode::Persistent.
-    let hsm = HsmCore::try_new(&cfg.config).map_err(|e| match e {
+    let hsm = HsmCore::open(&cfg.config).map_err(|e| match e {
         HsmError::AuditChainBroken(reason) => CliError::Integrity(format!(
             "Audit log cannot be opened safely ({reason}). Run 'audit verify-chain'."
         )),
+        HsmError::DeviceError => CliError::Refused(
+            "The token store or audit log is locked by another process (single writer). \
+             Stop the craton-hsm daemon (and any other craton-hsm-admin or PKCS#11 \
+             application using this configuration) before running administrative commands."
+                .into(),
+        ),
         other => CliError::General(format!("Failed to initialise the HSM core: {other}")),
     })?;
-    Ok(AdminCore {
-        hsm,
-        mode: CoreMode::Ephemeral,
-    })
+    hsm.run_self_tests().map_err(|e| {
+        CliError::Integrity(format!(
+            "Pre-operational self-tests failed ({e}); the module is in the error state."
+        ))
+    })?;
+    let mode = if hsm.object_store().has_persistence() {
+        CoreMode::Persistent
+    } else {
+        CoreMode::Ephemeral
+    };
+    Ok(AdminCore { hsm, mode })
 }
 
 impl AdminCore {
@@ -103,16 +113,14 @@ impl AdminCore {
     }
 
     /// Fail closed if the operation would have no lasting effect because the
-    /// core is not backed by persisted token state.
+    /// configured token is not persistent.
     pub fn require_persistent(&self, operation: &str) -> CliResult {
         match self.mode {
             CoreMode::Persistent => Ok(()),
             CoreMode::Ephemeral => Err(CliError::Refused(format!(
-                "'{operation}' is not supported in standalone mode: this build of \
-                 craton-hsm-admin cannot open the persisted token state, so the operation \
-                 would have no lasting effect (and could not authenticate the Security \
-                 Officer). No changes were made. Perform it through the PKCS#11 interface \
-                 or the daemon instead."
+                "'{operation}' is not supported for an ephemeral token: the configuration sets \
+                 token.persist_objects = false, so the operation would have no lasting effect. \
+                 No changes were made."
             ))),
         }
     }
@@ -133,63 +141,62 @@ impl AdminCore {
     pub fn token(&self) -> CliResult<Arc<Token>> {
         self.hsm
             .slot_manager()
-            .get_token(0)
+            .get_token(SLOT)
             .map_err(|e| CliError::General(format!("Failed to access token: {e}")))
     }
 
-    /// Authenticate `role` with PIN prompts. Returns a guard that logs out
-    /// when dropped (including on every early `?` return).
-    pub fn login(&self, role: Role) -> CliResult<LoginGuard> {
+    /// Open an R/W session and authenticate `role` with PIN prompts
+    /// (`C_Login` through the core: lockout, rate limit, audit record, and
+    /// the slot's token objects are loaded). The returned guard logs out and
+    /// closes the session when dropped (including on every early return).
+    pub fn login(&self, role: Role) -> CliResult<LoginGuard<'_>> {
         self.login_with_pin(role).map(|(guard, _pin)| guard)
     }
 
     /// Like [`AdminCore::login`] but also returns the verified PIN (needed by
-    /// `C_SetPIN`-style operations), wrapped in `Zeroizing`.
-    pub fn login_with_pin(&self, role: Role) -> CliResult<(LoginGuard, Zeroizing<String>)> {
+    /// `C_SetPIN`), wrapped in `Zeroizing`.
+    pub fn login_with_pin(&self, role: Role) -> CliResult<(LoginGuard<'_>, Zeroizing<String>)> {
         let token = self.token()?;
         if !token.is_initialized() {
             return Err(CliError::Auth(
                 "Token is not initialized. Run 'token init' first.".into(),
             ));
         }
+        let session = self
+            .hsm
+            .open_process_session(SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION)
+            .map_err(|e| CliError::General(format!("Cannot open a session: {e}")))?;
+        let guard = LoginGuard {
+            hsm: &self.hsm,
+            session,
+            logged_in: false,
+        };
+        let mut guard = guard;
         for attempt in 1..=MAX_AUTH_ATTEMPTS {
             let pin = crate::prompt::read_secret(&format!("Enter {} PIN: ", role.name()))?;
-            match token.login(role.ck_user(), pin.as_bytes()) {
+            match self.hsm.login(session, role.ck_user(), pin.as_bytes()) {
                 Ok(()) => {
-                    self.record(
-                        AuditOperation::Login {
-                            user_type: u64::from(role.ck_user()),
-                        },
-                        Ok(()),
-                        "login",
-                    )?;
-                    return Ok((LoginGuard { token }, pin));
+                    guard.logged_in = true;
+                    return Ok((guard, pin));
                 }
-                Err(e) => {
-                    let _ = self.record(
-                        AuditOperation::Login {
-                            user_type: u64::from(role.ck_user()),
-                        },
-                        Err(&e),
-                        "login",
-                    );
-                    match e {
-                        HsmError::PinLocked => {
-                            return Err(CliError::Auth(format!("{} PIN is locked.", role.name())))
-                        }
-                        HsmError::PinIncorrect if attempt < MAX_AUTH_ATTEMPTS => {
-                            eprintln!(
-                                "Authentication failed. {} attempt(s) remaining.",
-                                MAX_AUTH_ATTEMPTS - attempt
-                            );
-                            std::thread::sleep(std::time::Duration::from_secs(1));
-                        }
-                        HsmError::PinIncorrect => break,
-                        other => {
-                            return Err(CliError::Auth(format!("Authentication failed: {other}")))
-                        }
+                Err(e) => match e {
+                    HsmError::PinLocked => {
+                        return Err(CliError::Auth(format!("{} PIN is locked.", role.name())))
                     }
-                }
+                    HsmError::PinIncorrect if attempt < MAX_AUTH_ATTEMPTS => {
+                        eprintln!(
+                            "Authentication failed. {} attempt(s) remaining.",
+                            MAX_AUTH_ATTEMPTS - attempt
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                    HsmError::PinRateLimited if attempt < MAX_AUTH_ATTEMPTS => {
+                        eprintln!("Too many recent attempts; waiting before retrying.");
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                    }
+                    HsmError::PinIncorrect | HsmError::PinRateLimited => break,
+                    other => return Err(CliError::Auth(format!("Authentication failed: {other}"))),
+                },
             }
         }
         Err(CliError::Auth(
@@ -198,14 +205,17 @@ impl AdminCore {
         ))
     }
 
-    /// Record an administrative event in the tamper-evident audit log (H5-20).
-    ///
-    /// Only active on a persistent core: an ephemeral core must not append to
-    /// a log that a running daemon may be writing (two writers would fork the
-    /// hash chain), and in ephemeral mode every mutating command is refused
-    /// before reaching this point anyway.
+    /// Actor string recorded in audit events (H5-20).
+    pub fn actor(&self, action: &str) -> String {
+        format!("craton-hsm-admin:{action}:{}", os_user())
+    }
+
+    /// Record an administrative event in the tamper-evident audit log
+    /// (synchronously: the command fails if the event cannot be made
+    /// durable in fail-closed mode). Only active on a persistent core.
     pub fn record(
         &self,
+        session: CK_SESSION_HANDLE,
         operation: AuditOperation,
         result: Result<(), &HsmError>,
         action: &str,
@@ -215,47 +225,44 @@ impl AdminCore {
         }
         let result = match result {
             Ok(()) => AuditResult::Success,
-            Err(e) => AuditResult::Failure(hsm_error_code(e)),
+            Err(e) => AuditResult::Failure(u64::from(craton_hsm::pkcs11_abi::types::CK_RV::from(
+                e.clone(),
+            ))),
         };
-        let detail = format!("craton-hsm-admin:{action}:{}", os_user());
         self.hsm
             .audit_log()
-            .record(0, operation, result, Some(detail))
+            .record_sync(session as u64, operation, result, Some(self.actor(action)))
             .map_err(|e| CliError::Integrity(format!("Failed to write audit record: {e}")))
     }
 }
 
 impl Drop for AdminCore {
     fn drop(&mut self) {
-        // Make sure queued audit records reach the disk before exit.
-        self.hsm.audit_log().flush();
+        // Zeroize keys/PIN verifiers and make queued audit records durable.
+        self.hsm.finalize();
     }
 }
 
-/// Logs the token out when dropped.
-pub struct LoginGuard {
-    token: Arc<Token>,
+/// An authenticated R/W session; logs out and closes the session when
+/// dropped.
+pub struct LoginGuard<'a> {
+    hsm: &'a HsmCore,
+    session: CK_SESSION_HANDLE,
+    logged_in: bool,
 }
 
-impl LoginGuard {
-    pub fn token(&self) -> &Token {
-        &self.token
+impl LoginGuard<'_> {
+    pub fn session(&self) -> CK_SESSION_HANDLE {
+        self.session
     }
 }
 
-impl Drop for LoginGuard {
+impl Drop for LoginGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.token.logout();
-    }
-}
-
-/// Coarse numeric code for an audit failure record.
-fn hsm_error_code(e: &HsmError) -> u64 {
-    match e {
-        HsmError::PinIncorrect => 0xA0,
-        HsmError::PinLocked => 0xA4,
-        HsmError::TokenNotInitialized => 0xE1,
-        _ => 0x05,
+        if self.logged_in {
+            let _ = self.hsm.logout(self.session);
+        }
+        let _ = self.hsm.close_session(self.session);
     }
 }
 
@@ -272,7 +279,7 @@ fn os_user() -> String {
 }
 
 /// Read and confirm a new PIN, enforcing the configured length limits and
-/// the complexity policy.
+/// the core PIN policy (the same rules as C_InitPIN / C_SetPIN, H5-12).
 pub fn prompt_new_pin(cfg: &LoadedConfig, what: &str) -> CliResult<Zeroizing<String>> {
     let pin = crate::prompt::read_secret(&format!("Enter new {what} PIN: "))?;
     let confirm = crate::prompt::read_secret(&format!("Confirm new {what} PIN: "))?;
