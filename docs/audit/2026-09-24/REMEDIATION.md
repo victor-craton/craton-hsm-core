@@ -8,14 +8,11 @@ Status of **every** finding of the nine reports of the
 wave-2 release/supply-chain/docs branch (`claude/audit-fixes2-rel`) and
 `git log`; commit IDs are the short hashes on those branches.
 
-> **Integrator:** rows marked *Pending wave-2 (abi)* or *Pending wave-2
-> (core)* are being implemented concurrently by the wave-2 `abi` agent
-> (`src/pkcs11_abi`, `src/session`, tests: `unsafe extern "C"` exports,
-> v3.0 interface functions, full test suite green) and `core` agent (core /
-> token / audit / config / crypto / store, daemon, admin CLI: persistent
-> `HsmCore::open` in the daemon and CLI, FIPS default backend `awslc`, GCM
-> counter persistence, RSA v1.5 decryption switch). Update those rows (and
-> the summary below) when merging them.
+> **Status note:** the wave-2 rows were reconciled against the wave-2 commit
+> messages. "Fixed (wave 2)" means a commit on `claude/audit-fixes2-abi` or
+> `claude/audit-fixes2-core` names the finding; it has **not** been re-verified
+> finding by finding. The rows still open after wave 2 are H1-32, H1-33,
+> A2-23, A2-27, A3-19 and A3-21. See [HANDOFF.md](HANDOFF.md).
 
 ## Legend
 
@@ -23,7 +20,8 @@ wave-2 release/supply-chain/docs branch (`claude/audit-fixes2-rel`) and
 |---|---|
 | **Fixed** | Fixed in code / configuration / documentation; regression test where practical. |
 | **Partially fixed** | The exploitable or non-conformant part is fixed; a residual is described in *Notes* (often a design limit or an owner action). |
-| **Pending wave-2 (abi \| core)** | Assigned to a wave-2 agent that is working on it; not merged at the time of writing. |
+| **Fixed (wave 2)** | Named in a wave-2 commit message; not independently re-verified. |
+| **Open — not completed in wave 2** | Wave-2 agents stopped (usage limit) before reaching it. |
 | **Not fixable in code** | Needs an organisational, certification or repository-settings action — see [Owner actions](#not-fixable-in-code--owner-actions). |
 | **Documented** | Observation; accepted and described in the documentation. |
 | **Open (unassigned)** | Requires code, not assigned to any agent yet. |
@@ -34,8 +32,8 @@ wave-2 release/supply-chain/docs branch (`claude/audit-fixes2-rel`) and
 |---|---|
 | Fixed | 152 |
 | Partially fixed | 47 |
-| Pending wave-2 (abi) | 35 |
-| Pending wave-2 (core) | 6 |
+| Fixed in wave 2 (ABI, core, daemon, admin; per commit messages — verify against the test run in [HANDOFF.md](HANDOFF.md)) | 35 |
+| Open — not completed in wave 2 (usage limit reached) | 6 |
 | Documented | 2 |
 | Open (unassigned) | 1 |
 | n/a (positive observations) | 1 |
@@ -71,47 +69,47 @@ Cross-cutting top issues from the [consolidated summary](README.md#top-cross-cut
 |---|---|---|---|---|---|
 | H1-01 | Critical | C_InitToken destroys all objects before it verifies the SO PIN | **Fixed** | state `e751482` `6ed0a17` `61f8076` | `HsmCore::init_token`: SessionExists, SO PIN verified under lockout, then only that slot is wiped |
 | H1-02 | High | CKA_SENSITIVE bypass: sensitive but extractable keys are readable in plaintext | **Fixed** | state `e751482` `6ed0a17` `61f8076` | `CKA_VALUE`/private components never returned for sensitive or non-extractable keys |
-| H1-03 | High | C_WrapKey does not authorize the key being wrapped | **Pending wave-2 (abi)** | — | C_WrapKey must check the wrapped key's private/login status and `KeyUsage::Wrap` (state.md) |
-| H1-04 | High | C_SetOperationState re-binds a saved operation to any key, with no authorization re-check | **Pending wave-2 (abi)** | state (slot-scoped lookup) | C_SetOperationState must re-check authorization/usage of the restored key |
+| H1-03 | High | C_WrapKey does not authorize the key being wrapped | **Fixed (wave 2)** | — | C_WrapKey must check the wrapped key's private/login status and `KeyUsage::Wrap` (state.md) |
+| H1-04 | High | C_SetOperationState re-binds a saved operation to any key, with no authorization re-check | **Fixed (wave 2)** | state (slot-scoped lookup) | C_SetOperationState must re-check authorization/usage of the restored key |
 | H1-05 | High | SO sessions count as "logged in" for access to private (USER) objects | **Fixed** | state `e751482` `6ed0a17` `61f8076` | only `CKU_USER` sessions are "logged in" for key use / private objects |
 | H1-06 | High | Closing all sessions does not log out the token; later sessions inherit the login | **Fixed** | state `e751482` `6ed0a17` `61f8076` | closing the last session logs the token out (`hsm.close_session` / `close_all_sessions`) |
-| H1-07 | High | C_DestroyObject destroys private objects without login | **Pending wave-2 (abi)** | state (store: `CKR_ACTION_PROHIBITED` for non-destroyable) | C_DestroyObject must require user login for `CKA_PRIVATE` objects |
-| H1-08 | High | C_CopyObject lets the copy escape the source object's policy | **Pending wave-2 (abi)** | state (provenance attrs rejected on copy) | C_CopyObject copy rules for PRIVATE/TOKEN/MODIFIABLE/usage flags |
+| H1-07 | High | C_DestroyObject destroys private objects without login | **Fixed (wave 2)** | state (store: `CKR_ACTION_PROHIBITED` for non-destroyable) | C_DestroyObject must require user login for `CKA_PRIVATE` objects |
+| H1-08 | High | C_CopyObject lets the copy escape the source object's policy | **Fixed (wave 2)** | state (provenance attrs rejected on copy) | C_CopyObject copy rules for PRIVATE/TOKEN/MODIFIABLE/usage flags |
 | H1-09 | High | CKA_TRUSTED and the provenance attributes can be set by any creator, so CKA_WRAP_WITH_TRUSTED has no effect | **Fixed** | state `e751482` `6ed0a17` `61f8076` | `CKA_TRUSTED`/provenance attributes not self-assertable (`ObjectOrigin`) |
-| H1-10 | High | Key-creating functions do not require login | **Pending wave-2 (abi)** | — | login requirement + template validation for key-creating functions |
-| H1-11 | Medium | C_DeriveKey uses the base key without login, lifecycle or key-type checks, and misreads the mechanism param… | **Pending wave-2 (abi)** | crypto (`CK_ECDH1_DERIVE_PARAMS` parsed) | C_DeriveKey login/lifecycle/key-type checks |
-| H1-12 | Medium | C_DigestKey has no login check, and the digested key bytes are exported in plaintext by C_GetOperationState | **Pending wave-2 (abi)** | — | C_DigestKey login check; digested key bytes in saved operation state |
+| H1-10 | High | Key-creating functions do not require login | **Fixed (wave 2)** | — | login requirement + template validation for key-creating functions |
+| H1-11 | Medium | C_DeriveKey uses the base key without login, lifecycle or key-type checks, and misreads the mechanism param… | **Fixed (wave 2)** | crypto (`CK_ECDH1_DERIVE_PARAMS` parsed) | C_DeriveKey login/lifecycle/key-type checks |
+| H1-12 | Medium | C_DigestKey has no login check, and the digested key bytes are exported in plaintext by C_GetOperationState | **Fixed (wave 2)** | — | C_DigestKey login check; digested key bytes in saved operation state |
 | H1-13 | Medium | No slot isolation for objects: one global ObjectStore, and object handles are accepted from any slot | **Fixed** | state `e751482` `6ed0a17` `61f8076` | per-slot object lookup (`get_object_in_slot`, slot-scoped find) |
-| H1-14 | Medium | Key-creation templates silently drop restrictive attributes | **Pending wave-2 (abi)** | — | reject/validate unknown template attributes (`apply_attribute_ctx` semantics) |
-| H1-15 | Medium | No check that key class or type matches the mechanism in the *Init functions (cross-algorithm key use) | **Pending wave-2 (abi)** | — | key-type/mechanism consistency at `*Init` (`CKR_KEY_TYPE_INCONSISTENT`) — same as A1-30 |
+| H1-14 | Medium | Key-creation templates silently drop restrictive attributes | **Fixed (wave 2)** | — | reject/validate unknown template attributes (`apply_attribute_ctx` semantics) |
+| H1-15 | Medium | No check that key class or type matches the mechanism in the *Init functions (cross-algorithm key use) | **Fixed (wave 2)** | — | key-type/mechanism consistency at `*Init` (`CKR_KEY_TYPE_INCONSISTENT`) — same as A1-30 |
 | H1-16 | Medium | Mechanism parameters are ignored or misread (GCM, CBC and OAEP semantics) | **Partially fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | typed GCM/CBC/OAEP/CTR/ECDH params honoured; generic `extract_mechanism_param` still returns empty for oversized params (abi) |
-| H1-17 | Medium | Restored hash-then-sign and hash-then-verify operations lose their state, so the wrong message is signed or… | **Pending wave-2 (abi)** | — | hash-then-sign state lost on C_SetOperationState (= A2-06) |
+| H1-17 | Medium | Restored hash-then-sign and hash-then-verify operations lose their state, so the wrong message is signed or… | **Fixed (wave 2)** | — | hash-then-sign state lost on C_SetOperationState (= A2-06) |
 | H1-18 | Medium | Session objects outlive their sessions | **Fixed** | state `e751482` `6ed0a17` `61f8076` | session objects destroyed on close |
 | H1-19 | Medium | C_Login ignores failure of the per-session login update; token and session login states diverge | **Fixed** | state `e751482` `6ed0a17` `61f8076` | `HsmCore::login` is atomic and rolled back on failure |
-| H1-20 | Medium | SP 800-57 lifecycle state is enforced only in Encrypt/Decrypt/Sign/VerifyInit | **Pending wave-2 (abi)** | state (`check_lifecycle` fails closed) | lifecycle/usage checks in C_WrapKey/UnwrapKey/DeriveKey/CopyObject |
-| H1-21 | Medium | Plaintext key material is copied into heap buffers that are never zeroized | **Pending wave-2 (abi)** | — | `Zeroizing` for key copies in C_WrapKey/C_DeriveKey |
-| H1-22 | Medium | Unsound public API: 112 safe `pub extern "C" fn` items dereference raw pointers, and CI suppresses the lint | **Pending wave-2 (abi)** | ci (lint no longer suppressed) | make exports `unsafe extern "C"`; callers in tests/fuzz need `unsafe {}` |
-| H1-23 | Low | Slices are built from caller lengths before bounds checks, and inconsistently | **Pending wave-2 (abi)** | — | bounds checks before slice construction |
-| H1-24 | Low | Fork handling: a child process cannot reinitialize, and a child's C_Finalize writes to the parent's audit log | **Pending wave-2 (abi)** | — | fork handling / child C_Finalize audit write |
-| H1-25 | Low | C_Initialize ignores CK_C_INITIALIZE_ARGS; C_Finalize leaves the core alive in other threads' caches | **Pending wave-2 (abi)** | — | validate `CK_C_INITIALIZE_ARGS`; drop finalized core from thread-local caches |
-| H1-26 | Low | Deviations from the two-call and CKR_BUFFER_TOO_SMALL rules | **Pending wave-2 (abi)** | — | two-call / `CKR_BUFFER_TOO_SMALL` rules |
+| H1-20 | Medium | SP 800-57 lifecycle state is enforced only in Encrypt/Decrypt/Sign/VerifyInit | **Fixed (wave 2)** | state (`check_lifecycle` fails closed) | lifecycle/usage checks in C_WrapKey/UnwrapKey/DeriveKey/CopyObject |
+| H1-21 | Medium | Plaintext key material is copied into heap buffers that are never zeroized | **Fixed (wave 2)** | — | `Zeroizing` for key copies in C_WrapKey/C_DeriveKey |
+| H1-22 | Medium | Unsound public API: 112 safe `pub extern "C" fn` items dereference raw pointers, and CI suppresses the lint | **Fixed (wave 2)** | ci (lint no longer suppressed) | make exports `unsafe extern "C"`; callers in tests/fuzz need `unsafe {}` |
+| H1-23 | Low | Slices are built from caller lengths before bounds checks, and inconsistently | **Fixed (wave 2)** | — | bounds checks before slice construction |
+| H1-24 | Low | Fork handling: a child process cannot reinitialize, and a child's C_Finalize writes to the parent's audit log | **Fixed (wave 2)** | — | fork handling / child C_Finalize audit write |
+| H1-25 | Low | C_Initialize ignores CK_C_INITIALIZE_ARGS; C_Finalize leaves the core alive in other threads' caches | **Fixed (wave 2)** | — | validate `CK_C_INITIALIZE_ARGS`; drop finalized core from thread-local caches |
+| H1-26 | Low | Deviations from the two-call and CKR_BUFFER_TOO_SMALL rules | **Fixed (wave 2)** | — | two-call / `CKR_BUFFER_TOO_SMALL` rules |
 | H1-27 | Low | C_SetAttributeValue is non-atomic, not persisted, and stricter than the specification | **Partially fixed** | state `e751482` `6ed0a17` `61f8076` | SetAttributeValue persisted; atomicity/spec strictness pending abi |
-| H1-28 | Low | C_CreateObject: weak attribute typing, and login rules only partly applied | **Pending wave-2 (abi)** | — | C_CreateObject attribute typing and login rules |
+| H1-28 | Low | C_CreateObject: weak attribute typing, and login rules only partly applied | **Fixed (wave 2)** | — | C_CreateObject attribute typing and login rules |
 | H1-29 | Low | Handle allocators wrap around, and colliding inserts replace live sessions or objects | **Fixed** | state `e751482` `6ed0a17` `61f8076` | CSPRNG handles checked against live tables; occupied entries never replaced (H3-19) |
 | H1-30 | Low | PIN handling edge cases: C_SetPIN in R/O sessions, NULL PIN treated as empty, PBKDF2 run under the slot-wid… | **Partially fixed** | state `e751482` `6ed0a17` `61f8076` | PBKDF2 outside the auth lock (H3-09); R/O C_SetPIN and NULL-PIN handling pending abi |
 | H1-31 | Low | Key-pair generation: an unknown EC curve silently becomes P-256, RSA size is truncated, and inserts are not… | **Partially fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | unknown curves rejected (`CKR_CURVE_NOT_SUPPORTED`); absent CKA_EC_PARAMS default, RSA size truncation, atomic inserts pending abi |
-| H1-32 | Low | Memory used by multi-part operations is bounded per session, not in total | **Pending wave-2 (abi)** | — | global bound for multi-part operation memory |
-| H1-33 | Low | Windows audit-file ACL: unaligned casts and a DACL applied only after the file is created | **Pending wave-2 (abi)** | — | `src/platform_acl.rs` Windows DACL at creation |
+| H1-32 | Low | Memory used by multi-part operations is bounded per session, not in total | **Open — not completed in wave 2** | — | global bound for multi-part operation memory |
+| H1-33 | Low | Windows audit-file ACL: unaligned casts and a DACL applied only after the file is created | **Open — not completed in wave 2** | — | `src/platform_acl.rs` Windows DACL at creation |
 | H1-34 | Informational | Token objects are never persisted through the PKCS#11 ABI | **Fixed** | state `e751482` `6ed0a17` `61f8076` | token objects persisted through the ABI when `persist_objects = true` |
-| H1-35 | Informational | Specification and interoperability deviations | **Pending wave-2 (abi)** | — | remaining specification/interoperability deviations |
-| H1-36 | Low | Inconsistent session/object lock order can deadlock two threads that share a session | **Pending wave-2 (abi)** | — | session/object lock order |
+| H1-35 | Informational | Specification and interoperability deviations | **Fixed (wave 2)** | — | remaining specification/interoperability deviations |
+| H1-36 | Low | Inconsistent session/object lock order can deadlock two threads that share a session | **Fixed (wave 2)** | — | session/object lock order |
 
 ### H2 — Cryptography ([report](H2-crypto-security.md))
 
 | ID | Severity | Finding | Status | Fixed by (commit / area) | Notes |
 |---|---|---|---|---|---|
 | H2-01 | High | AES-GCM ignores `CK_GCM_PARAMS`: AAD is never authenticated, and the caller's IV and tag length are dropped | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | `CK_GCM_PARAMS` IV/AAD/tag length honoured; module IV in approved mode |
-| H2-02 | High | AES-GCM nonce uniqueness is process-local and can be reset by an attacker, giving deterministic nonce reuse | **Pending wave-2 (core)** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` (random 96-bit module IVs, (key,IV) repeat rejection) | persist GCM invocation counts per key across restarts |
+| H2-02 | High | AES-GCM nonce uniqueness is process-local and can be reset by an attacker, giving deterministic nonce reuse | **Fixed (wave 2)** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` (random 96-bit module IVs, (key,IV) repeat rejection) | persist GCM invocation counts per key across restarts |
 | H2-03 | High | RSA private-key operations are unblinded and variable-time (Marvin / RUSTSEC-2023-0071) | **Partially fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f`; rel `d4b891a` | blinding on every RustCrypto RSA private op; no v1.5 decryption; AWS-LC in fips builds. Bignum not constant time — no fixed `rsa` release (see Not fixable) |
 | H2-04 | Medium | Backend parity: the aws-lc backend skips every hardening control and computes different results | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | AWS-LC backend parity (typed params, raw ECDH Z, zeroized buffers) |
 | H2-05 | Medium | The `fips` feature does not select a validated module, and POST exercises only RustCrypto | **Partially fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | `fips` implies `awslc-backend`, POST refuses non-validated backend; `fips_defaults()` must select `awslc` (core) — until then `--features fips` with default features stays in the error state (CI `features` job gate) |
@@ -173,7 +171,7 @@ Cross-cutting top issues from the [consolidated summary](README.md#top-cross-cut
 |---|---|---|---|---|---|
 | H4-01 | Critical | Login state is token-global and not bound to any client; SO and User are not separated | **Fixed** | daemon `61612af` |  |
 | H4-02 | High | Unauthenticated `InitToken` on a token that is uninitialised at every start: the first caller becomes SO | **Fixed** | daemon `61612af` |  |
-| H4-03 | High | Key material and token state are never persisted by the daemon, despite chart persistence settings | **Pending wave-2 (core)** | daemon `61612af` (refuses CKA_TOKEN while ephemeral) | daemon `open_core` → persistent `HsmCore::open`; note `try_new` already opens the persistent store since the state merge — verify end to end |
+| H4-03 | High | Key material and token state are never persisted by the daemon, despite chart persistence settings | **Fixed (wave 2)** | daemon `61612af` (refuses CKA_TOKEN while ephemeral) | daemon `open_core` → persistent `HsmCore::open`; note `try_new` already opens the persistent store since the state merge — verify end to end |
 | H4-04 | High | TLS handshake runs inside the accept loop with no timeout; no connection cap, idle timeout or keepalive | **Fixed** | daemon `61612af` |  |
 | H4-05 | High | Committed PINs, a public plaintext test endpoint and disabled certificate validation in client artefacts | **Partially fixed** | kreya `513515f` | credentials/endpoint removed from the tree, TLS validation re-enabled; PIN rotation, endpoint shutdown and history scrub are owner actions |
 | H4-06 | High | Caller templates can override security-critical key attributes (key injection, type confusion, forged prove… | **Fixed** | daemon `61612af` |  |
@@ -205,8 +203,8 @@ Cross-cutting top issues from the [consolidated summary](README.md#top-cross-cut
 | ID | Severity | Finding | Status | Fixed by (commit / area) | Notes |
 |---|---|---|---|---|---|
 | H5-01 | High | `token init` resets persisted lockout state without authentication or confirmation | **Fixed** | admin `20c5c9e` |  |
-| H5-02 | High | The CLI runs on a throwaway in-memory core: backups are empty and changes do not persist, yet it reports su… | **Pending wave-2 (core)** | admin `20c5c9e` (fail-closed standalone mode, exit 5) | `admin_core::open_core` → persistent `HsmCore::open`; re-enable commands and update CLI tests |
-| H5-03 | High | `audit verify-chain` reports VALID for a tampered audit log; exports are always empty | **Pending wave-2 (core)** | admin `20c5c9e` | CLI verifier mirrors the old **unkeyed** SHA-256 chain; the core log is now a keyed HMAC chain → switch to `AuditLog::verify_file(log, key)` |
+| H5-02 | High | The CLI runs on a throwaway in-memory core: backups are empty and changes do not persist, yet it reports su… | **Fixed (wave 2)** | admin `20c5c9e` (fail-closed standalone mode, exit 5) | `admin_core::open_core` → persistent `HsmCore::open`; re-enable commands and update CLI tests |
+| H5-03 | High | `audit verify-chain` reports VALID for a tampered audit log; exports are always empty | **Fixed (wave 2)** | admin `20c5c9e` | CLI verifier mirrors the old **unkeyed** SHA-256 chain; the core log is now a keyed HMAC chain → switch to `AuditLog::verify_file(log, key)` |
 | H5-04 | High | `restore` consumes the backup ID before the objects are stored durably | **Fixed** | admin `20c5c9e` |  |
 | H5-05 | Medium | Backup, restore and audit export perform no authentication | **Fixed** | admin `20c5c9e` |  |
 | H5-06 | Medium | Replay-guard file location, symlink handling and locking | **Partially fixed** | admin `20c5c9e` | CLI replay guard hardened; library `PersistentReplayGuard` hardening/authentication pending core |
@@ -257,7 +255,7 @@ Cross-cutting top issues from the [consolidated summary](README.md#top-cross-cut
 |---|---|---|---|---|---|
 | A1-01 | Blocker | `C_GenerateRandom` bypasses the SP 800-90A DRBG and returns raw OS RNG output | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | `C_GenerateRandom` served by the module DRBG / AWS-LC DRBG |
 | A1-02 | Blocker | No compliant entropy source (ESV) and no SP 800-90A health testing/CAST for the HMAC_DRBG | **Partially fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | RCT/APT, start-up test, DRBG KAT; ESV certificate is an owner action |
-| A1-03 | Blocker | Approved services run on non-validated implementations, even when the "FIPS" configuration is used | **Pending wave-2 (core)** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | fips builds refuse non-validated backends; `fips_defaults()` → `awslc` and remaining RustCrypto-only services (core) |
+| A1-03 | Blocker | Approved services run on non-validated implementations, even when the "FIPS" configuration is used | **Fixed (wave 2)** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | fips builds refuse non-validated backends; `fips_defaults()` → `awslc` and remaining RustCrypto-only services (core) |
 | A1-04 | Blocker | Pre-operational and conditional self-tests don't meet IG 10.3.A/10.3.B and don't test the implementations i… | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` |  |
 | A1-05 | Blocker | Software integrity test is optional, bypassable, uses an unvalidated algorithm, and is documented as a diff… | **Partially fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f`; ci `315a716`; rel `869b94a` | fails closed, release signs `.sig`, CI tests the fail-closed path; Ed25519 runs on unvalidated `ed25519-dalek` |
 | A1-06 | Blocker | Cryptographic boundary, module identity and versioning are inconsistent; the in-boundary crypto is reachabl… | **Partially fixed** | docs (ci wave-1 `a91bbc8` `4e8d19b` `52c077f` …; rel wave-2 `53b37e1` `9399de7` `a0b396f` `2c4e877`) | one boundary definition; `C_GetInfo.libraryVersion` still 0.1 (abi); rlib API not POST-gated |
@@ -284,7 +282,7 @@ Cross-cutting top issues from the [consolidated summary](README.md#top-cross-cut
 | A1-27 | Observation | Physical and non-invasive security "N/A" claims | **Documented** | docs (ci wave-1 `a91bbc8` `4e8d19b` `52c077f` …; rel wave-2 `53b37e1` `9399de7` `a0b396f` `2c4e877`) |  |
 | A1-28 | Observation | Integrity check reads the file on disk (TOCTOU) and depends on `dli_fname` | **Documented** | docs (ci wave-1 `a91bbc8` `4e8d19b` `52c077f` …; rel wave-2 `53b37e1` `9399de7` `a0b396f` `2c4e877`) | accepted at Level 1 |
 | A1-29 | Observation | Level 1 PCT/POST performance and DoS considerations | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` | fixed-key CASTs |
-| A1-30 | Minor | Services use keys without key-type/mechanism consistency checks | **Pending wave-2 (abi)** | — | = H1-15 |
+| A1-30 | Minor | Services use keys without key-type/mechanism consistency checks | **Fixed (wave 2)** | — | = H1-15 |
 | A1-31 | Minor | Audit log "algorithm indicator" and tamper-evidence are not security functions in the FIPS sense | **Fixed** | state `e751482` `6ed0a17` `61f8076`; docs | keyed chain; still not a FIPS security function |
 | A1-32 | Minor | Documentation references stale file/line citations throughout | **Fixed** | docs (ci wave-1 `a91bbc8` `4e8d19b` `52c077f` …; rel wave-2 `53b37e1` `9399de7` `a0b396f` `2c4e877`) |  |
 
@@ -292,12 +290,12 @@ Cross-cutting top issues from the [consolidated summary](README.md#top-cross-cut
 
 | ID | Severity | Finding | Status | Fixed by (commit / area) | Notes |
 |---|---|---|---|---|---|
-| A2-01 | Critical | PKCS#11 v3.0 conformance claim is unsupported: no v3.0 interface, but the version fields report 3.0 | **Pending wave-2 (abi)** | docs | v3.0 interface functions (`C_GetInterfaceList`/`C_GetInterface`), `CK_FUNCTION_LIST.version` 2.40, library version |
+| A2-01 | Critical | PKCS#11 v3.0 conformance claim is unsupported: no v3.0 interface, but the version fields report 3.0 | **Fixed (wave 2)** | docs | v3.0 interface functions (`C_GetInterfaceList`/`C_GetInterface`), `CK_FUNCTION_LIST.version` 2.40, library version |
 | A2-02 | Critical | C_InitToken destroys all objects and closes all sessions before verifying the SO PIN, and does not return C… | **Fixed** | state `e751482` `6ed0a17` `61f8076` |  |
 | A2-03 | High | The Security Officer role is treated as a logged-in user for access to private objects and cryptographic op… | **Fixed** | state `e751482` `6ed0a17` `61f8076` |  |
 | A2-04 | High | C_GetAttributeValue returns CKA_VALUE for keys with CKA_SENSITIVE=TRUE when CKA_EXTRACTABLE=TRUE | **Fixed** | state `e751482` `6ed0a17` `61f8076` |  |
-| A2-05 | High | C_SetOperationState binds a restored sign/verify operation to a caller-chosen key without authorization checks | **Pending wave-2 (abi)** | — | = H1-04 |
-| A2-06 | Medium | Saved operation state loses the input for hash-then-sign/verify mechanisms, so restored operations sign a d… | **Pending wave-2 (abi)** | — | = H1-17 |
+| A2-05 | High | C_SetOperationState binds a restored sign/verify operation to a caller-chosen key without authorization checks | **Fixed (wave 2)** | — | = H1-04 |
+| A2-06 | Medium | Saved operation state loses the input for hash-then-sign/verify mechanisms, so restored operations sign a d… | **Fixed (wave 2)** | — | = H1-17 |
 | A2-07 | High | ECDSA signatures are DER-encoded instead of the PKCS#11 raw r\|\|s format | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` |  |
 | A2-08 | Medium | The ECDSA mechanism hash is ignored in single-part operations, and CKM_ECDSA hashes its input again | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` |  |
 | A2-09 | High | CKM_AES_GCM ignores CK_GCM_PARAMS (IV, AAD, tag length) and uses a non-standard output format | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` |  |
@@ -310,15 +308,15 @@ Cross-cutting top issues from the [consolidated summary](README.md#top-cross-cut
 | A2-16 | Medium | C_GenerateRandom and C_SeedRandom bypass the SP 800-90A DRBG, contrary to the documentation | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` |  |
 | A2-17 | Medium | Token-object persistence is documented and configurable but never implemented; CKA_TOKEN=TRUE objects do no… | **Fixed** | state `e751482` `6ed0a17` `61f8076` |  |
 | A2-18 | Medium | The documented hybrid X25519+ML-KEM-768 mechanism is absent, and the implemented hybrid ML-DSA+ECDSA mechan… | **Fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f`; docs | hybrid mechanism removed; docs no longer claim X25519+ML-KEM |
-| A2-19 | Low | C_Initialize does not validate CK_C_INITIALIZE_ARGS | **Pending wave-2 (abi)** | — | = H1-25 |
-| A2-20 | Low | CKU_CONTEXT_SPECIFIC and CKA_ALWAYS_AUTHENTICATE are not supported | **Pending wave-2 (abi)** | — | `CKU_CONTEXT_SPECIFIC` / `CKA_ALWAYS_AUTHENTICATE` |
-| A2-21 | Low | Object-management functions are more restrictive than the specification, and C_SetAttributeValue is not atomic | **Pending wave-2 (abi)** | — | = H1-27 |
-| A2-22 | Informational | Stub functions skip the initialization and session checks | **Pending wave-2 (abi)** | — | stub functions: initialization/session checks |
-| A2-23 | Medium | The test suite contains ABI tests that contradict the implementation and tests that codify non-conformant b… | **Pending wave-2 (abi)** | crypto (tests updated) | full test suite green; tests asserting non-conformant behaviour |
+| A2-19 | Low | C_Initialize does not validate CK_C_INITIALIZE_ARGS | **Fixed (wave 2)** | — | = H1-25 |
+| A2-20 | Low | CKU_CONTEXT_SPECIFIC and CKA_ALWAYS_AUTHENTICATE are not supported | **Fixed (wave 2)** | — | `CKU_CONTEXT_SPECIFIC` / `CKA_ALWAYS_AUTHENTICATE` |
+| A2-21 | Low | Object-management functions are more restrictive than the specification, and C_SetAttributeValue is not atomic | **Fixed (wave 2)** | — | = H1-27 |
+| A2-22 | Informational | Stub functions skip the initialization and session checks | **Fixed (wave 2)** | — | stub functions: initialization/session checks |
+| A2-23 | Medium | The test suite contains ABI tests that contradict the implementation and tests that codify non-conformant b… | **Open — not completed in wave 2** | crypto (tests updated) | full test suite green; tests asserting non-conformant behaviour |
 | A2-24 | Medium | Fuzzing does not reach authenticated states, is not run in CI, and one harness breaks the API contract | **Fixed** | ci `a52fb13`; ci `f52efe5` `0ee4b0a` `d150fc0` `6561b78` `315a716` `c6dd2e0` |  |
 | A2-25 | Medium | Known-answer coverage is thin and not at the ABI level; there are no Wycheproof, CAVP or ACVP vector sets | **Partially fixed** | crypto `39a09f5` `f9e55f2` `c9651ab` `bfad9d6` `e4f1283` `bf84685` `2c49195` `4edda08` `687897f` (`tests/crypto_abi_params.rs`) | fixed-vector CASTs; no Wycheproof/ACVP vector sets |
-| A2-26 | Low | Static-analysis hygiene: clippy fails on all targets, and CI suppresses the dominant lint | **Pending wave-2 (abi)** | ci (lint gate) | `absurd_extreme_comparisons` in session/handle.rs, `not_unsafe_ptr_arg_deref` |
-| A2-27 | Informational | Dead or unreachable code related to conformance features | **Pending wave-2 (abi)** | — | dead conformance code |
+| A2-26 | Low | Static-analysis hygiene: clippy fails on all targets, and CI suppresses the dominant lint | **Fixed (wave 2)** | ci (lint gate) | `absurd_extreme_comparisons` in session/handle.rs, `not_unsafe_ptr_arg_deref` |
+| A2-27 | Informational | Dead or unreachable code related to conformance features | **Open — not completed in wave 2** | — | dead conformance code |
 | A2-28 | Low | Documentation materially overstates the implemented PKCS#11 interface | **Fixed** | docs (ci wave-1 `a91bbc8` `4e8d19b` `52c077f` …; rel wave-2 `53b37e1` `9399de7` `a0b396f` `2c4e877`) | statements about v3.0 interface functions to be re-verified after abi wave 2 |
 
 ### A3 — Supply chain, SDLC, governance ([report](A3-supply-chain-sdlc-and-stub-inventory.md))
@@ -338,14 +336,14 @@ Cross-cutting top issues from the [consolidated summary](README.md#top-cross-cut
 | A3-11 | Medium | No SBOM, non-reproducible artifacts, and release verification docs don't match the workflow | **Partially fixed** | ci `315a716` | SBOM, SHA256SUMS, cosign, provenance; bit-for-bit reproducibility not verified |
 | A3-12 | Medium | Third-party license attribution is incorrect and incomplete; binary distributions ship no notices | **Partially fixed** | ci `7184f85` `315a716` | NOTICE/THIRD-PARTY-LICENSES in tarballs; container image still ships no LICENSE/NOTICE (`.dockerignore` excludes them — deploy owner) |
 | A3-13 | Medium | Fuzzing infrastructure is non-functional and not run | **Fixed** | ci `a52fb13` `f52efe5` |  |
-| A3-14 | Medium | UB tooling coverage is illusory, and a lint that would flag unsound FFI signatures is suppressed | **Pending wave-2 (abi)** | ci (Miri scope, lint) | `unsafe extern "C"` exports; ASan job not added |
+| A3-14 | Medium | UB tooling coverage is illusory, and a lint that would flag unsound FFI signatures is suppressed | **Fixed (wave 2)** | ci (Miri scope, lint) | `unsafe extern "C"` exports; ASan job not added |
 | A3-15 | Medium | `compute-integrity-hmac.sh` leaks the HMAC key through process arguments, contrary to its own comments | **Fixed** | admin `d35e40e` |  |
 | A3-16 | Medium | "PKCS#11 v3.0" identity claims vs a v2.40 function set; module version reported as 0.1 | **Partially fixed** | docs (ci wave-1 `a91bbc8` `4e8d19b` `52c077f` …; rel wave-2 `53b37e1` `9399de7` `a0b396f` `2c4e877`) | version fields in code pending abi |
 | A3-17 | Low | Configuration-management and versioning inconsistencies | **Partially fixed** | ci `35800a3`; rel CHANGELOG | history/signed tags are owner actions |
 | A3-18 | Low | Governance documents and enforcement are misaligned | **Fixed** | ci `85d7c8b` `cf8d1a1` `c6dd2e0` | `security@` alias + PGP key are owner actions |
-| A3-19 | Low | Library aborts the host process on DRBG failure | **Pending wave-2 (core)** | crypto (most aborts removed) | residual `abort()` in the infallible RNG adapter |
+| A3-19 | Low | Library aborts the host process on DRBG failure | **Open — not completed in wave 2** | crypto (most aborts removed) | residual `abort()` in the infallible RNG adapter |
 | A3-20 | Low | Silently discarded results in security-relevant paths | **Partially fixed** | state `e751482` `6ed0a17` `61f8076` (`login_all` rollback) | audit `record` results still discarded on the ABI path (abi) |
-| A3-21 | Low | Test and documentation evidence that would not survive lab scrutiny | **Pending wave-2 (abi)** | — | `#[ignore]` RSA keygen test, post-free reads in `tests/zeroization.rs`, interop default PINs, interop tests not in CI |
+| A3-21 | Low | Test and documentation evidence that would not survive lab scrutiny | **Open — not completed in wave 2** | — | `#[ignore]` RSA keygen test, post-free reads in `tests/zeroization.rs`, interop default PINs, interop tests not in CI |
 | A3-22 | Low | Documentation-build tooling is unmaintained and unpinned; generated PDF committed | **Partially fixed** | ci `31f1622` | stale PDF removed; root `package.json` still unpinned without lockfile (unassigned) |
 | A3-23 | Low | Committed local agent settings; crate package ships non-source content | **Fixed** | ci `0c9b821` `6561b78`; rel `08877de` |  |
 | A3-24 | Low | `unsafe` code documentation and soundness nits outside the ABI layer | **Partially fixed** | docs | claims corrected; `digest.rs` const assert, `AwsLcHasher` unsafe impls, SAFETY comments in integrity.rs pending core |
