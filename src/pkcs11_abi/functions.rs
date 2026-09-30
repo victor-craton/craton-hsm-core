@@ -1921,6 +1921,14 @@ pub unsafe extern "C" fn C_CreateObject(
             Ok(v) => v.unwrap_or(true),
             Err(rv) => return rv,
         };
+        // EC keys must name a supported curve (A1-25): an unusable key is
+        // refused at creation instead of failing at first use.
+        if let Some((_, params)) = template.iter().find(|(t, _)| *t == CKA_EC_PARAMS) {
+            let is_ec = matches!(template_ulong(&template, CKA_KEY_TYPE), Ok(Some(CKK_EC)));
+            if is_ec && sign::EcCurve::from_ec_params(params).is_none() {
+                return CKR_CURVE_NOT_SUPPORTED;
+            }
+        }
         let ctx = {
             let s = sess.read();
             let mut probe = StoredObject::new(1, class);
